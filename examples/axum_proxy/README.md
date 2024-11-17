@@ -1,0 +1,411 @@
+# WebSocket Broadcasting Server Example
+
+This server implements a pub/sub system that:
+
+1. Accepts WebSocket connections from downstream clients
+2. Manages topic-based subscriptions (orderbook, trades, tickers)
+3. Maintains a persistent connection to an upstream WebSocket server (Bybit)
+4. Efficiently broadcasts messages to subscribed clients using tokio broadcast channels
+
+## Detailed Implementation Analysis
+
+### Core Data Structures
+
+#### Topic Implementation
+
+```rust
+struct Topic<'a> {
+    symbol: Cow<'a, str>,
+    name: Cow<'a, str>,
+    levels: Option<u8>,
+}
+```
+
+The `Topic` struct uses generic lifetime parameters and `Cow<str>` for several reasons:
+
+1. `Cow` (Clone-on-Write) enables zero-copy operations when strings are static (like hardcoded topics) while allowing owned `String` when needed (like dynamic user input)
+2. The lifetime parameter `'a` makes the struct flexible for both static and dynamic lifetimes
+3. `levels` is `Option<u8>` because:
+   - It's only relevant for orderbook subscriptions
+   - u8 is sufficient for depth levels (max 255)
+   - Keeps memory footprint minimal
+
+#### Topic Parsing
+
+```rust
+impl<'a> TryFrom<&'a str> for Topic<'a> {
+    type Error = ();
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        let mut parts = s.split('.');
+        let name = parts.next().ok_or(())?;
+        let second = parts.next().ok_or(())?;
+
+        if name == "orderbook" {
+            let levels = second.parse().map_err(|_| ())?;
+            let symbol = parts.next().ok_or(())?;
+
+            Ok(Topic {
+                symbol: Cow::from(symbol),
+                name: Cow::from(name),
+                levels: Some(levels),
+            })
+        } else {
+            Ok(Topic {
+                symbol: Cow::from(second),
+                name: Cow::from(name),
+                levels: None,
+            })
+        }
+    }
+}
+```
+
+This implementation:
+
+1. Uses `TryFrom` trait for robust string parsing
+2. Handles two format types:
+   - `orderbook.50.BTCUSDT` for orderbook subscriptions
+   - `publicTrade.BTCUSDT` for other subscriptions
+3. Returns `Result` with unit error type since detailed error handling is handled at a higher level
+4. Preserves zero-copy string handling through `Cow`
+
+### Connection Management
+
+#### Server Initialization
+
+```rust
+async fn server() -> io::Result<()> {
+    let (tx, rx) = unbounded_channel();
+    let state = Arc::new(AppState::new(tx));
+    let router = Router::new()
+        .route("/ws", get(on_websocket))
+        .with_state(Arc::clone(&state));
+
+    tokio::spawn(async move { connect_upstream(rx, state).await });
+
+    let listener = TcpListener::bind("0.0.0.0:3001").await?;
+    axum::serve(listener, router).await
+}
+```
+
+Design decisions:
+
+1. Uses `unbounded_channel` for upstream communication because:
+   - Subscription messages are infrequent
+   - Back-pressure isn't critical for subscription handling
+   - Simplifies error handling
+2. `Arc<AppState>` enables safe shared state across tasks
+3. Spawns upstream connection in separate task for isolation
+
+#### WebSocket Upgrade Handler
+
+```rust
+async fn on_websocket(
+    State(state): State<Arc<AppState>>,
+    ws: IncomingUpgrade,
+) -> impl IntoResponse {
+    let options = Options::default()
+        .with_compression_level(CompressionLevel::best())
+        .with_max_payload_read(8192);
+
+    let (response, fut) = ws.upgrade(options).unwrap();
+    tokio::task::spawn(async move {
+        if let Err(e) = on_websocket_client(state, fut).await {
+            log::error!("websocket: {}", e);
+        }
+    });
+
+    response
+}
+```
+
+Key features:
+
+1. WebSocket compression enabled for bandwidth efficiency
+2. 8KB payload limit prevents memory exhaustion attacks
+3. Spawns each client in separate task for:
+   - Connection isolation
+   - Independent error handling
+   - Parallel processing
+
+### Client Message Handling
+
+#### Client Connection Handler
+
+```rust
+async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Result<()> {
+    let mut ws = fut.await?;
+    let mut streams = StreamMap::new();
+
+    loop {
+        tokio::select! {
+            Some((_, res)) = streams.next() => {
+                match res {
+                    Ok(input) => {
+                        let _ = ws.send(FrameView::text(input)).await;
+                    }
+                    Err(_) => {
+                        // Stream error handling
+                    }
+                }
+            }
+            maybe_frame = ws.next() => {
+                // Handle client messages
+            }
+        }
+    }
+}
+```
+
+Implementation highlights:
+
+1. Uses `StreamMap` to:
+   - Efficiently multiplex multiple broadcast streams
+   - Associate messages with their topics
+   - Handle stream errors independently
+2. `tokio::select!` enables concurrent handling of:
+   - Incoming client messages
+   - Broadcast messages from subscribed topics
+
+#### Subscription Processing
+
+```rust
+fn on_subscription(
+    state: &AppState,
+    streams: &mut StreamMap<Topic<'static>, BroadcastStream<Bytes>>,
+    sub: UserSubscribe,
+) -> Result<(), String> {
+    // Topic validation
+    if !["orderbook", "publicTrade", "ticker"].contains(&sub.topic.as_str()) {
+        return Err(format!("unknown topic: {}", sub.topic));
+    }
+
+    let topic = Topic {
+        symbol: Cow::from(sub.symbol),
+        name: Cow::from(sub.topic),
+        levels: sub.levels,
+    };
+
+    match sub.method.as_str() {
+        "subscribe" => {
+            let mut topics = state.topics.write().unwrap();
+            if let Some(tx) = topics.get(&topic) {
+                let rx = tx.subscribe();
+                streams.insert(topic, BroadcastStream::new(rx));
+            } else {
+                let tx = broadcast::Sender::new(1024);
+                topics.insert(topic.clone(), tx.clone());
+                drop(topics); // Release lock before upstream communication
+
+                let rx = tx.subscribe();
+                streams.insert(topic.clone(), BroadcastStream::new(rx));
+                let _ = state.upstream.send(Subscription::Sub(topic));
+            }
+        }
+        "unsubscribe" => {
+            streams.remove(&topic);
+            unsubscribe_user(&state, topic);
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+```
+
+Subscription handling details:
+
+1. Early topic validation prevents invalid subscriptions
+2. Write lock scope is minimized for better concurrency
+3. Channel capacity of 1024 messages balances:
+   - Memory usage
+   - Message buffering needs
+   - Slow consumer handling
+4. Explicit lock dropping before upstream communication prevents deadlocks
+
+### Upstream Connection Management
+
+#### Upstream Connection Handler
+
+```rust
+async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<AppState>) {
+    let base_url: Url = "wss://stream.bybit.com/v5/public/linear".parse().unwrap();
+    let client = reqwest::Client::new();
+
+    loop {
+        // Connection logic
+        let mut ws = match timeout(
+            Duration::from_secs(5),
+            WebSocket::reqwest(base_url.clone(), client.clone(), Options::default())
+        ).await {
+            Ok(res) => res.expect("WebSocket upgrade"),
+            Err(err) => {
+                log::error!("Unable to connect upstream ({base_url}): {err}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let mut next_id = 0;
+        // Resubscription logic
+        let subscriptions: Vec<Topic<'static>> = {
+            let topics = state.topics.read().unwrap();
+            topics.keys().cloned().collect()
+        };
+
+        // Message handling loop
+        let mut ping_ticker = interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                // Subscription handling
+                // Message processing
+                // Connection health monitoring
+            }
+        }
+    }
+}
+```
+
+Important features:
+
+1. Connection management:
+   - 5-second connection timeout
+   - 2-second reconnection delay
+   - Automatic resubscription
+2. Message ID management:
+   - Monotonically increasing IDs
+   - Per-connection ID space
+3. Connection health:
+   - 5-second ping interval
+   - Automatic reconnection on failure
+4. Efficient state handling:
+   - Minimal lock holding
+   - Batch resubscription
+   - Stateless reconnection
+
+### Message Processing
+
+#### Upstream Message Handler
+
+```rust
+fn on_upstream_message(state: &AppState, frame: FrameView) {
+    match serde_json::from_slice::<BybitMsg>(&frame.payload) {
+        Ok(ok) => {
+            let topic = Topic::try_from(ok.topic).expect("topic");
+            let topics = state.topics.read().unwrap();
+            if let Some(tx) = topics.get(&topic).cloned() {
+                let _ = tx.send(frame.payload);
+            }
+        }
+        Err(err) => {
+            // Handle control messages
+            match serde_json::from_slice::<BybitSub>(&frame.payload) {
+                Ok(ok) => {
+                    log::debug!("{} completed", ok.op);
+                }
+                Err(err) => {
+                    let text = std::str::from_utf8(&frame.payload).unwrap();
+                    log::warn!("{}: {}", err, text);
+                }
+            }
+        },
+    }
+}
+```
+
+Processing details:
+
+1. Two-phase message parsing:
+   - First attempt: data messages
+   - Second attempt: control messages
+2. Zero-copy message forwarding:
+   - Uses `frame.payload` directly
+   - Avoids unnecessary copying
+3. Minimal lock holding:
+   - Read lock only for channel lookup
+   - Channel cloned before message send
+
+### Performance Optimizations
+
+1. Memory Management:
+
+   - Zero-copy message handling with `Bytes`
+   - `Cow<str>` for string data
+   - Bounded broadcast channels
+   - Explicit drop of unused resources
+
+2. Lock Optimization:
+
+   - Minimal lock scope
+   - Read locks preferred over write locks
+   - Lock-free message broadcasting
+
+3. Task Management:
+
+   - Independent client tasks
+   - Dedicated upstream task
+   - Efficient task cancellation
+
+4. Resource Cleanup:
+   - Automatic topic cleanup
+   - Connection resource cleanup
+   - Memory leak prevention
+
+## Error Handling Strategy
+
+1. Connection Errors:
+
+   - Timeout handling
+   - Automatic reconnection
+   - Error logging and metrics
+
+2. Message Processing:
+
+   - Parse error recovery
+   - Invalid message handling
+   - Channel send error handling
+
+3. Resource Exhaustion:
+   - Message size limits
+   - Channel capacity limits
+   - Connection limits
+
+## Testing Considerations
+
+1. Unit Tests:
+
+   - Topic parsing
+   - Message handling
+   - State management
+
+2. Integration Tests:
+
+   - Connection handling
+   - Subscription flow
+   - Error scenarios
+
+3. Load Tests:
+   - Connection scalability
+   - Message throughput
+   - Memory usage
+
+## Production Considerations
+
+1. Monitoring:
+
+   - Connection status
+   - Message latency
+   - Error rates
+   - Resource usage
+
+2. Configuration:
+
+   - Channel capacities
+   - Timeout values
+   - Reconnection parameters
+
+3. Security:
+   - Message validation
+   - Rate limiting
+   - Resource limits

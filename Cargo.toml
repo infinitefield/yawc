@@ -44,7 +44,7 @@ required-features = ["axum"]
 
 [[example]]
 name = "axum_proxy"
-path = "examples/axum_proxy.rs"
+path = "examples/axum_proxy/main.rs"
 required-features = ["axum", "reqwest", "json"]
 
 [dependencies]
@@ -100,7 +100,10 @@ anyhow = "1.0.91"
 axum = "0.7.7"
 hyper = { version = "1.5.0", features = ["http1", "server", "client"] }
 log = "0.4.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "rustls-tls-webpki-roots",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 simple_logger = "5.0.0"
