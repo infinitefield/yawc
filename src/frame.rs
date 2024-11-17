@@ -1,0 +1,483 @@
+//! # Frame
+//!
+//! The `frame` module implements WebSocket frames as defined in [RFC 6455](https://tools.ietf.org/html/rfc6455#section-5.2),
+//! providing the core building blocks for WebSocket communication. Each frame represents an atomic unit of data transmission,
+//! containing both the payload and protocol-level metadata.
+//!
+//! ## Overview of WebSocket Frames
+//!
+//! WebSocket messages are transmitted as a sequence of frames. The module provides two main frame implementations:
+//!
+//! - [`Frame`]: Full mutable frame with all protocol metadata and masking capabilities
+//! - [`FrameView`]: Lightweight immutable view optimized for efficient frame handling
+//!
+//! ### Frame Binary Format
+//!
+//! ```text
+//! 0                   1                   2                   3
+//! 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//! +-+-+-+-+-------+-+-------------+-------------------------------+
+//! |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+//! |I|S|S|S|  (4)  |A|     (7)    |             (16/64)          |
+//! |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+//! | |1|2|3|       |K|             |                               |
+//! +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+//! |     Extended payload length continued, if payload len == 127  |
+//! + - - - - - - - - - - - - - - - +-------------------------------+
+//! |                               |Masking-key, if MASK set to 1  |
+//! +-------------------------------+-------------------------------+
+//! | Masking-key (continued)       |          Payload Data        |
+//! +-------------------------------- - - - - - - - - - - - - - - - +
+//! :                     Payload Data continued ...                :
+//! + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+//! |                     Payload Data continued ...                |
+//! +---------------------------------------------------------------+
+//! ```
+//!
+//! Frames come in two categories:
+//!
+//! - **Data Frames**: Carry application payload with `OpCode::Text` (UTF-8 text) or `OpCode::Binary` (raw bytes)
+//! - **Control Frames**: Manage the connection with:
+//!   - `OpCode::Close`: Initiates connection closure with optional status code and reason
+//!   - `OpCode::Ping`: Checks connection liveness, requires a Pong response
+//!   - `OpCode::Pong`: Responds to Ping frames
+//!
+//! ## Frame Structure
+//!
+//! The [`Frame`] struct implements the full WebSocket frame format with:
+//!
+//! - `fin`: Final fragment flag (1 bit)
+//! - `opcode`: Frame type identifier (4 bits)
+//! - `mask`: Optional 32-bit XOR masking key
+//! - `payload`: Frame data as `BytesMut`
+//! - `is_compressed`: Per-message compression flag (1 bit, RSV1)
+//!
+//! While [`FrameView`] provides an optimized immutable view with just:
+//!
+//! - `opcode`: Frame type identifier
+//! - `payload`: Immutable frame data as `Bytes`
+//!
+//! ### Frame Construction
+//!
+//! The module provides ergonomic constructors via [`FrameView`] for common frame types:
+//!
+//! ```rust
+//! use yawc::frame::FrameView;
+//! use bytes::BytesMut;
+//!
+//! // Text frame with UTF-8 payload
+//! let text_frame = FrameView::text("Hello, WebSocket!");
+//!
+//! // Control frames
+//! let ping = FrameView::ping(BytesMut::new());
+//! let close = FrameView::close(1000, b"Normal closure"); // Status code + reason
+//! ```
+//!
+//! ## Frame Processing
+//!
+//! Frames support automatic masking (required for client-to-server messages) and optional
+//! per-message compression via the WebSocket permessage-deflate extension. The module handles:
+//!
+//! - Frame header parsing and serialization
+//! - Payload masking/unmasking
+//! - Message fragmentation
+//! - UTF-8 validation for text frames
+//!
+//! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://tools.ietf.org/html/rfc6455#section-5).
+use bytes::{Bytes, BytesMut};
+
+use crate::{close::CloseCode, WebSocketError};
+
+/// WebSocket operation code (OpCode) that determines the semantic meaning and handling of a frame.
+///
+/// Each variant represents a distinct frame type in the WebSocket protocol:
+///
+/// # Data Frame OpCodes
+/// - `Continuation`: Continues a fragmented message started by another data frame
+/// - `Text`: Contains UTF-8 encoded text data
+/// - `Binary`: Contains raw binary data
+///
+/// # Control Frame OpCodes
+/// - `Close`: Initiates or confirms connection closure
+/// - `Ping`: Tests connection liveness, requiring a `Pong` response
+/// - `Pong`: Responds to a `Ping` frame
+///
+/// The numeric values for each OpCode are defined in [RFC 6455, Section 11.8](https://datatracker.ietf.org/doc/html/rfc6455#section-11.8):
+/// - Continuation = 0x0
+/// - Text = 0x1
+/// - Binary = 0x2
+/// - Close = 0x8
+/// - Ping = 0x9
+/// - Pong = 0xA
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum OpCode {
+    Continuation,
+    Text,
+    Binary,
+    Close,
+    Ping,
+    Pong,
+}
+
+impl OpCode {
+    /// Returns `true` if the `OpCode` represents a control frame (`Close`, `Ping`, or `Pong`).
+    ///
+    /// Control frames are used to manage the connection state and cannot be fragmented.
+    pub fn is_control(&self) -> bool {
+        matches!(*self, OpCode::Close | OpCode::Ping | OpCode::Pong)
+    }
+}
+
+impl TryFrom<u8> for OpCode {
+    type Error = WebSocketError;
+
+    /// Attempts to convert a byte value into an `OpCode`, returning an error if the byte does not match any valid `OpCode`.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x0 => Ok(Self::Continuation),
+            0x1 => Ok(Self::Text),
+            0x2 => Ok(Self::Binary),
+            0x8 => Ok(Self::Close),
+            0x9 => Ok(Self::Ping),
+            0xA => Ok(Self::Pong),
+            _ => Err(WebSocketError::InvalidOpCode(value)),
+        }
+    }
+}
+
+impl From<OpCode> for u8 {
+    /// Converts an `OpCode` into its corresponding byte representation.
+    fn from(val: OpCode) -> Self {
+        match val {
+            OpCode::Continuation => 0x0,
+            OpCode::Text => 0x1,
+            OpCode::Binary => 0x2,
+            OpCode::Close => 0x8,
+            OpCode::Ping => 0x9,
+            OpCode::Pong => 0xA,
+        }
+    }
+}
+
+/// A lightweight view of a WebSocket frame, containing just the opcode and payload.
+/// This struct provides a more efficient, immutable representation of frame data
+/// compared to the full `Frame` struct.
+#[derive(Clone)]
+pub struct FrameView {
+    /// The operation code indicating the type of frame
+    pub opcode: OpCode,
+    /// The frame's payload data as immutable bytes
+    pub payload: Bytes,
+}
+
+impl FrameView {
+    /// Creates a new immutable text frame view with the given payload.
+    /// The payload is converted to immutable `Bytes`.
+    pub fn text(payload: impl Into<Bytes>) -> Self {
+        Self {
+            opcode: OpCode::Text,
+            payload: payload.into(),
+        }
+    }
+
+    /// Creates a new immutable binary frame view with the given payload.
+    /// The payload is converted to immutable `Bytes`.
+    pub fn binary(payload: impl Into<Bytes>) -> Self {
+        Self {
+            opcode: OpCode::Binary,
+            payload: payload.into(),
+        }
+    }
+
+    /// Creates a new immutable close frame view with a close code and reason.
+    /// Constructs the close frame payload by combining the code and reason bytes.
+    pub fn close(code: CloseCode, reason: impl AsRef<[u8]>) -> Self {
+        let code16 = u16::from(code);
+        let reason: &[u8] = reason.as_ref();
+        let mut payload = Vec::with_capacity(2 + reason.len());
+        payload.extend_from_slice(&code16.to_be_bytes());
+        payload.extend_from_slice(&reason);
+
+        Self {
+            opcode: OpCode::Close,
+            payload: payload.into(),
+        }
+    }
+
+    /// Creates a new immutable ping frame view with the given payload.
+    /// Used to create ping messages to check connection liveness.
+    pub fn ping(payload: impl Into<Bytes>) -> Self {
+        Self {
+            opcode: OpCode::Ping,
+            payload: payload.into(),
+        }
+    }
+
+    /// Creates a new immutable pong frame view with the given payload.
+    /// Used to respond to ping messages.
+    pub fn pong(payload: impl Into<Bytes>) -> Self {
+        Self {
+            opcode: OpCode::Pong,
+            payload: payload.into(),
+        }
+    }
+
+    /// Creates a new immutable close frame view with a raw payload.
+    /// Allows creating close frames without enforcing code/reason structure.
+    pub fn close_raw(payload: impl Into<Bytes>) -> Self {
+        Self {
+            opcode: OpCode::Close,
+            payload: payload.into(),
+        }
+    }
+}
+
+/// Converts a `FrameView` into a tuple of `(OpCode, Bytes)`.
+///
+/// This allows destructuring a frame view into its component parts while
+/// maintaining ownership of both the opcode and payload.
+impl From<FrameView> for (OpCode, Bytes) {
+    fn from(val: FrameView) -> Self {
+        (val.opcode, val.payload)
+    }
+}
+
+/// Converts a tuple of `(OpCode, Bytes)` to a `FrameView`.
+///
+/// This allows constructing a `FrameView` from an opcode and immutable bytes payload.
+impl From<(OpCode, Bytes)> for FrameView {
+    fn from((opcode, payload): (OpCode, Bytes)) -> Self {
+        Self { opcode, payload }
+    }
+}
+
+/// Converts a tuple of `(OpCode, BytesMut)` to a `FrameView`.
+///
+/// This allows constructing a `FrameView` from an opcode and mutable bytes payload,
+/// automatically freezing the bytes into an immutable form.
+impl From<(OpCode, BytesMut)> for FrameView {
+    fn from((opcode, payload): (OpCode, BytesMut)) -> Self {
+        Self {
+            opcode,
+            payload: payload.freeze(),
+        }
+    }
+}
+
+/// Converts a full `Frame` into a `FrameView` by extracting just the opcode and
+/// freezing the payload into immutable bytes.
+impl From<Frame> for FrameView {
+    fn from(value: Frame) -> Self {
+        Self::from((value.opcode, value.payload))
+    }
+}
+
+/// Represents a WebSocket frame, encapsulating the data and metadata for message transmission.
+///
+/// **Note: This low-level struct should rarely be used directly.** Most users should interact with the
+/// higher-level WebSocket message APIs instead. Direct frame manipulation should only be needed in
+/// specialized cases where fine-grained control over the WebSocket protocol is required.
+///
+/// A WebSocket frame is the fundamental unit of communication in the WebSocket protocol, carrying both
+/// the payload data and essential metadata. Frames can be categorized into two types:
+///
+/// 1. **Data Frames**
+///    - Text frames containing UTF-8 encoded text
+///    - Binary frames containing raw data
+///    - Continuation frames for message fragmentation
+///
+/// 2. **Control Frames**
+///    - Close frames for connection termination
+///    - Ping frames for connection liveness checks
+///    - Pong frames for responding to pings
+///
+/// # Creating Frames
+///
+/// While frames can be constructed directly, it's recommended to use the provided factory methods:
+/// ```rust
+/// use yawc::frame::FrameView;
+///
+/// let text_frame = FrameView::text("Hello");
+/// let binary_frame = FrameView::binary(vec![1, 2, 3]);
+/// let ping_frame = FrameView::ping(vec![]);
+/// let close_frame = FrameView::close(1000, b"Goodbye");
+/// ```
+///
+/// # Fields
+/// - `fin`: Final fragment flag. When `true`, indicates this frame completes a message.
+/// - `opcode`: Defines the frame type and interpretation (text, binary, control, etc).
+/// - `mask`: Optional 32-bit XOR masking key required for client-to-server messages.
+/// - `payload`: Frame payload data stored as dynamically sized bytes.
+pub struct Frame {
+    /// Indicates if this is the final frame in a message.
+    pub fin: bool,
+    /// The opcode of the frame, defining its type.
+    pub opcode: OpCode,
+    /// Flag indicating whether the payload is compressed.
+    pub(super) is_compressed: bool,
+    /// The masking key for the frame, if any, used for security in client-to-server frames.
+    mask: Option<[u8; 4]>,
+    /// The payload of the frame, containing the actual data.
+    pub payload: BytesMut,
+}
+
+/// Converts a `FrameView` into a `Frame`.
+///
+/// The resulting `Frame` will have:
+/// - `fin` set to `true` (final frame)
+/// - The same opcode as the `FrameView`
+/// - No masking key
+/// - The same payload as the `FrameView`
+impl From<FrameView> for Frame {
+    fn from(value: FrameView) -> Self {
+        Frame::new(true, value.opcode, None, value.payload)
+    }
+}
+
+pub(crate) const MAX_HEAD_SIZE: usize = 16;
+
+impl Frame {
+    /// Creates a new WebSocket `Frame`.
+    ///
+    /// # Parameters
+    /// - `fin`: Indicates if this frame is the final fragment in a message.
+    /// - `opcode`: The operation code of the frame, defining its type (e.g., Text, Binary, Close).
+    /// - `mask`: Optional 4-byte masking key, typically used in client-to-server frames.
+    /// - `payload`: The frame payload data.
+    ///
+    /// # Returns
+    /// A new instance of `Frame` with the specified parameters.
+    pub fn new(
+        fin: bool,
+        opcode: OpCode,
+        mask: Option<[u8; 4]>,
+        payload: impl Into<BytesMut>,
+    ) -> Self {
+        Self {
+            fin,
+            opcode,
+            mask,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a new frame with compression enabled.
+    ///
+    /// Similar to `new`, but sets the compression flag to indicate the payload
+    /// has been compressed using the permessage-deflate extension.
+    ///
+    /// # Parameters
+    /// - `fin`: Indicates if this frame is the final fragment in a message.
+    /// - `opcode`: The operation code of the frame, defining its type.
+    /// - `mask`: Optional 4-byte masking key for client-to-server frames.
+    /// - `payload`: The compressed frame payload data.
+    pub fn compress(
+        fin: bool,
+        opcode: OpCode,
+        mask: Option<[u8; 4]>,
+        payload: impl Into<BytesMut>,
+    ) -> Self {
+        Self {
+            fin,
+            opcode,
+            mask,
+            payload: payload.into(),
+            is_compressed: true,
+        }
+    }
+
+    /// Creates a new WebSocket close frame with a raw payload.
+    ///
+    /// This method does not validate if `payload` is a valid close frame payload.
+    pub fn close_raw<T: AsRef<[u8]>>(payload: T) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Close,
+            mask: None,
+            is_compressed: false,
+            payload: BytesMut::from(payload.as_ref()),
+        }
+    }
+
+    /// Checks if the frame payload is valid UTF-8.
+    ///
+    /// # Returns
+    /// - `true` if the payload is valid UTF-8.
+    /// - `false` otherwise.
+    #[inline(always)]
+    pub fn is_utf8(&self) -> bool {
+        std::str::from_utf8(&self.payload).is_ok()
+    }
+
+    /// Returns whether the frame is masked.
+    ///
+    /// # Returns
+    /// - `true` if the frame has a masking key.
+    /// - `false` otherwise.
+    #[inline(always)]
+    pub(super) fn is_masked(&self) -> bool {
+        self.mask.is_some()
+    }
+
+    /// Masks the payload using a masking key.
+    ///
+    /// If no masking key is set, a random key is generated and applied.
+    pub(super) fn mask(&mut self) {
+        let payload = &mut self.payload;
+        if let Some(mask) = self.mask {
+            crate::mask::apply_mask(payload, mask);
+        } else {
+            let mask: [u8; 4] = rand::random();
+            crate::mask::apply_mask(payload, mask);
+            self.mask = Some(mask);
+        }
+    }
+
+    /// Unmasks the payload.
+    ///
+    /// This reverses any masking applied to the payload using the existing masking key.
+    pub(super) fn unmask(&mut self) {
+        if let Some(mask) = self.mask.take() {
+            let payload = &mut self.payload;
+            crate::mask::apply_mask(payload, mask);
+        }
+    }
+
+    /// Formats the frame header into the provided `head` buffer and returns the size of the length field.
+    ///
+    /// # Parameters
+    /// - `head`: The buffer to hold the formatted frame header.
+    ///
+    /// # Returns
+    /// - The size of the length field (0, 2, 4, or 10 bytes).
+    ///
+    /// # Panics
+    /// Panics if `head` is not large enough to hold the formatted header.
+    pub(super) fn fmt_head(&self, head: &mut [u8]) -> usize {
+        let compression = u8::from(self.is_compressed);
+        head[0] = (self.fin as u8) << 7 | compression << 6 | u8::from(self.opcode);
+
+        let len = self.payload.len();
+        let size = if len < 126 {
+            head[1] = len as u8;
+            2
+        } else if len < 65536 {
+            head[1] = 126;
+            head[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+            4
+        } else {
+            head[1] = 127;
+            head[2..10].copy_from_slice(&(len as u64).to_be_bytes());
+            10
+        };
+
+        if let Some(mask) = self.mask {
+            head[1] |= 0x80;
+            head[size..size + 4].copy_from_slice(&mask);
+            size + 4
+        } else {
+            size
+        }
+    }
+}
