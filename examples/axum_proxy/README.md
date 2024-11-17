@@ -9,6 +9,17 @@ This server implements a pub/sub system that:
 
 ## Detailed Implementation Analysis
 
+### Basic Usage
+
+```bash
+# Start the server
+cargo run
+
+# Connect using WebSocket client utility
+yawcc c ws://localhost:3001/ws --input-as-json
+> {"method":"subscribe","symbol":"BTCUSDT","topic":"orderbook","levels":50}
+```
+
 ### Core Data Structures
 
 #### Topic Implementation
@@ -326,6 +337,249 @@ Processing details:
    - Read lock only for channel lookup
    - Channel cloned before message send
 
+# Channel Selection Strategy and Snapshot Management
+
+## Channel Architecture Deep Dive
+
+### Understanding tokio's Channel Types
+
+The implementation uses `broadcast::Sender/Receiver` for message distribution, but let's analyze why this was chosen and what other options were available:
+
+```rust
+struct AppState {
+    // Current implementation
+    topics: RwLock<HashMap<Topic<'static>, broadcast::Sender<Bytes>>>,
+
+    // Alternative approach with mpsc
+    // topics: RwLock<HashMap<Topic<'static>, Vec<UnboundedSender<Bytes>>>>,
+}
+```
+
+#### Why broadcast::Sender?
+
+1. **Memory Efficiency**
+
+```rust
+// With broadcast
+let tx = broadcast::Sender::new(1024);
+let rx1 = tx.subscribe();
+let rx2 = tx.subscribe();
+
+// vs mpsc approach
+let mut senders = Vec::new();
+for _ in 0..n_subscribers {
+    let (tx, rx) = mpsc::unbounded_channel();
+    senders.push(tx);
+}
+```
+
+The broadcast channel:
+
+- Maintains a single circular buffer for all receivers
+- Uses atomic operations for message distribution
+- Has O(1) message sending regardless of subscriber count
+
+2. **Message Guarantees**
+
+```rust
+// Broadcast ensures all active subscribers get the message
+let _ = tx.send(msg);  // Single send operation
+
+// vs mpsc where you'd need
+for tx in &senders {
+    let _ = tx.send(msg.clone());  // N send operations, N clones
+}
+```
+
+3. **Resource Management**
+
+```rust
+// Broadcast automatically handles dropped receivers
+let rx = tx.subscribe();
+drop(rx);  // Sender automatically updates receiver count
+
+// vs mpsc where you need manual cleanup
+senders.retain(|tx| !tx.is_closed());
+```
+
+### Limitations of Current Implementation
+
+The current design has one significant limitation: it doesn't handle market data snapshots properly. Let's explore why this matters and how to fix it.
+
+#### The Snapshot Problem
+
+In market data systems:
+
+1. Initial state (snapshot) represents current market state
+2. Delta updates modify this state
+3. New subscribers need both:
+   - Current snapshot
+   - Subsequent updates
+
+Current implementation only handles updates:
+
+```rust
+fn on_subscription(
+    state: &AppState,
+    streams: &mut StreamMap<Topic<'static>, BroadcastStream<Bytes>>,
+    sub: UserSubscribe,
+) -> Result<(), String> {
+    // Current implementation only handles update stream
+    let tx = broadcast::Sender::new(1024);
+    topics.insert(topic.clone(), tx.clone());
+    // New subscribers might miss initial state
+}
+```
+
+### Improved Design with Snapshot Support
+
+Here's how we can enhance the implementation to handle snapshots properly:
+
+```rust
+/// Enhanced application state with snapshot support
+struct ImprovedAppState {
+    // For real-time updates
+    topics: RwLock<HashMap<Topic<'static>, broadcast::Sender<Bytes>>>,
+    // For current market state
+    snapshots: RwLock<HashMap<Topic<'static>, watch::Sender<Option<Bytes>>>>,
+}
+
+/// Enhanced subscription data
+struct TopicSubscription {
+    updates: broadcast::Receiver<Bytes>,
+    snapshot: watch::Receiver<Option<Bytes>>,
+}
+```
+
+#### Using watch::Sender for Snapshots
+
+The `watch` channel is ideal for snapshots because:
+
+1. Always maintains latest value
+2. New subscribers automatically get current state
+3. Memory efficient (only stores latest value)
+
+Implementation example:
+
+```rust
+impl ImprovedAppState {
+    fn subscribe(&self, topic: &Topic<'static>) -> Result<TopicSubscription, Error> {
+        let topics = self.topics.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap();
+
+        let updates = topics.get(topic)
+            .ok_or(Error::TopicNotFound)?
+            .subscribe();
+
+        let snapshot = snapshots.get(topic)
+            .ok_or(Error::TopicNotFound)?
+            .subscribe();
+
+        Ok(TopicSubscription { updates, snapshot })
+    }
+
+    fn update_snapshot(&self, topic: &Topic<'static>, data: Bytes) -> Result<(), Error> {
+        let snapshots = self.snapshots.write().unwrap();
+        if let Some(sender) = snapshots.get(topic) {
+            sender.send(Some(data))?;
+        }
+        Ok(())
+    }
+}
+
+/// Enhanced client handler
+async fn handle_client_subscription(
+    state: &ImprovedAppState,
+    topic: Topic<'static>,
+) -> Result<(), Error> {
+    let TopicSubscription { mut updates, mut snapshot } = state.subscribe(&topic)?;
+
+    // First, get current state
+    if let Some(current_state) = *snapshot.borrow() {
+        // Send snapshot to client
+        send_to_client(current_state).await?;
+    }
+
+    // Then listen for updates
+    while let Ok(update) = updates.recv().await {
+        send_to_client(update).await?;
+    }
+
+    Ok(())
+}
+```
+
+#### Snapshot Synchronization
+
+To ensure data consistency, we need to handle the gap between snapshot and updates:
+
+```rust
+struct MarketDataSequence {
+    sequence: u64,
+    data: Bytes,
+}
+
+async fn synchronized_subscription(
+    state: &ImprovedAppState,
+    topic: Topic<'static>,
+) -> Result<(), Error> {
+    let TopicSubscription { mut updates, mut snapshot } = state.subscribe(&topic)?;
+
+    // Get initial sequence from snapshot
+    let initial_seq = snapshot.borrow().as_ref()
+        .and_then(|data| parse_sequence(data))
+        .ok_or(Error::NoSnapshot)?;
+
+    // Buffer updates while processing snapshot
+    let mut buffer = Vec::new();
+
+    loop {
+        match updates.recv().await? {
+            update if parse_sequence(&update) <= initial_seq => {
+                // Discard updates older than snapshot
+                continue;
+            }
+            update => {
+                buffer.push(update);
+                break;
+            }
+        }
+    }
+
+    // Process buffered updates in sequence
+    for update in buffer {
+        send_to_client(update).await?;
+    }
+
+    // Continue with real-time updates
+    while let Ok(update) = updates.recv().await {
+        send_to_client(update).await?;
+    }
+
+    Ok(())
+}
+```
+
+### Performance Implications
+
+The enhanced design with snapshot support has these characteristics:
+
+1. Memory Usage:
+
+   - broadcast channels: O(N) where N is buffer size
+   - watch channels: O(1) per topic
+   - Total: O(T \* (N + 1)) where T is topic count
+
+2. CPU Usage:
+
+   - Snapshot updates: O(1)
+   - Real-time updates: O(S) where S is subscriber count
+   - Snapshot retrieval: O(1)
+
+3. Latency:
+   - First message: Higher (snapshot + sync)
+   - Subsequent messages: Same as before
+
 ### Performance Optimizations
 
 1. Memory Management:
@@ -351,61 +605,3 @@ Processing details:
    - Automatic topic cleanup
    - Connection resource cleanup
    - Memory leak prevention
-
-## Error Handling Strategy
-
-1. Connection Errors:
-
-   - Timeout handling
-   - Automatic reconnection
-   - Error logging and metrics
-
-2. Message Processing:
-
-   - Parse error recovery
-   - Invalid message handling
-   - Channel send error handling
-
-3. Resource Exhaustion:
-   - Message size limits
-   - Channel capacity limits
-   - Connection limits
-
-## Testing Considerations
-
-1. Unit Tests:
-
-   - Topic parsing
-   - Message handling
-   - State management
-
-2. Integration Tests:
-
-   - Connection handling
-   - Subscription flow
-   - Error scenarios
-
-3. Load Tests:
-   - Connection scalability
-   - Message throughput
-   - Memory usage
-
-## Production Considerations
-
-1. Monitoring:
-
-   - Connection status
-   - Message latency
-   - Error rates
-   - Resource usage
-
-2. Configuration:
-
-   - Channel capacities
-   - Timeout values
-   - Reconnection parameters
-
-3. Security:
-   - Message validation
-   - Rate limiting
-   - Resource limits
