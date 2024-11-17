@@ -22,10 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-yawc = {version = "0.1", features = ["reqwest"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
-reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-webpki-roots"] }
-tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
+yawc = "0.1"
 ```
 
 ### Client Example
@@ -60,17 +57,15 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Server Example
-
 ```toml
 [dependencies]
-yawc = {version = "0.1", features = ["reqwest"] }
+yawc = { version = "0.1", features = ["reqwest"] }
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
+reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-webpki-roots"] }
 tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
-hyper = { version = "1.5.0", features = ["http1", "server"] }
-http-body-util = "0.1.2"
-bytes = "1.8.0"
 ```
+
+### Server Example
 
 ```rust
 use hyper::{Request, Response, body::Incoming};
@@ -101,6 +96,16 @@ async fn handle_upgrade(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>
 async fn main() {
     // configure the server
 }
+```
+
+```toml
+[dependencies]
+yawc = {version = "0.1", features = ["reqwest"] }
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
+tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
+hyper = { version = "1.5.0", features = ["http1", "server"] }
+http-body-util = "0.1.2"
+bytes = "1.8.0"
 ```
 
 The [`examples`](https://github.com/infinitefield/websocket/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
