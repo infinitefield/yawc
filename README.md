@@ -22,28 +22,35 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-yawc = "0.1"
+yawc = {version = "0.1", features = ["reqwest"] }
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
+reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-webpki-roots"] }
+tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
 ```
 
 ### Client Example
 
 ```rust
-use yawc::{WebSocket, Options, frame::FrameView, Result};
+use futures::SinkExt;
+use futures::StreamExt;
+use yawc::{frame::FrameView, frame::OpCode, Options, Result, WebSocket};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Connect with default options
-    let mut ws = WebSocket::connect(
+    let mut ws = WebSocket::reqwest(
         "wss://echo.websocket.org".parse()?,
-        Some(tls_connector())
-    ).await?;
+        reqwest::Client::new(),
+        Options::default(),
+    )
+    .await?;
 
     // Send and receive messages
     ws.send(FrameView::text("Hello WebSocket!")).await?;
 
     while let Some(frame) = ws.next().await {
         match frame.opcode {
-            OpCode::Text => println!("Received: {}", std::str::from_utf8(&frame.payload)?),
+            OpCode::Text => println!("Received: {}", std::str::from_utf8(&frame.payload).unwrap()),
             OpCode::Binary => println!("Received binary: {} bytes", frame.payload.len()),
             _ => {} // Handle control frames automatically
         }
@@ -55,27 +62,56 @@ async fn main() -> Result<()> {
 
 ### Server Example
 
-```rust
-use hyper::{Request, Response};
-use yawc::{upgrade, WebSocket};
+```toml
+[dependencies]
+yawc = {version = "0.1", features = ["reqwest"] }
+futures = { version = "0.3.31", default-features = false, features = ["std"] }
+tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
+hyper = { version = "1.5.0", features = ["http1", "server"] }
+http-body-util = "0.1.2"
+bytes = "1.8.0"
+```
 
-async fn handle_upgrade(req: Request<Body>) -> Result<Response<Body>> {
+```rust
+use hyper::{Request, Response, body::Incoming};
+use futures::StreamExt;
+use futures::SinkExt;
+use bytes::Bytes;
+use http_body_util::Empty;
+use yawc::{WebSocket, Result};
+
+async fn handle_upgrade(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>> {
     // Upgrade the connection
-    let (response, upfn) = upgrade(req)?;
+    let (response, upfn) = WebSocket::upgrade(req)?;
 
     // Handle the WebSocket connection in a separate task
     tokio::spawn(async move {
-        let mut ws = upfn.await?;
+        let mut ws = upfn.await.expect("upgrade");
 
         while let Some(frame) = ws.next().await {
             // Echo the received frames back to the client
-            ws.send(frame).await?;
+            let _ = ws.send(frame).await;
         }
     });
 
     Ok(response)
 }
+
+#[tokio::main]
+async fn main() {
+    // configure the server
+}
 ```
+
+The [`examples`](https://github.com/infinitefield/websocket/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
+You can find a particularly comprehensive example in the [`axum_proxy`](https://github.com/infinitefield/websocket/tree/master/examples/axum_proxy) implementation, which demonstrates:
+
+- Building a WebSocket broadcast server that efficiently relays messages between multiple connected clients
+- Creating a reverse proxy that transparently forwards WebSocket connections to upstream servers
+- Proper connection lifecycle management and error handling Integration with the Axum web framework for robust HTTP request handling
+- Advanced usage patterns like connection pooling and message filtering
+
+These examples serve as practical reference implementations for common WebSocket architectural patterns and best practices using yawc.
 
 ## Feature Flags
 
@@ -118,13 +154,8 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(websocket_handler));
 
-    let addr = ([127, 0, 0, 1], 3000).into();
-    println!("WebSocket server listening on {}", addr);
-
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 ```
 
@@ -148,7 +179,7 @@ use yawc::{Options, DeflateOptions, CompressionLevel};
 let options = Options::default()
     .with_compression_level(CompressionLevel::default())
     .server_no_context_takeover()  // Optimize memory usage
-    .with_client_max_window_bits(11);  // Control compression window
+    .with_client_max_window_bits(11);  // Control compression window (requires zlib feature)
 ```
 
 ### Split Streams
