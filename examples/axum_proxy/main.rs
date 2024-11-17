@@ -1,14 +1,37 @@
-//! This example demonstrates how to create a WebSocket broadcast server that:
-//! 1. Accepts WebSocket connections from clients
-//! 2. Allows clients to subscribe to topics
-//! 3. Connects to an upstream WebSocket server
-//! 4. Broadcasts messages from upstream to subscribed clients on specific topics
+//! WebSocket Broadcast Server Example
 //!
-//! # Usage
+//! This example demonstrates a WebSocket server that acts as a message broker between
+//! clients and an upstream WebSocket data provider (Bybit crypto exchange).
 //!
+//! Key features:
+//! - Accepts multiple WebSocket client connections
+//! - Allows clients to subscribe/unsubscribe to specific topics (orderbook, trades, etc)
+//! - Maintains connection to upstream Bybit WebSocket API
+//! - Efficiently broadcasts messages from upstream to subscribed clients
+//! - Handles reconnection and resubscription on upstream disconnects
+//! - Compresses WebSocket traffic for better performance
+//!
+//! # Usage Example:
+//!
+//! Connect with a WebSocket client to ws://localhost:3001/ws and send:
+//! ```json
+//! {
+//!   "method": "subscribe",
+//!   "symbol": "BTCUSDT",
+//!   "topic": "orderbook",
+//!   "levels": 50
+//! }
+//! ```
+//!
+//! The server will:
+//! 1. Subscribe to Bybit's orderbook feed for BTCUSDT
+//! 2. Forward all orderbook updates to the subscribed client
+//! 3. Handle multiple clients subscribed to the same feed efficiently
+//!
+//! For command line testing:
 //! ```bash
 //! yawcc c ws://localhost:3001/ws --input-as-json
-//! > {"method":"subscribe","symbol":"BTCUSDT","topic":"orderbook","levels":50} // proxy
+//! > {"method":"subscribe","symbol":"BTCUSDT","topic":"orderbook","levels":50}
 //! ```
 
 use std::{
@@ -39,6 +62,7 @@ use yawc::{
     CompressionLevel, IncomingUpgrade, Options, UpgradeFut, WebSocket,
 };
 
+/// Application entry point - initializes logging and starts the server
 #[tokio::main]
 async fn main() {
     // Initialize logging for debugging
@@ -49,8 +73,11 @@ async fn main() {
     }
 }
 
-/// Subscription topic that clients can subscribe to.
-/// Each topic is associated with a specific cryptocurrency coin.
+/// Represents a subscription topic that clients can subscribe to.
+/// Topics consist of:
+/// - symbol: The trading pair (e.g. "BTCUSDT")
+/// - name: Type of data feed (e.g. "orderbook", "trades")
+/// - levels: Optional parameter for orderbook depth
 #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
 struct Topic<'a> {
     symbol: Cow<'a, str>,
@@ -65,7 +92,7 @@ impl<'a> TryFrom<&'a str> for Topic<'a> {
         let mut parts = s.split('.');
 
         let name = parts.next().ok_or(())?;
-        // second could be the levels or the symbol
+        // Second part could be levels (for orderbook) or symbol
         let second = parts.next().ok_or(())?;
 
         if name == "orderbook" {
@@ -94,9 +121,11 @@ impl<'a> Serialize for Topic<'a> {
     {
         use std::fmt::Write;
 
+        // Pre-allocate string buffer
         let mut buf = String::with_capacity(32);
         buf.push_str(&self.name);
 
+        // Include levels for orderbook topics
         if let Some(levels) = self.levels {
             buf.push('.');
             // Safe because levels is u8
@@ -110,11 +139,12 @@ impl<'a> Serialize for Topic<'a> {
     }
 }
 
-/// Application state shared between all clients
+/// Application state shared between all client connections.
+/// Contains:
+/// - Map of active topics to broadcast channels
+/// - Channel for sending subscription updates to upstream connection
 struct AppState {
-    // Map of topics to broadcast channels
     topics: RwLock<HashMap<Topic<'static>, broadcast::Sender<Bytes>>>,
-    // Channel to send subscription updates to upstream connection
     upstream: UnboundedSender<Subscription>,
 }
 
@@ -127,7 +157,7 @@ impl AppState {
     }
 }
 
-/// Initialize and start the WebSocket server
+/// Initializes and starts the WebSocket server
 async fn server() -> io::Result<()> {
     // Channel for communicating with upstream connection
     let (tx, rx) = unbounded_channel();
@@ -138,15 +168,15 @@ async fn server() -> io::Result<()> {
         .route("/ws", get(on_websocket))
         .with_state(Arc::clone(&state));
 
-    // Spawn task to handle upstream connection
+    // Spawn background task to handle upstream connection
     tokio::spawn(async move { connect_upstream(rx, state).await });
 
-    // Start the server
+    // Start HTTP server
     let listener = TcpListener::bind("0.0.0.0:3001").await?;
     axum::serve(listener, router).await
 }
 
-/// Handle new WebSocket connection requests
+/// Handles new WebSocket connection requests
 async fn on_websocket(
     State(state): State<Arc<AppState>>,
     ws: IncomingUpgrade,
@@ -176,7 +206,7 @@ struct UserSubscribe {
     levels: Option<u8>,
 }
 
-/// Handle individual WebSocket client connections
+/// Handles an individual WebSocket client connection
 async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Result<()> {
     let mut ws = fut.await?;
 
@@ -185,22 +215,23 @@ async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Res
 
     loop {
         tokio::select! {
-            // Handle incoming broadcast messages
+            // Handle incoming broadcast messages from subscribed topics
             Some((_, res)) = streams.next() => {
                 match res {
                     Ok(input) => {
                         let _ = ws.send(FrameView::text(input)).await;
                     }
                     Err(_) => {
-                        // just give up on the stream
+                        // Stream error - drop the stream
                     }
                 }
             }
-            // Handle client messages
+            // Handle client subscription messages
             maybe_frame = ws.next() => {
                 let Some(frame) = maybe_frame else {
                     log::debug!("WebSocket connection closed");
 
+                    // Unsubscribe from all topics on disconnect
                     let keys: Vec<_> = streams.keys().cloned().collect();
                     for topic in keys {
                         streams.remove(&topic);
@@ -228,12 +259,13 @@ async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Res
     }
 }
 
-/// Process client subscription requests
+/// Processes client subscription/unsubscription requests
 fn on_subscription(
     state: &AppState,
     streams: &mut StreamMap<Topic<'static>, BroadcastStream<Bytes>>,
     sub: UserSubscribe,
 ) -> Result<(), String> {
+    // Validate topic name
     if !["orderbook", "publicTrade", "ticker"].contains(&sub.topic.as_str()) {
         return Err(format!("unknown topic: {}", sub.topic));
     }
@@ -276,6 +308,7 @@ fn on_subscription(
     Ok(())
 }
 
+/// Handles user unsubscription from a topic
 fn unsubscribe_user(state: &AppState, topic: Topic<'static>) {
     let mut topics = state.topics.write().unwrap();
     if let Some(tx) = topics.get(&topic) {
@@ -290,13 +323,18 @@ fn unsubscribe_user(state: &AppState, topic: Topic<'static>) {
     }
 }
 
-/// Internal subscription commands sent to upstream connection
+/// Subscription commands sent to the upstream connection handler
 enum Subscription {
     Sub(Topic<'static>),
     Unsub(Topic<'static>),
 }
 
-/// Maintain connection to upstream WebSocket server
+/// Maintains persistent connection to upstream WebSocket server.
+/// Handles:
+/// - Initial connection and reconnection
+/// - Subscription management
+/// - Message forwarding
+/// - Connection health checks
 async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<AppState>) {
     let base_url: Url = "wss://stream.bybit.com/v5/public/linear".parse().unwrap();
     let client = reqwest::Client::new();
@@ -374,7 +412,7 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
                 // Handle upstream messages
                 maybe_msg = ws.next() => {
                     let Some(msg) = maybe_msg else {
-                        // reconnect
+                        // Connection lost - break inner loop to reconnect
                         break;
                     };
 
@@ -382,7 +420,7 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
                         on_upstream_message(&state, msg);
                     }
                 }
-                // Send periodic pings
+                // Send periodic ping to keep connection alive
                 _ = ping_ticker.tick() => {
                     let _ = ws.send(FrameView::ping("ping")).await;
                 }
@@ -391,7 +429,7 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
     }
 }
 
-/// Subscription message format for upstream server
+/// Subscription message format for Bybit API
 #[derive(Serialize)]
 struct BybitSubscribe<'a> {
     req_id: String,
@@ -399,24 +437,24 @@ struct BybitSubscribe<'a> {
     args: Vec<Topic<'a>>,
 }
 
-/// Message format received from upstream server
+/// Message format received from Bybit API
 #[derive(Deserialize)]
 struct BybitMsg<'a> {
     topic: &'a str,
     r#type: &'a str,
 }
 
+/// Response to subscription requests
 #[derive(Deserialize)]
 struct BybitSub<'a> {
     op: &'a str,
 }
 
-/// Process messages received from upstream and broadcast to subscribers
+/// Processes messages received from upstream and broadcasts to subscribers
 fn on_upstream_message(state: &AppState, frame: FrameView) {
-    // log::debug!("<< {}", std::str::from_utf8(&frame.payload).unwrap());
     match serde_json::from_slice::<BybitMsg>(&frame.payload) {
         Ok(ok) => {
-            // Convert upstream message format to internal Topic
+            // Parse topic string into internal Topic struct
             let topic = Topic::try_from(ok.topic).expect("topic");
 
             // Broadcast message to all subscribers of this topic
@@ -425,7 +463,7 @@ fn on_upstream_message(state: &AppState, frame: FrameView) {
                 let _ = tx.send(frame.payload);
             }
         }
-        Err(err) => match serde_json::from_slice::<BybitSub>(&frame.payload) {
+        Err(_) => match serde_json::from_slice::<BybitSub>(&frame.payload) {
             Ok(ok) => {
                 log::debug!("{} completed", ok.op);
             }
