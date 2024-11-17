@@ -40,6 +40,7 @@
 //! use futures::{SinkExt, StreamExt};
 //! use yawc::{WebSocket, Options, frame::OpCode};
 //!
+//! #[cfg(feature = "reqwest")]
 //! async fn connect(client: reqwest::Client) -> yawc::Result<()> {
 //!     let mut ws = WebSocket::reqwest("wss://echo.websocket.org".parse()?, client, Options::default()).await?;
 //!

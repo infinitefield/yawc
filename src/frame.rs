@@ -64,13 +64,14 @@
 //! ```rust
 //! use yawc::frame::FrameView;
 //! use bytes::BytesMut;
+//! use yawc::close::CloseCode;
 //!
 //! // Text frame with UTF-8 payload
 //! let text_frame = FrameView::text("Hello, WebSocket!");
 //!
 //! // Control frames
 //! let ping = FrameView::ping(BytesMut::new());
-//! let close = FrameView::close(1000, b"Normal closure"); // Status code + reason
+//! let close = FrameView::close(CloseCode::Normal, b"Normal closure"); // Status code + reason
 //! ```
 //!
 //! ## Frame Processing
@@ -196,7 +197,7 @@ impl FrameView {
         let reason: &[u8] = reason.as_ref();
         let mut payload = Vec::with_capacity(2 + reason.len());
         payload.extend_from_slice(&code16.to_be_bytes());
-        payload.extend_from_slice(&reason);
+        payload.extend_from_slice(reason);
 
         Self {
             opcode: OpCode::Close,
@@ -296,11 +297,12 @@ impl From<Frame> for FrameView {
 /// While frames can be constructed directly, it's recommended to use the provided factory methods:
 /// ```rust
 /// use yawc::frame::FrameView;
+/// use yawc::close::CloseCode;
 ///
 /// let text_frame = FrameView::text("Hello");
 /// let binary_frame = FrameView::binary(vec![1, 2, 3]);
 /// let ping_frame = FrameView::ping(vec![]);
-/// let close_frame = FrameView::close(1000, b"Goodbye");
+/// let close_frame = FrameView::close(CloseCode::Normal, b"Goodbye");
 /// ```
 ///
 /// # Fields

@@ -1,4 +1,4 @@
-# yawc (Yet another websocket crate)
+# yawc
 
 Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
 
@@ -80,9 +80,9 @@ async fn handle_upgrade(req: Request<Body>) -> Result<Response<Body>> {
 ## Feature Flags
 
 - `reqwest`: Use reqwest as the HTTP client
-- `zlib`: Enable advanced compression options with zlib
-- `logging`: Enable debug logging for connection events
 - `axum`: Enable integration with the Axum web framework
+- `logging`: Enable debug logging for connection events
+- `zlib`: Enable advanced compression options with zlib (not recommended unless you know what you are doing)
 
 ### Axum Server Example
 
