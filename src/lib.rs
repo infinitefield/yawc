@@ -2014,8 +2014,15 @@ impl WebSocket {
     fn on_frame(&mut self, frame: FrameView) -> Result<Option<FrameView>> {
         match frame.opcode {
             OpCode::Text => {
-                if self.check_utf8 && std::str::from_utf8(&frame.payload).is_err() {
-                    return Err(WebSocketError::InvalidUTF8);
+                if self.check_utf8 {
+                    #[cfg(not(feature = "simd"))]
+                    if std::str::from_utf8(&frame.payload).is_err() {
+                        return Err(WebSocketError::InvalidUTF8);
+                    }
+                    #[cfg(feature = "simd")]
+                    if simdutf8::basic::from_utf8(&frame.payload).is_err() {
+                        return Err(WebSocketError::InvalidUTF8);
+                    }
                 }
                 Ok(Some(frame))
             }

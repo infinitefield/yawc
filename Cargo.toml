@@ -32,6 +32,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 default = []
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 logging = ["log"]
+simd = ["dep:simdutf8"]
 reqwest = ["dep:reqwest"]
 axum = ["dep:axum-core", "dep:async-trait", "dep:http"]
 json = ["dep:serde_json", "dep:serde"]
@@ -86,6 +87,7 @@ serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 
 # Utilities
+simdutf8 = { version = "0.1", optional = true }
 bytes = "1"
 http-body-util = "0.1"
 nom = "7.1"

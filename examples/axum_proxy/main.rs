@@ -76,7 +76,7 @@ async fn main() {
 /// Represents a subscription topic that clients can subscribe to.
 /// Topics consist of:
 /// - symbol: The trading pair (e.g. "BTCUSDT")
-/// - name: Type of data feed (e.g. "orderbook", "trades")
+/// - name: Type of data feed (e.g. "orderbook", "publicTrade")
 /// - levels: Optional parameter for orderbook depth
 #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
 struct Topic<'a> {
