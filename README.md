@@ -251,10 +251,10 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
-Under the terms of this license, any modifications made to the code must be made available publicly under the same license.
-This ensures the software remains free and open source, with all improvements benefiting the community.
-For more details, see ([LICENSE](LICENSE) or https://www.gnu.org/licenses/agpl-3.0.en.html)
+This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
+Under the terms of this license, you may use, modify, and distribute the code as part of a larger work without requiring the entire work to be licensed under the LGPL.
+However, any modifications to the library itself must be made available under the LGPL.
+For more details, see ([LICENSE](LICENSE) or https://www.gnu.org/licenses/lgpl-3.0.en.html)
 
 ## Acknowledgments
 
