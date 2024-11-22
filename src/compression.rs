@@ -801,8 +801,10 @@ mod tests {
 
     #[test]
     fn test_websocket_extensions_to_string() {
-        let mut extensions = WebSocketExtensions::default();
-        extensions.client_no_context_takeover = true;
+        let mut extensions = WebSocketExtensions {
+            client_no_context_takeover: true,
+            ..Default::default()
+        };
         extensions.server_max_window_bits = Some(15);
         let formatted = extensions.to_string();
         assert_eq!(

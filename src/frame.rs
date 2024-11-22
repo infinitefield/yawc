@@ -1,6 +1,6 @@
 //! # Frame
 //!
-//! The `frame` module implements WebSocket frames as defined in [RFC 6455](https://tools.ietf.org/html/rfc6455#section-5.2),
+//! The `frame` module implements WebSocket frames as defined in [RFC 6455 Section 5.2](https://datatracker.ietf.org/doc/html/rfc6455#section-5.2),
 //! providing the core building blocks for WebSocket communication. Each frame represents an atomic unit of data transmission,
 //! containing both the payload and protocol-level metadata.
 //!
@@ -14,29 +14,30 @@
 //! ### Frame Binary Format
 //!
 //! ```text
-//! 0                   1                   2                   3
-//! 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//!  0                   1                   2                   3
+//!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //! +-+-+-+-+-------+-+-------------+-------------------------------+
 //! |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-//! |I|S|S|S|  (4)  |A|     (7)    |             (16/64)          |
-//! |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+//! |I|S|S|S|  (4)  |A|     (7)     |         (16 or 64 bits)       |
+//! |N|V|V|V|       |S|             |                               |
 //! | |1|2|3|       |K|             |                               |
-//! +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-//! |     Extended payload length continued, if payload len == 127  |
-//! + - - - - - - - - - - - - - - - +-------------------------------+
-//! |                               |Masking-key, if MASK set to 1  |
+//! +-+-+-+-+-------+-+-------------+-------------------------------+
+//! |        Extended payload length continued, if payload len == 127|
+//! +---------------------------------------------------------------+
+//! |                               |   Masking-key, if MASK set to 1|
 //! +-------------------------------+-------------------------------+
-//! | Masking-key (continued)       |          Payload Data        |
-//! +-------------------------------- - - - - - - - - - - - - - - - +
+//! |     Masking-key (continued)       |          Payload Data      |
+//! +-----------------------------------+ - - - - - - - - - - - - - -+
 //! :                     Payload Data continued ...                :
-//! + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-//! |                     Payload Data continued ...                |
 //! +---------------------------------------------------------------+
 //! ```
 //!
 //! Frames come in two categories:
 //!
-//! - **Data Frames**: Carry application payload with `OpCode::Text` (UTF-8 text) or `OpCode::Binary` (raw bytes)
+//! - **Data Frames**: Carry application payload with:
+//!   - `OpCode::Text`: UTF-8 text data
+//!   - `OpCode::Binary`: Raw binary data
+//!   - `OpCode::Continuation`: Continuation of a fragmented message
 //! - **Control Frames**: Manage the connection with:
 //!   - `OpCode::Close`: Initiates connection closure with optional status code and reason
 //!   - `OpCode::Ping`: Checks connection liveness, requires a Pong response
@@ -52,7 +53,7 @@
 //! - `payload`: Frame data as `BytesMut`
 //! - `is_compressed`: Per-message compression flag (1 bit, RSV1)
 //!
-//! While [`FrameView`] provides an optimized immutable view with just:
+//! While [`FrameView`] provides an optimized immutable view with:
 //!
 //! - `opcode`: Frame type identifier
 //! - `payload`: Immutable frame data as `Bytes`
@@ -63,14 +64,15 @@
 //!
 //! ```rust
 //! use yawc::frame::FrameView;
-//! use bytes::BytesMut;
+//! use bytes::Bytes;
 //! use yawc::close::CloseCode;
 //!
 //! // Text frame with UTF-8 payload
 //! let text_frame = FrameView::text("Hello, WebSocket!");
 //!
 //! // Control frames
-//! let ping = FrameView::ping(BytesMut::new());
+//! let ping = FrameView::ping("Ping payload"); // Ping with optional payload
+//! let pong = FrameView::pong("Pong response"); // Pong response to ping
 //! let close = FrameView::close(CloseCode::Normal, b"Normal closure"); // Status code + reason
 //! ```
 //!
@@ -80,11 +82,12 @@
 //! per-message compression via the WebSocket permessage-deflate extension. The module handles:
 //!
 //! - Frame header parsing and serialization
-//! - Payload masking/unmasking
-//! - Message fragmentation
+//! - Payload masking and unmasking
+//! - Message fragmentation and reassembly
 //! - UTF-8 validation for text frames
+//! - Compression and decompression of payloads (if permessage-deflate is enabled)
 //!
-//! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://tools.ietf.org/html/rfc6455#section-5).
+//! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://datatracker.ietf.org/doc/html/rfc6455#section-5).
 use bytes::{Bytes, BytesMut};
 
 use crate::{close::CloseCode, WebSocketError};
@@ -480,6 +483,309 @@ impl Frame {
             size + 4
         } else {
             size
+        }
+    }
+}
+
+/// Unit tests for the `yawc::frame` module.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::close::CloseCode;
+    use bytes::{Bytes, BytesMut};
+
+    /// Tests for the `OpCode` enum.
+    mod opcode_tests {
+        use super::*;
+
+        #[test]
+        fn test_is_control() {
+            // Control frames
+            assert!(OpCode::Close.is_control());
+            assert!(OpCode::Ping.is_control());
+            assert!(OpCode::Pong.is_control());
+
+            // Data frames
+            assert!(!OpCode::Continuation.is_control());
+            assert!(!OpCode::Text.is_control());
+            assert!(!OpCode::Binary.is_control());
+        }
+
+        #[test]
+        fn test_try_from_u8_valid() {
+            assert_eq!(OpCode::try_from(0x0).unwrap(), OpCode::Continuation);
+            assert_eq!(OpCode::try_from(0x1).unwrap(), OpCode::Text);
+            assert_eq!(OpCode::try_from(0x2).unwrap(), OpCode::Binary);
+            assert_eq!(OpCode::try_from(0x8).unwrap(), OpCode::Close);
+            assert_eq!(OpCode::try_from(0x9).unwrap(), OpCode::Ping);
+            assert_eq!(OpCode::try_from(0xA).unwrap(), OpCode::Pong);
+        }
+
+        #[test]
+        fn test_try_from_u8_invalid() {
+            // Invalid opcodes should return an error
+            for &code in &[0x3, 0x4, 0x5, 0x6, 0x7, 0xB, 0xC, 0xD, 0xE, 0xF] {
+                assert!(OpCode::try_from(code).is_err());
+            }
+        }
+
+        #[test]
+        fn test_from_opcode_to_u8() {
+            assert_eq!(u8::from(OpCode::Continuation), 0x0);
+            assert_eq!(u8::from(OpCode::Text), 0x1);
+            assert_eq!(u8::from(OpCode::Binary), 0x2);
+            assert_eq!(u8::from(OpCode::Close), 0x8);
+            assert_eq!(u8::from(OpCode::Ping), 0x9);
+            assert_eq!(u8::from(OpCode::Pong), 0xA);
+        }
+    }
+
+    /// Tests for the `FrameView` struct.
+    mod frameview_tests {
+        use super::*;
+
+        #[test]
+        fn test_text_frameview() {
+            let text = "Hello, WebSocket!";
+            let frame = FrameView::text(text);
+
+            assert_eq!(frame.opcode, OpCode::Text);
+            assert_eq!(frame.payload, Bytes::from(text));
+        }
+
+        #[test]
+        fn test_binary_frameview() {
+            let data = vec![0x01, 0x02, 0x03];
+            let frame = FrameView::binary(data.clone());
+
+            assert_eq!(frame.opcode, OpCode::Binary);
+            assert_eq!(frame.payload, Bytes::from(data));
+        }
+
+        #[test]
+        fn test_close_frameview() {
+            let reason = "Normal closure";
+            let frame = FrameView::close(CloseCode::Normal, reason);
+
+            assert_eq!(frame.opcode, OpCode::Close);
+
+            // The payload should contain the close code (1000) and the reason
+            let mut expected_payload = Vec::new();
+            expected_payload.extend_from_slice(&1000u16.to_be_bytes());
+            expected_payload.extend_from_slice(reason.as_bytes());
+
+            assert_eq!(frame.payload, Bytes::from(expected_payload));
+        }
+
+        #[test]
+        fn test_close_raw_frameview() {
+            let payload = vec![0x03, 0xE8]; // Close code 1000 without reason
+            let frame = FrameView::close_raw(payload.clone());
+
+            assert_eq!(frame.opcode, OpCode::Close);
+            assert_eq!(frame.payload, Bytes::from(payload));
+        }
+
+        #[test]
+        fn test_ping_frameview() {
+            let payload = b"Ping payload";
+            let frame = FrameView::ping(&payload[..]);
+
+            assert_eq!(frame.opcode, OpCode::Ping);
+            assert_eq!(frame.payload, Bytes::from(&payload[..]));
+        }
+
+        #[test]
+        fn test_pong_frameview() {
+            let payload = b"Pong payload";
+            let frame = FrameView::pong(&payload[..]);
+
+            assert_eq!(frame.opcode, OpCode::Pong);
+            assert_eq!(frame.payload, Bytes::from(&payload[..]));
+        }
+
+        #[test]
+        fn test_from_frameview_to_tuple() {
+            let frame = FrameView::text("Test");
+            let (opcode, payload): (OpCode, Bytes) = frame.into();
+
+            assert_eq!(opcode, OpCode::Text);
+            assert_eq!(payload, Bytes::from("Test"));
+        }
+
+        #[test]
+        fn test_from_tuple_to_frameview() {
+            let opcode = OpCode::Binary;
+            let payload = Bytes::from_static(b"\xDE\xAD\xBE\xEF");
+
+            let frame = FrameView::from((opcode, payload.clone()));
+
+            assert_eq!(frame.opcode, OpCode::Binary);
+            assert_eq!(frame.payload, payload);
+        }
+
+        #[test]
+        fn test_frameview_from_frame() {
+            let frame = Frame::new(true, OpCode::Text, None, BytesMut::from("Hello"));
+            let frame_view = FrameView::from(frame);
+
+            assert_eq!(frame_view.opcode, OpCode::Text);
+            assert_eq!(frame_view.payload, Bytes::from("Hello"));
+        }
+    }
+
+    /// Tests for the `Frame` struct.
+    mod frame_tests {
+        use super::*;
+
+        #[test]
+        fn test_frame_new() {
+            let payload = BytesMut::from("Test payload");
+            let frame = Frame::new(true, OpCode::Text, None, payload.clone());
+
+            assert!(frame.fin);
+            assert_eq!(frame.opcode, OpCode::Text);
+            assert_eq!(frame.mask, None);
+            assert_eq!(frame.payload, payload);
+            assert!(!frame.is_compressed);
+        }
+
+        /// Tests the creation and configuration of a compressed WebSocket frame.
+        ///
+        /// This test case demonstrates:
+        /// - Creating a compressed frame with a payload
+        /// - Setting frame to be non-final (fragmented)
+        /// - Using binary opcode format
+        /// - Applying a masking key
+        /// - Verifying the compression flag is set
+        ///
+        /// # The test verifies:
+        /// - fin flag is false (fragmented frame)
+        /// - opcode is Binary
+        /// - masking key is correctly set to [0xAA, 0xBB, 0xCC, 0xDD]
+        /// - payload matches input data
+        /// - compression flag is enabled
+        #[test]
+        fn test_frame_compress() {
+            let payload = BytesMut::from("Compressed payload");
+            let frame = Frame::compress(
+                false,
+                OpCode::Binary,
+                Some([0xAA, 0xBB, 0xCC, 0xDD]),
+                payload.clone(),
+            );
+
+            assert!(!frame.fin);
+            assert_eq!(frame.opcode, OpCode::Binary);
+            assert_eq!(frame.mask, Some([0xAA, 0xBB, 0xCC, 0xDD]));
+            assert_eq!(frame.payload, payload);
+            assert!(frame.is_compressed);
+        }
+
+        #[test]
+        fn test_frame_compress() {
+            // This test verifies the creation of a compressed WebSocket frame.
+            // It constructs a new frame with the specified parameters:
+            // - `fin` is set to `false`, indicating this frame is not the final fragment
+            // - `opcode` is set to `OpCode::Binary`, specifying that this frame carries binary data
+            // - `mask` is provided, demonstrating the use of a masking key (0xAA, 0xBB, 0xCC, 0xDD)
+            // - `payload` contains the actual data being sent, here labeled "Compressed payload"
+            let payload = BytesMut::from("Compressed payload");
+            let frame = Frame::compress(
+                false,
+                OpCode::Binary,
+                Some([0xAA, 0xBB, 0xCC, 0xDD]),
+                payload.clone(),
+            );
+
+            // Assertions to validate the created frame's properties
+            assert!(!frame.fin); // Verify that the FIN flag is correctly set to false
+            assert_eq!(frame.opcode, OpCode::Binary); // Ensure the opcode matches the expected binary frame type
+            assert_eq!(frame.mask, Some([0xAA, 0xBB, 0xCC, 0xDD])); // Check that the mask is correctly set
+            assert_eq!(frame.payload, payload); // Verify the payload matches the input
+            assert!(frame.is_compressed); // Confirm that the compression flag is set
+        }
+
+        #[test]
+        fn test_frame_is_utf8() {
+            let valid_utf8 = BytesMut::from("Hello, 世界");
+            let frame = Frame::new(true, OpCode::Text, None, valid_utf8);
+            assert!(frame.is_utf8());
+
+            let invalid_utf8 = BytesMut::from(&[0xFF, 0xFE, 0xFD][..]);
+            let frame = Frame::new(true, OpCode::Text, None, invalid_utf8);
+            assert!(!frame.is_utf8());
+        }
+
+        #[test]
+        fn test_frame_mask_unmask() {
+            let payload = BytesMut::from("Mask me");
+            let mut frame = Frame::new(
+                true,
+                OpCode::Binary,
+                Some([0x01, 0x02, 0x03, 0x04]),
+                payload.clone(),
+            );
+
+            // Mask the payload
+            frame.mask();
+            assert_ne!(frame.payload, payload);
+
+            // Unmask the payload
+            frame.unmask();
+            assert_eq!(frame.payload, payload);
+            assert_eq!(frame.mask, None);
+        }
+
+        #[test]
+        fn test_frame_fmt_head() {
+            let payload = BytesMut::from("Header test");
+            let mask_key = [0xAA, 0xBB, 0xCC, 0xDD];
+            let frame = Frame::new(true, OpCode::Text, Some(mask_key), payload);
+
+            let mut head = [0u8; MAX_HEAD_SIZE];
+            let head_size = frame.fmt_head(&mut head);
+
+            // Verify the head size is correct
+            assert_eq!(head_size, 2 + 4); // Small payload (<126), so 2 bytes header + 4 bytes mask
+
+            // Verify the FIN bit, RSV bits, and opcode
+            assert_eq!(head[0], 0x81); // FIN=1, RSV1-3=0, OpCode=0x1 (Text)
+
+            // Verify the MASK bit and payload length
+            assert_eq!(head[1], 0x80 | 11); // MASK=1, Payload Len=11
+
+            // Verify the masking key
+            assert_eq!(&head[2..6], &mask_key);
+        }
+
+        #[test]
+        fn test_frame_close_raw() {
+            let payload = b"\x03\xE8Goodbye"; // Close code 1000 with reason "Goodbye"
+            let frame = Frame::close_raw(payload);
+
+            assert!(frame.fin);
+            assert_eq!(frame.opcode, OpCode::Close);
+            assert_eq!(frame.payload, BytesMut::from(&payload[..]));
+        }
+
+        #[test]
+        fn test_frame_from_frameview() {
+            let frame_view = FrameView::binary("Data");
+            let frame = Frame::from(frame_view.clone());
+
+            assert!(frame.fin);
+            assert_eq!(frame.opcode, frame_view.opcode);
+            assert_eq!(frame.payload.freeze(), frame_view.payload);
+        }
+
+        #[test]
+        fn test_frame_is_masked() {
+            let frame = Frame::new(true, OpCode::Text, Some([0x00; 4]), BytesMut::from("Test"));
+            assert!(frame.is_masked());
+
+            let frame = Frame::new(true, OpCode::Text, None, BytesMut::from("Test"));
+            assert!(!frame.is_masked());
         }
     }
 }
