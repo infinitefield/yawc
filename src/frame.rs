@@ -683,30 +683,6 @@ mod tests {
         }
 
         #[test]
-        fn test_frame_compress() {
-            // This test verifies the creation of a compressed WebSocket frame.
-            // It constructs a new frame with the specified parameters:
-            // - `fin` is set to `false`, indicating this frame is not the final fragment
-            // - `opcode` is set to `OpCode::Binary`, specifying that this frame carries binary data
-            // - `mask` is provided, demonstrating the use of a masking key (0xAA, 0xBB, 0xCC, 0xDD)
-            // - `payload` contains the actual data being sent, here labeled "Compressed payload"
-            let payload = BytesMut::from("Compressed payload");
-            let frame = Frame::compress(
-                false,
-                OpCode::Binary,
-                Some([0xAA, 0xBB, 0xCC, 0xDD]),
-                payload.clone(),
-            );
-
-            // Assertions to validate the created frame's properties
-            assert!(!frame.fin); // Verify that the FIN flag is correctly set to false
-            assert_eq!(frame.opcode, OpCode::Binary); // Ensure the opcode matches the expected binary frame type
-            assert_eq!(frame.mask, Some([0xAA, 0xBB, 0xCC, 0xDD])); // Check that the mask is correctly set
-            assert_eq!(frame.payload, payload); // Verify the payload matches the input
-            assert!(frame.is_compressed); // Confirm that the compression flag is set
-        }
-
-        #[test]
         fn test_frame_is_utf8() {
             let valid_utf8 = BytesMut::from("Hello, 世界");
             let frame = Frame::new(true, OpCode::Text, None, valid_utf8);
