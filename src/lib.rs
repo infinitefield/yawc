@@ -20,6 +20,8 @@
 //! - `logging`: Enables debug logging for connection negotiation and frame processing using the `log` crate.
 //!   Useful for debugging WebSocket connections.
 //!
+//! - `json`: Enables serialization of JSON data. Useful for handling JSON payloads in WebSocket messages.
+//!
 //! ## Usage Example
 //! ```toml
 //! [dependencies]

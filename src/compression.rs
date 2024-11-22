@@ -177,10 +177,11 @@ impl WebSocketExtensions {
                 space0,
                 pair(
                     take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-                    opt(preceded(tag("="), digit1)),
+                    opt(preceded(tag("="), opt(digit1))),
                 ),
             ),
         )(input)
+        .map(|(key, (key2, value))| (key, (key2, value.flatten())))
     }
 }
 
@@ -786,8 +787,6 @@ mod tests {
     #[test]
     fn test_parse_extensions_fail() {
         use std::str::FromStr;
-        let res = WebSocketExtensions::from_str("permessage-deflate; client_no_context_takeover; server_max_window_bits=7; client_max_window_bits=");
-        assert!(res.is_err());
         let res = WebSocketExtensions::from_str("foo, bar; baz=1");
         assert!(res.is_err());
         let res = WebSocketExtensions::from_str(
@@ -797,7 +796,19 @@ mod tests {
         let res = WebSocketExtensions::from_str(
             "permessage-deflate; server_max_window_bits=; client_no_context_takeover",
         );
-        assert!(res.is_err());
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_websocket_extensions_to_string() {
+        let mut extensions = WebSocketExtensions::default();
+        extensions.client_no_context_takeover = true;
+        extensions.server_max_window_bits = Some(15);
+        let formatted = extensions.to_string();
+        assert_eq!(
+            formatted,
+            "permessage-deflate; server_max_window_bits=15; client_no_context_takeover"
+        );
     }
 
     #[cfg(feature = "zlib")]
@@ -885,5 +896,50 @@ mod tests {
             .decompress(&compressed, true)
             .expect("Decompression failed");
         assert_eq!(decompressed.as_ref().unwrap(), &data[..]);
+    }
+
+    #[test]
+    fn test_large_data_compression_and_decompression() {
+        let large_data = vec![1u8; 1024 * 1024]; // 1 MB of data
+        let mut compressor = Compressor::new(Compression::default());
+        let compressed = compressor
+            .compress(&large_data)
+            .expect("Compression failed");
+
+        let mut decompressor = Decompressor::new();
+        let decompressed = decompressor
+            .decompress(&compressed, true)
+            .expect("Decompression failed");
+
+        assert_eq!(&decompressed.unwrap()[..], &large_data[..]);
+    }
+
+    #[test]
+    fn test_partial_input_decompression() {
+        let data = b"test data";
+        let mut compressor = Compressor::new(Compression::default());
+        let compressed = compressor.compress(data).expect("Compression failed");
+
+        let mut decompressor = Decompressor::new();
+        let halfway = compressed.len() / 2;
+
+        assert!(decompressor
+            .decompress(&compressed[..halfway], false)
+            .unwrap()
+            .is_none());
+        // Check that decompression returns None meaning more data is needed
+        let remaining_decompressed = decompressor
+            .decompress(&compressed[halfway..], true)
+            .expect("Decompression failed");
+
+        assert_eq!(remaining_decompressed.unwrap(), &data[..]);
+    }
+
+    #[test]
+    fn test_extensions_parsing_with_missing_values() {
+        use std::str::FromStr;
+        let extensions =
+            WebSocketExtensions::from_str("permessage-deflate; server_max_window_bits=").unwrap();
+        assert_eq!(extensions.server_max_window_bits, Some(0));
     }
 }

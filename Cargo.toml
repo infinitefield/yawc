@@ -32,10 +32,10 @@ targets = ["x86_64-unknown-linux-gnu"]
 default = []
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 logging = ["log"]
-simd = ["dep:simdutf8"]
+simd = ["simdutf8"]
 reqwest = ["dep:reqwest"]
-axum = ["dep:axum-core", "dep:async-trait", "dep:http"]
-json = ["dep:serde_json", "dep:serde"]
+axum = ["axum-core", "async-trait", "http"]
+json = ["serde_json", "serde"]
 
 # Examples configuration
 [[example]]
@@ -82,7 +82,7 @@ flate2 = "1"
 base64 = "0.22"
 sha1 = "0.10"
 
-# json feature
+# JSON support
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 
