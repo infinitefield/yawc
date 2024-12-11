@@ -756,11 +756,26 @@ enum ContextKind {
 
 /// Manages separate wakers for read and write operations on the WebSocket stream.
 ///
-/// This struct allows independent wake-up notifications for read and write operations,
-/// enabling efficient multiplexing of asynchronous I/O tasks. By maintaining separate
-/// wakers for read and write operations, it enables true full-duplex streaming when
-/// used with StreamExt::split, preventing potential deadlocks that could occur if
-/// read and write operations blocked each other.
+/// The WakeProxy acts as a task notification manager for asynchronous I/O operations in the WebSocket.
+/// It maintains two independent wakers - one for read operations and one for write operations. This
+/// separation is crucial for enabling true concurrent I/O:
+///
+/// - When data arrives to be read, only tasks waiting to read are woken
+/// - When the stream becomes writable, only tasks waiting to write are woken
+/// - Tasks don't unnecessarily wake each other, improving efficiency
+///
+/// This design enables full-duplex communication where reads and writes can happen simultaneously
+/// without blocking each other. The atomic nature of the wakers ensures thread-safety when multiple
+/// tasks are interacting with the WebSocket.
+///
+/// Key benefits:
+/// - Prevents deadlocks that could occur if read/write operations shared a single waker
+/// - Enables efficient multiplexing of I/O tasks
+/// - Provides clean separation of concerns between reading and writing
+/// - Ensures thread-safe wake-up notifications in concurrent scenarios
+///
+/// When used with `StreamExt::split()`, the WakeProxy allows the split halves of the WebSocket
+/// to operate independently while maintaining proper synchronization.
 ///
 /// https://github.com/snapview/tokio-tungstenite/blob/015e00d9ccb447161ab69f18946d501c71d0f689/src/compat.rs#L21
 #[derive(Default)]
@@ -1515,9 +1530,11 @@ impl WebSocket {
             host
         };
 
+        let target_url = &url[url::Position::BeforePath..];
+
         let mut req = Request::builder()
             .method("GET")
-            .uri(url.as_str())
+            .uri(target_url)
             .header(header::HOST, host_header.as_str())
             .header(header::UPGRADE, "websocket")
             .header(header::CONNECTION, "upgrade")
