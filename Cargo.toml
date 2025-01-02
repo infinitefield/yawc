@@ -16,6 +16,7 @@ categories = [
 ]
 readme = "README.md"
 rust-version = "1.75.0"
+publish = ["kellnr"]
 
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
