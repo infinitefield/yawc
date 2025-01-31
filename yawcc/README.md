@@ -34,17 +34,15 @@ yawcc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
 ## Command-line Options
 
 ```
-USAGE:
-    ws client [OPTIONS] <URL>
+Usage: yawcc client [OPTIONS] <URL>
 
-OPTIONS:
-    -t, --timeout <DURATION>    Maximum duration to wait when establishing the connection [default: 5s]
-        --input-as-json         Validates and pretty-prints received messages as JSON
-    -h, --help                  Print help information
-    -V, --version               Print version information
+Arguments:
+  <URL>  The {ebSocket URL to connect to (ws:// or wss://)
 
-ARGS:
-    <URL>    The WebSocket URL to connect to (ws:// or wss://)
+Options:
+  -t, --timeout <TIMEOUT>  Maximum duration to wait when establishing the connection. Accepts human-readable formats like "5s", "1m", "500ms" [default: 5s]
+      --input-as-json      When enabled, validates and pretty-prints received messages as JSON. Invalid JSON messages will result in an error
+  -h, --help               Print help (see more with '--help')
 ```
 
 ## Interactive Commands
