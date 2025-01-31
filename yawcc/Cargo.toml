@@ -2,6 +2,19 @@
 name = "yawcc"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dario <dario@infinitefieldtrading.com>"]
+description = "Yet another websocket library. But a fast, secure WebSocket implementation with RFC 6455 compliance and compression support"
+repository = "https://github.com/infinitefield/yawc"
+license = "LGPL-3.0-or-later"
+keywords = ["websocket", "websockets", "ws", "networking", "async"]
+categories = [
+    "network-programming",
+    "asynchronous",
+    "web-programming",
+    "web-programming::websocket",
+]
+readme = "README.md"
+rust-version = "1.75.0"
 
 [workspace]
 
