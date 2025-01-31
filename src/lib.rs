@@ -99,6 +99,8 @@
 //! - Zero-copy frame processing where possible
 //! - Efficient handling of fragmented messages
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod close;
 pub mod codec;
 mod compression;
@@ -668,7 +670,7 @@ fn sec_websocket_protocol(key: &[u8]) -> String {
 
 /// Future that completes the WebSocket upgrade process on a server, returning a WebSocket stream.
 ///
-/// This future is returned by the [`upgrade`] and [`upgrade_with_options`] functions after initiating
+/// This future is returned by the [`WebSocket::upgrade`] and [`WebSocket::upgrade_with_options`] functions after initiating
 /// a WebSocket protocol upgrade. It manages completion of the HTTP upgrade handshake and initializes
 /// a WebSocket connection with the negotiated parameters.
 ///
@@ -1254,8 +1256,8 @@ impl Options {
 /// It abstracts away details related to framing and compression, which are managed
 /// by the underlying [`ReadHalf`] and [`WriteHalf`] structures.
 ///
-/// A [`WebSocket`] instance can be created via high-level functions like [`connect`]
-/// or [`connect_with_options`], or through a custom stream setup with [`handshake`].
+/// A [`WebSocket`] instance can be created via high-level functions like [`WebSocket::connect`]
+/// or [`WebSocket::connect_with_options`], or through a custom stream setup with [`WebSocket::handshake`].
 ///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
@@ -1311,13 +1313,13 @@ impl Options {
 /// For most use cases requiring concurrent reads and writes, use [`StreamExt::split`] which
 /// maintains the WebSocket's built-in protocol handling.
 ///
-/// **Warning:** [`WebSocket::split()`] is a low-level API that bypasses critical WebSocket protocol
+/// **Warning:** [`futures::StreamExt::split()`] is a low-level API that bypasses critical WebSocket protocol
 /// management and should rarely be used directly. It disables automatic control frame handling
 /// (like Ping/Pong), connection health monitoring, and other protocol-level features. Only use
 /// this if you need direct access to the underlying frame processing and are prepared to
 /// handle all protocol requirements manually.
 ///
-/// After calling [`WebSocket::split()`], you get direct access to the raw [`ReadHalf`] and
+/// After calling [`futures::StreamExt::split()`], you get direct access to the raw [`ReadHalf`] and
 /// [`WriteHalf`] components, as well as the underlying [`HttpStream`] for direct stream access.
 /// Read more about their behavior in their respective documentation.
 ///
@@ -1433,7 +1435,7 @@ impl WebSocket {
     /// - The provided `Options` cannot be applied due to invalid settings.
     ///
     /// # Notes
-    /// - For standard WebSocket behavior without custom configurations, consider using [`connect`].
+    /// - For standard WebSocket behavior without custom configurations, consider using [`WebSocket::connect`].
     /// - Read more about the available options in the [`Options`] documentation to fully utilize client-defined settings.
     ///
     pub async fn connect_with_options(
@@ -1735,7 +1737,7 @@ impl WebSocket {
 
     /// Attempts to upgrade an incoming `hyper::Request` to a WebSocket connection with customizable options.
     ///
-    /// Similar to [`upgrade`], this function verifies the required WebSocket headers and, if successful,
+    /// Similar to [`WebSocket::upgrade`], this function verifies the required WebSocket headers and, if successful,
     /// returns an HTTP response to switch protocols along with an upgrade future for the WebSocket stream.
     /// Additionally, it applies the specified `options`, which may define parameters such as compression settings,
     /// UTF-8 validation, and maximum payload size.
@@ -1805,7 +1807,7 @@ impl WebSocket {
             .header(hyper::header::UPGRADE, "websocket")
             .header(
                 header::SEC_WEBSOCKET_ACCEPT,
-                &sec_websocket_protocol(key.as_bytes()),
+                sec_websocket_protocol(key.as_bytes()),
             )
             .body(Empty::new())
             .expect("bug: failed to build response");
@@ -2520,7 +2522,7 @@ impl ReadHalf {
 /// - Protocol-compliant connection closure
 /// - Frame buffering and flushing
 ///
-/// The write half can be obtained by splitting a [`WebSocket`] using [`WebSocket::split()`].
+/// The write half can be obtained by splitting a [`WebSocket`] using [`futures::StreamExt::split()`].
 ///
 /// # Connection Closure
 /// When closing the connection, [`WriteHalf`] follows the WebSocket protocol by:

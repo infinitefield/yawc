@@ -25,7 +25,6 @@ include = ["/src/**/*", "/Cargo.toml", "/README.md", "/LICENSE"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
-targets = ["x86_64-unknown-linux-gnu"]
 
 # Optional feature configurations
 [features]
