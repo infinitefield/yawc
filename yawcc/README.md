@@ -37,7 +37,7 @@ yawcc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
 Usage: yawcc client [OPTIONS] <URL>
 
 Arguments:
-  <URL>  The {ebSocket URL to connect to (ws:// or wss://)
+  <URL>  The {WebSocket URL to connect to (ws:// or wss://)
 
 Options:
   -t, --timeout <TIMEOUT>  Maximum duration to wait when establishing the connection. Accepts human-readable formats like "5s", "1m", "500ms" [default: 5s]
