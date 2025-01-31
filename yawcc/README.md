@@ -1,4 +1,4 @@
-# yawc cli
+# yawcc cli
 
 A command-line interface tool for WebSocket communication that supports both secure (wss://) and non-secure (ws://) connections.
 
@@ -14,7 +14,7 @@ A command-line interface tool for WebSocket communication that supports both sec
 ## Installation
 
 ```bash
-cargo install yawc  # Replace with actual installation command
+cargo install yawcc 
 ```
 
 ## Usage
@@ -22,13 +22,13 @@ cargo install yawc  # Replace with actual installation command
 ### Basic Connection
 
 ```bash
-yawc c wss://fstream.binance.com/ws/btcusdt@aggTrade
+yawcc c wss://fstream.binance.com/ws/btcusdt@aggTrade
 ```
 
 ### With JSON Validation
 
 ```bash
-yawc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
+yawcc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
 ```
 
 ## Command-line Options
@@ -65,13 +65,13 @@ Example with comments:
 
 ## History
 
-Command history is automatically saved to `~/.yawc_history` and is loaded when the client starts.
+Command history is automatically saved to `~/.yawcc_history` and is loaded when the client starts.
 
 ## Building from Source
 
 ```bash
-git clone https://github.com/infinitefield/websocket
-cd yawc
+git clone https://github.com/infinitefield/yawc
+cd yawc/yawcc
 cargo build --release
 ```
 
