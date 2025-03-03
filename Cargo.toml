@@ -15,7 +15,7 @@ categories = [
     "web-programming::websocket",
 ]
 readme = "README.md"
-rust-version = "1.75.0"
+rust-version = "1.81.0"
 
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
