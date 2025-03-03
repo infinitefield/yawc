@@ -1309,17 +1309,17 @@ impl Options {
 /// ```
 ///
 /// # Splitting the WebSocket
-/// The WebSocket can be split into independent read and write halves for concurrent operations.
-/// For most use cases requiring concurrent reads and writes, use [`StreamExt::split`] which
-/// maintains the WebSocket's built-in protocol handling.
+/// For concurrent reading and writing operations, use [`StreamExt::split`] from the futures crate,
+/// which maintains all WebSocket protocol handling while enabling simultaneous reads and writes.
+/// This is the recommended approach for most concurrent WebSocket operations.
 ///
-/// **Warning:** [`futures::StreamExt::split()`] is a low-level API that bypasses critical WebSocket protocol
-/// management and should rarely be used directly. It disables automatic control frame handling
+/// In contrast, [`WebSocket::split_stream`] is a low-level API that bypasses critical WebSocket
+/// protocol management and should rarely be used directly. It disables automatic control frame handling
 /// (like Ping/Pong), connection health monitoring, and other protocol-level features. Only use
-/// this if you need direct access to the underlying frame processing and are prepared to
+/// this method if you need direct access to the underlying frame processing and are prepared to
 /// handle all protocol requirements manually.
 ///
-/// After calling [`futures::StreamExt::split()`], you get direct access to the raw [`ReadHalf`] and
+/// After calling [`WebSocket::split_stream`], you get direct access to the raw [`ReadHalf`] and
 /// [`WriteHalf`] components, as well as the underlying [`HttpStream`] for direct stream access.
 /// Read more about their behavior in their respective documentation.
 ///
@@ -2009,7 +2009,15 @@ impl WebSocket {
     /// # Returns
     /// - `Ok(())` if the data was successfully serialized and sent.
     /// - `Err` if there was an error serializing the data or sending the frame.
+    ///
+    /// # Feature
+    /// This method requires the `json` feature to be enabled in your Cargo.toml:
+    /// ```toml
+    /// [dependencies]
+    /// yawc = { version = "0.1", features = ["json"] }
+    /// ```
     #[cfg(feature = "json")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
     pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> Result<()> {
         let bytes = serde_json::to_vec(data)?;
         futures::SinkExt::send(self, FrameView::text(bytes)).await
