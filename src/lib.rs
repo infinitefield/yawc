@@ -166,6 +166,16 @@ pub type CompressionLevel = flate2::Compression;
 /// standard result type for operations that may return a `WebSocketError`.
 pub type Result<T> = std::result::Result<T, WebSocketError>;
 
+/// Type alias for HTTP responses used during WebSocket upgrade.
+///
+/// This alias represents the HTTP response sent back to clients during a WebSocket handshake.
+/// It encapsulates a response with empty body content, which is standard for WebSocket upgrades
+/// as the connection transitions from HTTP to the WebSocket protocol after handshake completion.
+///
+/// Used in conjunction with the [`UpgradeResult`] type to provide the necessary response headers
+/// for protocol switching during the WebSocket handshake process.
+pub type HttpResponse = Response<Empty<Bytes>>;
+
 /// The result type returned by WebSocket upgrade operations.
 ///
 /// This type represents the result of a server-side WebSocket upgrade attempt, containing:
@@ -175,7 +185,7 @@ pub type Result<T> = std::result::Result<T, WebSocketError>;
 /// Both components must be handled for a successful upgrade:
 /// 1. Send the HTTP response to the client
 /// 2. Await the future to obtain the WebSocket connection
-pub type UpgradeResult = Result<(Response<Empty<Bytes>>, UpgradeFut)>;
+pub type UpgradeResult = Result<(HttpResponse, UpgradeFut)>;
 
 /// Represents errors that can occur during WebSocket operations.
 ///
@@ -1710,16 +1720,15 @@ impl WebSocket {
     ///     service::service_fn,
     ///     Request, Response,
     /// };
-    /// use http_body_util::Empty;
     /// use yawc::{Result, WebSocket, UpgradeFut, Options};
     ///
     /// async fn handle_client(fut: UpgradeFut) -> yawc::Result<()> {
     ///     let ws = fut.await?;
-    ///     // use `ws`
+    ///// use `ws`
     ///     Ok(())
     /// }
     ///
-    /// async fn server_upgrade(mut req: Request<Incoming>) -> yawc::UpgradeResult {
+    /// async fn server_upgrade(mut req: Request<Incoming>) -> anyhow::Result<yawc::HttpResponse> {
     ///     let (response, fut) = WebSocket::upgrade_with_options(
     ///         &mut req,
     ///         Options::default()
