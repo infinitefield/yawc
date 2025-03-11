@@ -3,7 +3,7 @@ name = "yawcc"
 version = "0.1.0"
 edition = "2021"
 authors = ["Dario <dario@infinitefieldtrading.com>"]
-description = "Yet another websocket library. But a fast, secure WebSocket implementation with RFC 6455 compliance and compression support"
+description = "CLI tool using yawc"
 repository = "https://github.com/infinitefield/yawc"
 license = "LGPL-3.0-or-later"
 keywords = ["websocket", "websockets", "ws", "networking", "async"]
@@ -29,7 +29,13 @@ rustls = { version = "0.23.18", default-features = false, features = [
     "std",
     "tls12",
 ] }
-tokio = { version = "1.41.0", features = ["rt", "rt-multi-thread", "time", "macros", "signal"] }
+tokio = { version = "1.41.0", features = [
+    "rt",
+    "rt-multi-thread",
+    "time",
+    "macros",
+    "signal",
+] }
 url = "2.5.3"
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
