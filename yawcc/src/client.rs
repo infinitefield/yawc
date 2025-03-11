@@ -34,7 +34,7 @@ pub struct Cmd {
     #[arg(long)]
     input_as_json: bool,
 
-    /// The {ebSocket URL to connect to (ws:// or wss://)
+    /// The WebSocket URL to connect to (ws:// or wss://)
     url: Url,
 }
 

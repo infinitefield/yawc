@@ -29,12 +29,7 @@ rustls = { version = "0.23.18", default-features = false, features = [
     "std",
     "tls12",
 ] }
-tokio = { version = "1.41.0", features = [
-    "rt",
-    "rt-multi-thread",
-    "time",
-    "macros",
-] }
+tokio = { version = "1.41.0", features = ["rt", "rt-multi-thread", "time", "macros", "signal"] }
 url = "2.5.3"
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
@@ -45,3 +40,6 @@ tokio-rustls = { version = "0.26.0", default-features = false, features = [
 home = "0.5.9"
 humantime = "2.1.0"
 serde_json = "1.0.132"
+hyper-util = { version = "0.1.10", features = ["http1", "server"] }
+hyper = { version = "1.6.0", features = ["http1", "server"] }
+http-body-util = "0.1.2"

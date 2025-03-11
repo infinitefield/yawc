@@ -166,6 +166,17 @@ pub type CompressionLevel = flate2::Compression;
 /// standard result type for operations that may return a `WebSocketError`.
 pub type Result<T> = std::result::Result<T, WebSocketError>;
 
+/// The result type returned by WebSocket upgrade operations.
+///
+/// This type represents the result of a server-side WebSocket upgrade attempt, containing:
+/// - An HTTP response with the appropriate WebSocket upgrade headers to send to the client
+/// - A future that will resolve to a WebSocket connection once the protocol switch is complete
+///
+/// Both components must be handled for a successful upgrade:
+/// 1. Send the HTTP response to the client
+/// 2. Await the future to obtain the WebSocket connection
+pub type UpgradeResult = Result<(Response<Empty<Bytes>>, UpgradeFut)>;
+
 /// Represents errors that can occur during WebSocket operations.
 ///
 /// This enum encompasses all possible error conditions that may arise when working with WebSocket connections,
@@ -1708,7 +1719,7 @@ impl WebSocket {
     ///     Ok(())
     /// }
     ///
-    /// async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Empty<Bytes>>> {
+    /// async fn server_upgrade(mut req: Request<Incoming>) -> yawc::UpgradeResult {
     ///     let (response, fut) = WebSocket::upgrade_with_options(
     ///         &mut req,
     ///         Options::default()
@@ -1729,9 +1740,7 @@ impl WebSocket {
     /// - Sec-WebSocket-Key header is missing
     /// - Sec-WebSocket-Version is not "13"
     ///
-    pub fn upgrade<B>(
-        request: impl std::borrow::BorrowMut<Request<B>>,
-    ) -> Result<(Response<Empty<Bytes>>, UpgradeFut)> {
+    pub fn upgrade<B>(request: impl std::borrow::BorrowMut<Request<B>>) -> UpgradeResult {
         Self::upgrade_with_options(request, Options::default())
     }
 
@@ -1777,7 +1786,7 @@ impl WebSocket {
     pub fn upgrade_with_options<B>(
         mut request: impl std::borrow::BorrowMut<Request<B>>,
         options: Options,
-    ) -> Result<(Response<Empty<Bytes>>, UpgradeFut)> {
+    ) -> UpgradeResult {
         let request = request.borrow_mut();
 
         let key = request
