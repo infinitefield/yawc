@@ -1886,7 +1886,6 @@ impl WebSocket {
     ///
     /// async fn handle_client(fut: UpgradeFut) -> yawc::Result<()> {
     ///     let ws = fut.await?;
-    ///// use `ws`
     ///     Ok(())
     /// }
     ///

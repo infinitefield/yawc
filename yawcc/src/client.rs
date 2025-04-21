@@ -13,7 +13,7 @@ use tokio_rustls::TlsConnector;
 use url::Url;
 use yawc::{
     frame::{FrameView, OpCode},
-    WebSocket,
+    HttpRequest, HttpRequestBuilder, WebSocket,
 };
 
 /// Command to connect and interact with a WebSocket server.
@@ -29,6 +29,11 @@ pub struct Cmd {
     #[arg(short, long, value_parser = humantime::parse_duration, default_value = "5s")]
     timeout: Duration,
 
+    /// Custom headers to send to the server in "Key: Value" format
+    /// For example: --header "Authorization: Bearer token123"
+    #[arg(short = 'H', long = "header", value_name = "Headers")]
+    headers: Vec<String>,
+
     /// When enabled, validates and pretty-prints received messages as JSON.
     /// Invalid JSON messages will result in an error.
     #[arg(long)]
@@ -36,6 +41,19 @@ pub struct Cmd {
 
     /// The WebSocket URL to connect to (ws:// or wss://)
     url: Url,
+}
+
+fn build_request(headers: &[String]) -> anyhow::Result<HttpRequestBuilder> {
+    let mut builder = HttpRequest::builder();
+    for header in headers.iter().map(|item| item.split_once(':')) {
+        // TODO: handle split error
+        let Some((key, value)) = header else { continue };
+        let key = key.trim();
+        let value = value.trim_start(); // maybe the user wants to add some space after, idk
+        builder = builder.header(key, value);
+    }
+
+    Ok(builder)
 }
 
 pub fn run(cmd: Cmd) -> anyhow::Result<()> {
@@ -57,6 +75,8 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     // external printer
     let printer = rl.create_external_printer().unwrap();
 
+    let request_builder = build_request(&cmd.headers)?;
+
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -68,7 +88,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     let url = cmd.url.clone();
     let ws = runtime.block_on(timeout(
         cmd.timeout,
-        WebSocket::connect(url, Some(tls_connector())),
+        WebSocket::connect_with_request(url, Some(tls_connector()), request_builder),
     ))??;
 
     println!("> Connected to {}", cmd.url);
@@ -129,7 +149,7 @@ async fn handle_websocket(
             }
             frame = ws.next() => {
                 if frame.is_none() {
-                    let _ = printer.print(format!("<Disconnected>"));
+                    let _ = printer.print("<Disconnected>".to_string());
                     break;
                 }
 
@@ -147,7 +167,7 @@ async fn handle_websocket(
                                 }
                             }
                         } else {
-                            let _ = printer.print(format!("{msg}"));
+                            let _ = printer.print(msg.to_string());
                         }
                     }
                     _ => {
