@@ -166,6 +166,29 @@ pub type CompressionLevel = flate2::Compression;
 /// standard result type for operations that may return a `WebSocketError`.
 pub type Result<T> = std::result::Result<T, WebSocketError>;
 
+/// Type alias for HTTP requests used in WebSocket connection handling.
+///
+/// This alias represents HTTP requests with an empty body, used primarily for
+/// WebSocket protocol negotiation during the initial handshake process. It encapsulates
+/// the HTTP headers and metadata necessary for establishing WebSocket connections
+/// according to RFC 6455, while maintaining a minimal memory footprint by using
+/// an empty body type.
+///
+/// Used in conjunction with WebSocket upgrade mechanics to parse and validate
+/// incoming connection requests before transitioning to the WebSocket protocol.
+pub type HttpRequest = hyper::http::request::Request<()>;
+
+/// Type alias for HTTP request builders used in WebSocket client connection setup.
+///
+/// This alias represents the builder pattern used to construct HTTP requests during
+/// WebSocket handshake initialization. It encapsulates the ability to set headers,
+/// method, URI, and other request properties required for proper WebSocket protocol
+/// negotiation according to RFC 6455.
+///
+/// Used primarily in the client-side connection process to prepare the initial
+/// HTTP upgrade request with the appropriate WebSocket-specific headers.
+pub type HttpRequestBuilder = hyper::http::request::Builder;
+
 /// Type alias for HTTP responses used during WebSocket upgrade.
 ///
 /// This alias represents the HTTP response sent back to clients during a WebSocket handshake.
@@ -1408,7 +1431,7 @@ impl WebSocket {
     ///   `Options::default()` for standard WebSocket behavior.
     ///
     pub async fn connect(url: Url, connector: Option<TlsConnector>) -> Result<WebSocket> {
-        Self::connect_priv(url, connector, Options::default()).await
+        Self::connect_priv(url, connector, Options::default(), HttpRequest::builder()).await
     }
 
     /// Establishes a WebSocket connection to the specified `url` with customizable client options.
@@ -1464,13 +1487,65 @@ impl WebSocket {
         connector: Option<TlsConnector>,
         options: Options,
     ) -> Result<WebSocket> {
-        Self::connect_priv(url, connector, options).await
+        Self::connect_priv(url, connector, options, HttpRequest::builder()).await
+    }
+
+    /// Establishes a WebSocket connection with custom options and HTTP request configuration.
+    ///
+    /// This advanced connection method allows complete customization of both the WebSocket options
+    /// and the underlying HTTP request used to establish the connection. This is useful for
+    /// scenarios requiring custom headers, authentication, or other HTTP-level customizations
+    /// while still configuring WebSocket-specific behavior.
+    ///
+    /// # Parameters
+    /// - `url`: The WebSocket URL to connect to, supporting both `ws://` and `wss://` schemes
+    /// - `connector`: Optional TLS connector for secure WebSocket connections
+    /// - `options`: WebSocket configuration including compression, buffer sizes, and validation
+    /// - `builder`: HTTP request builder for customizing the connection handshake
+    ///
+    /// # Returns
+    /// A `Result` containing the established WebSocket connection if successful
+    ///
+    /// # Example
+    /// ```no_run
+    /// use yawc::{WebSocket, Options, Result, HttpRequest};
+    /// use tokio_rustls::TlsConnector;
+    /// use url::Url;
+    ///
+    /// async fn connect_with_auth_header() -> Result<WebSocket> {
+    ///     let url = Url::parse("wss://api.example.com/socket")?;
+    ///     let options = Options::default();
+    ///     let request_builder = HttpRequest::builder()
+    ///         .header("Authorization", "Bearer token123")
+    ///         .header("User-Agent", "Custom WebSocket Client");
+    ///
+    ///     WebSocket::connect_with_options_and_request(
+    ///         url,
+    ///         Some(tls_connector()),
+    ///         options,
+    ///         request_builder
+    ///     ).await
+    /// }
+    ///
+    /// fn tls_connector() -> TlsConnector {
+    ///     // Create TLS configuration
+    ///     todo!()
+    /// }
+    /// ```
+    pub async fn connect_with_options_and_request(
+        url: Url,
+        connector: Option<TlsConnector>,
+        options: Options,
+        builder: HttpRequestBuilder,
+    ) -> Result<WebSocket> {
+        Self::connect_priv(url, connector, options, builder).await
     }
 
     async fn connect_priv(
         url: Url,
         connector: Option<TlsConnector>,
         options: Options,
+        builder: HttpRequestBuilder,
     ) -> Result<WebSocket> {
         let scheme = url.scheme();
         let host = url.host().expect("hostname").to_string();
@@ -1489,7 +1564,7 @@ impl WebSocket {
             _ => return Err(WebSocketError::InvalidHttpScheme),
         };
 
-        Self::handshake(url, stream, options).await
+        Self::handshake_with_request(url, stream, options, builder).await
     }
 
     /// Performs a WebSocket handshake over an existing connection.
@@ -1543,6 +1618,49 @@ impl WebSocket {
         io: S,
         options: Options,
     ) -> Result<WebSocket> {
+        Self::handshake_with_request(url, io, options, HttpRequest::builder()).await
+    }
+
+    /// Performs a WebSocket handshake with a customizable HTTP request.
+    ///
+    /// This method extends the basic `handshake` functionality by allowing you to provide
+    /// a custom HTTP request builder, which can be used to set additional headers or
+    /// customize the request before performing the WebSocket handshake.
+    ///
+    /// # Parameters
+    /// - `url`: The WebSocket URL to connect to
+    /// - `io`: The I/O stream to use for the WebSocket connection
+    /// - `options`: Configuration options for the WebSocket connection
+    /// - `builder`: A custom HTTP request builder for customizing the handshake request
+    ///
+    /// # Returns
+    /// A `Result` containing the established WebSocket connection if successful
+    ///
+    /// # Example
+    /// ```no_run
+    /// use yawc::{WebSocket, Options, Result};
+    /// use tokio::net::TcpStream;
+    ///
+    /// async fn connect() -> Result<WebSocket> {
+    ///     let stream = TcpStream::connect("example.com:80").await.unwrap();
+    ///     let builder = yawc::HttpRequest::builder()
+    ///         .header("User-Agent", "My Custom WebSocket Client")
+    ///         .header("Authorization", "Bearer token123");
+    ///
+    ///     WebSocket::handshake_with_request(
+    ///         "ws://example.com/socket".parse().unwrap(),
+    ///         stream,
+    ///         Options::default(),
+    ///         builder
+    ///     ).await
+    /// }
+    /// ```
+    pub async fn handshake_with_request<S: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
+        url: Url,
+        io: S,
+        options: Options,
+        builder: HttpRequestBuilder,
+    ) -> Result<WebSocket> {
         let host = url.host().expect("hostname").to_string();
         let port_defined = url.port().is_some();
         let port = url.port_or_known_default().expect("port");
@@ -1555,7 +1673,7 @@ impl WebSocket {
 
         let target_url = &url[url::Position::BeforePath..];
 
-        let mut req = Request::builder()
+        let mut req = builder
             .method("GET")
             .uri(target_url)
             .header(header::HOST, host_header.as_str())
