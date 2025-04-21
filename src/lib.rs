@@ -1490,6 +1490,50 @@ impl WebSocket {
         Self::connect_priv(url, connector, options, HttpRequest::builder()).await
     }
 
+    /// Establishes a WebSocket connection with custom HTTP request builder configuration.
+    ///
+    /// This method allows more control over the HTTP connection request by accepting a custom
+    /// request builder. This is useful for adding custom headers, authentication, or other
+    /// request parameters needed for the WebSocket handshake.
+    ///
+    /// # Parameters
+    /// - `url`: The WebSocket URL to connect to, supporting both `ws://` and `wss://` schemes
+    /// - `connector`: Optional TLS connector for secure WebSocket connections
+    /// - `builder`: Custom HTTP request builder for the initial handshake request
+    ///
+    /// # Returns
+    /// A `Result` containing the established WebSocket connection if successful
+    ///
+    /// # Example
+    /// ```no_run
+    /// use yawc::{WebSocket, HttpRequest, Result};
+    /// use tokio_rustls::TlsConnector;
+    ///
+    /// async fn connect_with_custom_headers() -> Result<WebSocket> {
+    ///     let request_builder = HttpRequest::builder()
+    ///         .header("Authorization", "Bearer token123")
+    ///         .header("User-Agent", "Custom WebSocket Client");
+    ///
+    ///     WebSocket::connect_with_request(
+    ///         "wss://api.example.com/socket".parse()?,
+    ///         Some(tls_connector()),
+    ///         request_builder
+    ///     ).await
+    /// }
+    ///
+    /// fn tls_connector() -> TlsConnector {
+    ///     // Create TLS configuration
+    ///     todo!()
+    /// }
+    /// ```
+    pub async fn connect_with_request(
+        url: Url,
+        connector: Option<TlsConnector>,
+        builder: HttpRequestBuilder,
+    ) -> Result<WebSocket> {
+        Self::connect_priv(url, connector, Options::default(), builder).await
+    }
+
     /// Establishes a WebSocket connection with custom options and HTTP request configuration.
     ///
     /// This advanced connection method allows complete customization of both the WebSocket options
