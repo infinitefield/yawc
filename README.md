@@ -192,7 +192,7 @@ let options = Options::default()
 Split the WebSocket for independent reading and writing:
 
 ```rust
-let (mut read, mut write) = ws.split();
+let (mut write, mut read) = ws.split();
 
 // Read and write concurrently
 tokio::join!(
