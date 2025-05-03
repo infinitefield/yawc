@@ -2,8 +2,9 @@ use bytes::{Buf, BytesMut};
 use tokio_util::codec;
 
 use crate::{
+    frame::OpCode,
     frame::{self, Frame, MAX_HEAD_SIZE},
-    OpCode, WebSocketError,
+    WebSocketError,
 };
 
 /// Represents the reading state of a WebSocket frame.

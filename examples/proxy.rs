@@ -120,26 +120,6 @@ async fn server(clients: Arc<Clients>) -> yawc::Result<()> {
 
 // =============== client functions ================
 
-// Creates TLS connector for secure WebSocket connections
-fn tls_connector() -> TlsConnector {
-    // Initialize empty root certificate store
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    // Add system root certificates
-    root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
-        subject: ta.subject.clone(),
-        subject_public_key_info: ta.subject_public_key_info.clone(),
-        name_constraints: ta.name_constraints.clone(),
-    }));
-    // config.dangerous()... to ignore the cert verification
-
-    // Create TLS connector with root certificates
-    TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth(),
-    ))
-}
-
 // Client function that connects to external WebSocket and broadcasts messages
 async fn client(clients: Arc<Clients>) -> Result<()> {
     loop {
@@ -148,7 +128,6 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
             "wss://stream.binance.com:9443/ws/btcusdt@depth"
                 .parse()
                 .unwrap(),
-            Some(tls_connector()),
         )
         .await?;
 

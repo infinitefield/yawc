@@ -6,18 +6,17 @@ use yawc::{
 };
 
 async fn connect(path: &str) -> Result<WebSocket> {
-    let client = WebSocket::connect_with_options(
-        format!("ws://localhost:9001/{path}").parse().unwrap(),
-        None,
-        Options::default()
-            .with_compression_level(CompressionLevel::none())
-            .with_utf8()
-            .with_max_payload_read(100 * 1024 * 1024)
-            .with_max_read_buffer(200 * 1024 * 1024)
-            .client_no_context_takeover()
-            .server_no_context_takeover(),
-    )
-    .await?;
+    let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
+        .with_options(
+            Options::default()
+                .with_compression_level(CompressionLevel::none())
+                .with_utf8()
+                .with_max_payload_read(100 * 1024 * 1024)
+                .with_max_read_buffer(200 * 1024 * 1024)
+                .client_no_context_takeover()
+                .server_no_context_takeover(),
+        )
+        .await?;
     Ok(client)
 }
 
