@@ -3,10 +3,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use tokio::time::interval;
-use yawc::{
-    frame::{FrameView, OpCode},
-    CompressionLevel, Options, WebSocket,
-};
+use yawc::{CompressionLevel, FrameView, OpCode, Options, WebSocket};
 
 #[tokio::main]
 async fn main() {

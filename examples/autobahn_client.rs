@@ -1,9 +1,6 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
-use yawc::{
-    frame::{FrameView, OpCode},
-    CompressionLevel, Options, WebSocket,
-};
+use yawc::{frame::OpCode, CompressionLevel, FrameView, Options, WebSocket};
 
 async fn connect(path: &str) -> Result<WebSocket> {
     let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
@@ -42,7 +39,7 @@ async fn main() -> Result<()> {
 
         // if case % 10 == 0 {
         //     let mut ws = connect("updateReports?agent=websocket").await?;
-        //     ws.send(FrameView::close(1000, &[])).await?;
+        //     ws.send(FrameFrameView::close(1000, &[])).await?;
         //     ws.close().await?;
         // }
 

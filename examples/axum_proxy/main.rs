@@ -58,7 +58,7 @@ use tokio_stream::{wrappers::BroadcastStream, StreamMap};
 use url::Url;
 use yawc::{
     close::CloseCode,
-    frame::{FrameView, OpCode},
+    frame::{iew, O, ViewpCode},
     CompressionLevel, IncomingUpgrade, Options, UpgradeFut, WebSocket,
 };
 

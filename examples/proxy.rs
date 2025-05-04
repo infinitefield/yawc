@@ -26,14 +26,7 @@ use hyper::{
     {Request, Response},
 };
 use tokio::net::TcpListener;
-use tokio_rustls::{
-    rustls::{self, pki_types::TrustAnchor},
-    TlsConnector,
-};
-use yawc::{
-    frame::{FrameView, OpCode},
-    {CompressionLevel, WebSocket},
-};
+use yawc::{CompressionLevel, FrameView, OpCode, WebSocket};
 
 // Type alias for storing connected clients
 // Uses BTreeMap for ordered storage of client IDs -> WebSocket sinks

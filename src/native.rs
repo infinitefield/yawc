@@ -131,12 +131,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use close::CloseCode;
 use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
-use frame::{Frame, FrameView, OpCode};
 use futures::{future::BoxFuture, task::AtomicWaker, FutureExt, SinkExt, StreamExt};
 use thiserror::Error;
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
 use url::Url;
+
+pub use frame::{Frame, FrameView, OpCode};
 
 /// The maximum allowed payload size for reading, set to 1 MiB.
 ///
@@ -1447,18 +1448,21 @@ impl Future for WebSocketBuilder {
 /// by the underlying [`ReadHalf`] and [`WriteHalf`] structures.
 ///
 /// A [`WebSocket`] instance can be created via high-level functions like [`WebSocket::connect`]
-/// or through a custom stream setup with [`WebSocket::handshake`].
+/// or [`WebSocket::connect_with_options`], or through a custom stream setup with [`WebSocket::handshake`].
 ///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
 /// ```no_run
+/// use tokio::net::TcpStream;
 /// use yawc::{WebSocket, frame::OpCode};
 /// use futures::StreamExt;
+/// use tokio_rustls::TlsConnector;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let ws = WebSocket::connect("wss://echo.websocket.org".parse()?)
-///         .await?;
+///     let ws = WebSocket::connect(
+///         "wss://echo.websocket.org".parse()?,
+///     ).await?;
 ///     // Use `ws` for WebSocket communication
 ///     Ok(())
 /// }
@@ -2050,7 +2054,7 @@ impl WebSocket {
     /// use yawc::WebSocket;
     ///
     /// async fn connect() -> yawc::Result<()> {
-    ///     let ws = WebSocket::connect("ws://example.com/ws".parse()?, None).await?;
+    ///     let ws = WebSocket::connect("ws://example.com/ws".parse()?).await?;
     ///     // Advanced usage - requires manual protocol handling
     ///     let (raw_stream, read_half, write_half) = unsafe { ws.split_stream() };
     ///     // Must implement control frame handling, connection monitoring etc.
@@ -2417,15 +2421,10 @@ impl futures::Sink<FrameView> for WebSocket {
 /// use tokio_rustls::TlsConnector;
 /// use url::Url;
 ///
-/// fn tls_connector() -> TlsConnector {
-///     // Create TLS configuration here
-///     todo!()
-/// }
-///
 /// #[tokio::main]
 /// async fn main() -> yawc::Result<()> {
 ///     let url = "wss://api.example.com/ws".parse()?;
-///     let ws = WebSocket::connect(url, Some(tls_connector())).await?;
+///     let ws = WebSocket::connect(url).await?;
 ///
 ///     let (mut stream, mut read_half, write_half) = unsafe { ws.split_stream() };
 ///
@@ -2704,16 +2703,11 @@ impl ReadHalf {
 /// use futures::StreamExt;
 /// use tokio_rustls::TlsConnector;
 ///
-/// fn tls_connector() -> TlsConnector {
-///     todo!()
-/// }
-///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // Connect WebSocket
 ///     let ws = WebSocket::connect(
 ///         "wss://example.com/ws".parse()?,
-///         Some(tls_connector()),
 ///     ).await?;
 ///
 ///     // Split into read/write halves
