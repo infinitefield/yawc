@@ -820,7 +820,7 @@ enum ContextKind {
 /// When used with `StreamExt::split()`, the WakeProxy allows the split halves of the WebSocket
 /// to operate independently while maintaining proper synchronization.
 ///
-/// https://github.com/snapview/tokio-tungstenite/blob/015e00d9ccb447161ab69f18946d501c71d0f689/src/compat.rs#L21
+/// See [tokio-tungstenite implementation](https://github.com/snapview/tokio-tungstenite/blob/015e00d9ccb447161ab69f18946d501c71d0f689/src/compat.rs#L21)
 #[derive(Default)]
 struct WakeProxy {
     /// Waker for read operations
@@ -1447,8 +1447,8 @@ impl Future for WebSocketBuilder {
 /// It abstracts away details related to framing and compression, which are managed
 /// by the underlying [`ReadHalf`] and [`WriteHalf`] structures.
 ///
-/// A [`WebSocket`] instance can be created via high-level functions like [`WebSocket::connect`]
-/// or [`WebSocket::connect_with_options`], or through a custom stream setup with [`WebSocket::handshake`].
+/// A [`WebSocket`] instance can be created via high-level functions like [`WebSocket::connect`],
+/// or through a custom stream setup with [`WebSocket::handshake`].
 ///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
@@ -1495,7 +1495,7 @@ impl Future for WebSocketBuilder {
 /// ```
 ///
 /// # Splitting the WebSocket
-/// For concurrent reading and writing operations, use [`StreamExt::split`] from the futures crate,
+/// For concurrent reading and writing operations, use [`futures::StreamExt::split`] from the futures crate,
 /// which maintains all WebSocket protocol handling while enabling simultaneous reads and writes.
 /// This is the recommended approach for most concurrent WebSocket operations.
 ///
@@ -1560,7 +1560,7 @@ impl WebSocket {
     /// # Notes
     /// - By default, no custom options are applied during the connection process. Use
     ///   `Options::default()` for standard WebSocket behavior.
-    /// - For secure connections requiring custom TLS settings, use [`WebSocket::connect_with_connector`] instead.
+    /// - For secure connections requiring custom TLS settings, use [`WebSocketBuilder::with_connector()`] instead.
     ///
     pub fn connect(url: Url) -> WebSocketBuilder {
         WebSocketBuilder::new(url)

@@ -1,6 +1,8 @@
+#[doc(hidden)]
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+#[doc(hidden)]
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 
