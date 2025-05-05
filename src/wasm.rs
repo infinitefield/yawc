@@ -1,9 +1,16 @@
+use anyhow;
 use bytes::Bytes;
-use futures::channel::mpsc::{channel, Receiver, Sender};
-use futures::stream::StreamExt;
+use futures::{
+    channel::mpsc::{channel, Receiver, Sender},
+    sink::Sink,
+    stream::StreamExt,
+};
+use std::{
+    pin::Pin,
+    task::{ready, Context, Poll},
+};
 use url::Url;
 use wasm_bindgen::prelude::*;
-// use wasm_bindgen_futures::spawn_local;
 use web_sys::{ErrorEvent, MessageEvent};
 
 /// A WebSocket wrapper for WASM applications that provides an async interface
@@ -142,21 +149,6 @@ impl WebSocket {
         onerror_callback.forget();
     }
 
-    /// Send a string message over the websocket
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The string message to send
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or failure
-    pub async fn send(&self, frame: FrameView) -> anyhow::Result<(), JsValue> {
-        let data = frame.as_str();
-        self.stream.send_with_str(data)?;
-        Ok(())
-    }
-
     /// Receive the next frame from the websocket
     ///
     /// This is an alias for the `next` method, providing a more semantically clear way
@@ -166,28 +158,52 @@ impl WebSocket {
     ///
     /// A Result containing the received frame or an error
     pub async fn next_frame(&mut self) -> anyhow::Result<FrameView> {
-        self.next().await
-    }
-
-    /// Receive the next message from the websocket
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the received message string or an error
-    pub async fn next(&mut self) -> anyhow::Result<FrameView> {
-        match self.receiver.next().await {
-            Some(Ok(message)) => Ok(FrameView::text(message)),
-            Some(Err(e)) => Err(anyhow::anyhow!("WebSocket error: {}", e)),
-            None => Err(anyhow::anyhow!("WebSocket channel closed")),
+        use futures::StreamExt;
+        match self.next().await {
+            Some(res) => res,
+            None => Err(anyhow::anyhow!("connection closed")),
         }
     }
+}
 
-    /// Close the websocket connection
-    ///
-    /// # Returns
-    ///
-    /// Result indicating success or failure
-    pub fn close(&self) -> anyhow::Result<(), JsValue> {
-        self.stream.close()
+impl Sink<FrameView> for WebSocket {
+    type Error = anyhow::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // WebSocket's send is always ready in this implementation
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, frame: FrameView) -> Result<(), Self::Error> {
+        // Convert JsValue errors to anyhow errors
+        self.stream
+            .send_with_str(frame.as_str())
+            .map_err(|e| anyhow::anyhow!("Failed to send WebSocket message: {:?}", e))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // WebSocket sends immediately, no need for explicit flush
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Convert JsValue errors to anyhow errors
+        match self.stream.close() {
+            Ok(_) => Poll::Ready(Ok(())),
+            Err(e) => Poll::Ready(Err(anyhow::anyhow!("Failed to close WebSocket: {:?}", e))),
+        }
+    }
+}
+
+impl futures::Stream for WebSocket {
+    type Item = anyhow::Result<FrameView>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Use the underlying receiver's poll_next and map the result
+        match ready!(self.receiver.poll_next_unpin(cx)) {
+            Some(Ok(message)) => Poll::Ready(Some(Ok(FrameView::text(message)))),
+            Some(Err(e)) => Poll::Ready(Some(Err(anyhow::anyhow!("WebSocket error: {}", e)))),
+            None => return Poll::Ready(None),
+        }
     }
 }
