@@ -57,9 +57,8 @@ use tokio::{
 use tokio_stream::{wrappers::BroadcastStream, StreamMap};
 use url::Url;
 use yawc::{
-    close::CloseCode,
-    frame::{iew, O, ViewpCode},
-    CompressionLevel, IncomingUpgrade, Options, UpgradeFut, WebSocket,
+    close::CloseCode, CompressionLevel, FrameView, IncomingUpgrade, OpCode, Options, UpgradeFut,
+    WebSocket,
 };
 
 /// Application entry point - initializes logging and starts the server
