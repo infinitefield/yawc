@@ -2,7 +2,6 @@ use anyhow;
 use bytes::Bytes;
 use futures::{
     channel::mpsc::{channel, Receiver, Sender},
-    sink::Sink,
     stream::StreamExt,
 };
 use std::{
@@ -166,7 +165,7 @@ impl WebSocket {
     }
 }
 
-impl Sink<FrameView> for WebSocket {
+impl futures::Sink<FrameView> for WebSocket {
     type Error = anyhow::Error;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
