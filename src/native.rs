@@ -3020,10 +3020,17 @@ fn generate_key() -> String {
     BASE64_STANDARD.encode(input)
 }
 
-/// Creates a TLS connector with root certificates for secure WebSocket connections
+/// Creates a TLS connector with root certificates for secure WebSocket connections.
+/// If the crypto provider hasn't been set, [*ring*](https://github.com/briansmith/ring) will be used.
 ///
-/// Returns a TlsConnector configured with the system root certificates
-/// and no client authentication.
+/// Returns a TlsConnector configured with the system root certificates,
+/// no client authentication, and HTTP/1.1 ALPN support.
+///
+/// # Implementation Details
+/// - Uses webpki_roots for trusted root certificates
+/// - Configures with the default crypto provider (or falls back to ring)
+/// - Supports all TLS protocol versions
+/// - Sets up HTTP/1.1 ALPN for protocol negotiation
 fn tls_connector() -> TlsConnector {
     let mut root_cert_store = rustls::RootCertStore::empty();
     root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
@@ -3031,11 +3038,18 @@ fn tls_connector() -> TlsConnector {
         subject_public_key_info: ta.subject_public_key_info.clone(),
         name_constraints: ta.name_constraints.clone(),
     }));
-    // config.dangerous()... to ignore the cert verification
 
-    TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth(),
-    ))
+    // define the provider if any, fallback to ring
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(rustls::ALL_VERSIONS)
+        .expect("versions")
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth();
+    config.alpn_protocols = vec!["http/1.1".into()];
+
+    TlsConnector::from(Arc::new(config))
 }
