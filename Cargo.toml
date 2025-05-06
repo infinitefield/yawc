@@ -7,14 +7,13 @@ description = "Yet another websocket library. But a fast, secure WebSocket imple
 documentation = "https://docs.rs/yawc"
 repository = "https://github.com/infinitefield/yawc"
 license = "LGPL-3.0-or-later"
-keywords = ["websocket", "websockets", "ws", "networking", "async", "wasm"]
+keywords = ["websocket", "websockets", "ws", "networking", "wasm"]
 categories = [
     "network-programming",
     "asynchronous",
     "web-programming",
     "web-programming::websocket",
     "wasm",
-    "web-assembly",
 ]
 readme = "README.md"
 rust-version = "1.81.0"
