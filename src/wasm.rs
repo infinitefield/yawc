@@ -232,11 +232,8 @@ impl futures::Sink<FrameView> for WebSocket {
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
-        // Convert JsValue errors to anyhow errors
-        match self.stream.close() {
-            Ok(_) => Poll::Ready(Ok(())),
-            Err(e) => Poll::Ready(Err(WebSocketError::Js(e))),
-        }
+        let ret = self.stream.close().map_err(WebSocketError::Js);
+        Poll::Ready(ret)
     }
 }
 
