@@ -101,7 +101,7 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use super::{close, codec, compression, frame, stream};
+use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
 
 use {
     bytes::Bytes,
@@ -132,7 +132,6 @@ use close::CloseCode;
 use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
 use futures::{future::BoxFuture, task::AtomicWaker, FutureExt, SinkExt, StreamExt};
-use thiserror::Error;
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
 use url::Url;
@@ -156,12 +155,6 @@ pub const MAX_READ_BUFFER: usize = 2 * 1024 * 1024;
 /// This alias refers to `flate2::Compression`, allowing easy configuration of compression levels
 /// when creating compressors and decompressors for WebSocket frames.
 pub type CompressionLevel = flate2::Compression;
-
-/// A result type for WebSocket operations, using `WebSocketError` as the error type.
-///
-/// This type alias simplifies function signatures within the WebSocket module by providing a
-/// standard result type for operations that may return a `WebSocketError`.
-pub type Result<T> = std::result::Result<T, WebSocketError>;
 
 /// Type alias for HTTP requests used in WebSocket connection handling.
 ///
@@ -206,138 +199,6 @@ pub type HttpResponse = Response<Empty<Bytes>>;
 /// 1. Send the HTTP response to the client
 /// 2. Await the future to obtain the WebSocket connection
 pub type UpgradeResult = Result<(HttpResponse, UpgradeFut)>;
-
-/// Represents errors that can occur during WebSocket operations.
-///
-/// This enum encompasses all possible error conditions that may arise when working with WebSocket connections,
-/// including protocol violations, connection issues, and data validation errors. The errors are broadly
-/// categorized into:
-///
-/// - Protocol errors (e.g., invalid frames, incorrect sequence of operations)
-/// - Data validation errors (e.g., invalid UTF-8, oversized payloads)
-/// - HTTP/Connection errors (e.g., header issues, connection closure)
-/// - I/O and system-level errors
-///
-/// Each variant includes detailed documentation about the specific error condition and when it might occur.
-#[derive(Error, Debug)]
-pub enum WebSocketError {
-    /// Occurs when receiving a WebSocket fragment that violates the protocol specification,
-    /// such as receiving a new fragment before completing the previous one.
-    #[error("Invalid fragment")]
-    InvalidFragment,
-
-    /// Indicates that a text frame or close frame reason contains invalid UTF-8 data.
-    /// According to RFC 6455, all text payloads must be valid UTF-8.
-    #[error("Invalid UTF-8")]
-    InvalidUTF8,
-
-    /// Occurs when receiving a continuation frame without a preceding initial frame,
-    /// or when the continuation sequence is otherwise invalid according to RFC 6455.
-    #[error("Invalid continuation frame")]
-    InvalidContinuationFrame,
-
-    /// Returned when receiving an HTTP status code that is not valid for WebSocket handshake.
-    /// Only certain status codes (like 101 for successful upgrade) are valid.
-    #[error("Invalid status code: {0}")]
-    InvalidStatusCode(u16),
-
-    /// Indicates that the HTTP "Upgrade" header is either missing or does not contain
-    /// the required "websocket" value during connection handshake.
-    #[error("Invalid upgrade header")]
-    InvalidUpgradeHeader,
-
-    /// Indicates that the HTTP "Connection" header is either missing or does not contain
-    /// the required "upgrade" value during connection handshake.
-    #[error("Invalid connection header")]
-    InvalidConnectionHeader,
-
-    /// Returned when attempting to perform operations on a closed WebSocket connection.
-    /// Once a connection is closed, no further communication is possible.
-    #[error("Connection is closed")]
-    ConnectionClosed,
-
-    /// Indicates that a received close frame has an invalid format, such as
-    /// containing a payload of 1 byte (close frames must be either empty or ≥2 bytes).
-    #[error("Invalid close frame")]
-    InvalidCloseFrame,
-
-    /// Occurs when a close frame contains a status code that is not valid according to
-    /// RFC 6455 (e.g., using reserved codes or codes in invalid ranges).
-    #[error("Invalid close code")]
-    InvalidCloseCode,
-
-    /// Indicates that reserved bits in the WebSocket frame header are set when they
-    /// should be 0 according to the protocol specification.
-    #[error("Reserved bits are not zero")]
-    ReservedBitsNotZero,
-
-    /// Occurs when a control frame (ping, pong, or close) is received with the FIN bit
-    /// not set. RFC 6455 requires that control frames must not be fragmented.
-    #[error("Control frame must not be fragmented")]
-    ControlFrameFragmented,
-
-    /// Indicates that a received ping frame exceeds the maximum allowed size of 125 bytes
-    /// as specified in RFC 6455.
-    #[error("Ping frame too large")]
-    PingFrameTooLarge,
-
-    /// Occurs when a received frame's payload length exceeds the maximum configured size.
-    /// This helps prevent memory exhaustion attacks.
-    #[error("Frame too large")]
-    FrameTooLarge,
-
-    /// Returned when the "Sec-WebSocket-Version" header is not set to 13 during handshake.
-    /// RFC 6455 requires version 13 for modern WebSocket connections.
-    #[error("Sec-Websocket-Version must be 13")]
-    InvalidSecWebsocketVersion,
-
-    /// Indicates receipt of a frame with an invalid opcode value. RFC 6455 defines a specific
-    /// set of valid opcodes (0x0 through 0xF).
-    #[error("Invalid opcode (byte={0})")]
-    InvalidOpCode(u8),
-
-    /// Occurs during handshake when the required "Sec-WebSocket-Key" header is missing from
-    /// the client request.
-    #[error("Sec-WebSocket-Key header is missing")]
-    MissingSecWebSocketKey,
-
-    /// Returned when attempting to establish a WebSocket connection with an invalid URL scheme.
-    /// Only "ws://" and "wss://" schemes are valid.
-    #[error("Invalid http scheme")]
-    InvalidHttpScheme,
-
-    /// Occurs when receiving a compressed frame on a connection where compression was not
-    /// negotiated during the handshake.
-    #[error("Received compressed frame on stream that doesn't support compression")]
-    CompressionNotSupported,
-
-    /// Wraps errors from URL parsing that may occur when processing WebSocket URLs.
-    #[error(transparent)]
-    UrlParseError(#[from] url::ParseError),
-
-    /// Wraps standard I/O errors that may occur during WebSocket communication,
-    /// such as connection resets or network timeouts.
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
-
-    /// Wraps errors from the hyper HTTP library that may occur during the WebSocket
-    /// handshake process or connection upgrade.
-    #[error(transparent)]
-    HTTPError(#[from] hyper::Error),
-
-    /// Wraps errors from the reqwest client library that may occur when using
-    /// reqwest for WebSocket connections.
-    #[error(transparent)]
-    #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
-    #[cfg(feature = "reqwest")]
-    Reqwest(#[from] reqwest::Error),
-
-    /// Occurs when serialization of JSON data fails.
-    /// Only available when the `json` feature is enabled.
-    #[cfg(feature = "json")]
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-}
 
 /// Parameters negotiated with the client or the server.
 #[derive(Debug, Default, Clone)]

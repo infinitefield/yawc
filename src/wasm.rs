@@ -1,4 +1,3 @@
-use anyhow;
 use bytes::Bytes;
 use futures::{
     channel::mpsc::{channel, unbounded, Receiver, UnboundedReceiver, UnboundedSender},
@@ -10,7 +9,9 @@ use std::{
 };
 use url::Url;
 use wasm_bindgen::prelude::*;
-use web_sys::{ErrorEvent, MessageEvent};
+use web_sys::MessageEvent;
+
+use crate::{Result, WebSocketError};
 
 /// A WebSocket wrapper for WASM applications that provides an async interface
 /// for WebSocket communication. This implementation wraps the browser's native
@@ -19,7 +20,7 @@ pub struct WebSocket {
     /// The underlying browser WebSocket instance
     stream: web_sys::WebSocket,
     /// Channel receiver for incoming messages and errors
-    receiver: UnboundedReceiver<anyhow::Result<String>>,
+    receiver: UnboundedReceiver<Result<String>>,
 }
 
 /// A struct representing a view over a WebSocket frame's payload.
@@ -71,16 +72,16 @@ impl WebSocket {
     /// ```
     /// let websocket = WebSocket::connect("wss://example.com/socket").await?;
     /// ```
-    pub async fn connect(url: Url) -> anyhow::Result<Self, JsValue> {
+    pub async fn connect(url: Url) -> Result<Self> {
         // Initialize the WebSocket connection
-        let stream = web_sys::WebSocket::new(url.as_str())?;
+        let stream = web_sys::WebSocket::new(url.as_str()).map_err(WebSocketError::Js)?;
 
         // Create a communication channel
         let (tx, rx) = unbounded();
 
         // Set up the event handlers
         Self::setup_message_handler(&stream, tx.clone());
-        Self::setup_error_handler(&stream, tx);
+        Self::setup_close_handler(&stream, tx);
 
         // Wait for the connection to open
         let mut open_future = Self::setup_open_handler(&stream);
@@ -92,6 +93,20 @@ impl WebSocket {
         })
     }
 
+    /// Sets up the close handler for the WebSocket
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - Reference to the WebSocket instance
+    /// * `tx` - Channel sender to forward close events
+    fn setup_close_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<String>>) {
+        let onclose_callback: Closure<dyn Fn()> = Closure::new(move || {
+            let _ = tx.unbounded_send(Err(WebSocketError::ConnectionClosed));
+        });
+
+        stream.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
+        onclose_callback.forget();
+    }
     /// Sets up the open handler for the WebSocket and returns a future that resolves
     /// when the connection is established
     ///
@@ -121,10 +136,7 @@ impl WebSocket {
     ///
     /// * `stream` - Reference to the WebSocket instance
     /// * `tx` - Channel sender to forward received messages
-    fn setup_message_handler(
-        stream: &web_sys::WebSocket,
-        tx: UnboundedSender<anyhow::Result<String>>,
-    ) {
+    fn setup_message_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<String>>) {
         let onmessage_callback: Closure<dyn Fn(_)> = Closure::new(move |e: MessageEvent| {
             if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
                 // ignore the error, it could be that the other end closed the
@@ -135,26 +147,6 @@ impl WebSocket {
 
         stream.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
         onmessage_callback.forget();
-    }
-
-    /// Sets up the error handler for the WebSocket
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` - Reference to the WebSocket instance
-    /// * `tx` - Channel sender to forward error messages
-    fn setup_error_handler(
-        stream: &web_sys::WebSocket,
-        tx: UnboundedSender<anyhow::Result<String>>,
-    ) {
-        let onerror_callback: Closure<dyn Fn(_)> = Closure::new(move |e: ErrorEvent| {
-            let err = anyhow::anyhow!("{}", e.message());
-            // ignore the error
-            let _ = tx.unbounded_send(Err(err));
-        });
-
-        stream.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
-        onerror_callback.forget();
     }
 
     /// Sends a JSON-serialized message over the WebSocket
@@ -210,52 +202,58 @@ impl WebSocket {
     /// # Returns
     ///
     /// A Result containing the received frame or an error
-    pub async fn next_frame(&mut self) -> anyhow::Result<FrameView> {
+    pub async fn next_frame(&mut self) -> Result<FrameView> {
         use futures::StreamExt;
         match self.next().await {
             Some(res) => res,
-            None => Err(anyhow::anyhow!("connection closed")),
+            None => Err(WebSocketError::ConnectionClosed),
         }
     }
 }
 
 impl futures::Sink<FrameView> for WebSocket {
-    type Error = anyhow::Error;
+    type Error = WebSocketError;
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         // WebSocket's send is always ready in this implementation
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(self: Pin<&mut Self>, frame: FrameView) -> Result<(), Self::Error> {
+    fn start_send(self: Pin<&mut Self>, frame: FrameView) -> Result<()> {
         // Convert JsValue errors to anyhow errors
         self.stream
             .send_with_str(frame.as_str())
-            .map_err(|e| anyhow::anyhow!("Failed to send WebSocket message: {:?}", e))
+            .map_err(|_| WebSocketError::ConnectionClosed)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         // WebSocket sends immediately, no need for explicit flush
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         // Convert JsValue errors to anyhow errors
         match self.stream.close() {
             Ok(_) => Poll::Ready(Ok(())),
-            Err(e) => Poll::Ready(Err(anyhow::anyhow!("Failed to close WebSocket: {:?}", e))),
+            Err(e) => Poll::Ready(Err(WebSocketError::Js(e))),
         }
     }
 }
 
 impl futures::Stream for WebSocket {
-    type Item = anyhow::Result<FrameView>;
+    type Item = Result<FrameView>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Use the underlying receiver's poll_next and map the result
         match ready!(self.receiver.poll_next_unpin(cx)) {
             Some(Ok(message)) => Poll::Ready(Some(Ok(FrameView::text(message)))),
-            Some(Err(e)) => Poll::Ready(Some(Err(anyhow::anyhow!("WebSocket error: {}", e)))),
+            Some(Err(e)) => {
+                if matches!(e, WebSocketError::ConnectionClosed) {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Ready(Some(Err(e)))
+                }
+            }
             None => return Poll::Ready(None),
         }
     }
