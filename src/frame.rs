@@ -175,6 +175,20 @@ pub struct FrameView {
 }
 
 impl FrameView {
+    /// Converts the frame payload to a string slice, expecting valid UTF-8.
+    ///
+    /// # Returns
+    /// A string slice (`&str`) of the frame's payload.
+    ///
+    /// # Panics
+    /// Panics if the payload is not valid UTF-8. Use this method only when
+    /// you are certain the payload contains valid UTF-8 text, such as with
+    /// frames that have `OpCode::Text`.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.payload).expect("utf8")
+    }
+
     /// Creates a new immutable text frame view with the given payload.
     /// The payload is converted to immutable `Bytes`.
     pub fn text(payload: impl Into<Bytes>) -> Self {

@@ -7,12 +7,14 @@ description = "Yet another websocket library. But a fast, secure WebSocket imple
 documentation = "https://docs.rs/yawc"
 repository = "https://github.com/infinitefield/yawc"
 license = "LGPL-3.0-or-later"
-keywords = ["websocket", "websockets", "ws", "networking", "async"]
+keywords = ["websocket", "websockets", "ws", "networking", "async", "wasm"]
 categories = [
     "network-programming",
     "asynchronous",
     "web-programming",
     "web-programming::websocket",
+    "wasm",
+    "web-assembly",
 ]
 readme = "README.md"
 rust-version = "1.81.0"
@@ -47,7 +49,31 @@ name = "axum_proxy"
 path = "examples/axum_proxy/main.rs"
 required-features = ["axum", "reqwest", "json"]
 
+# ==============================================================================
+# Common dependencies (shared across all targets)
+# ==============================================================================
 [dependencies]
+url = "2"
+bytes = "1"
+futures = "0.3"
+thiserror = "1"
+
+# ==============================================================================
+# WebAssembly target-specific dependencies
+# ==============================================================================
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", default-features = false, features = [
+    "WebSocket",
+    "MessageEvent",
+] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+# ==============================================================================
+# Native target-specific dependencies
+# ==============================================================================
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # HTTP clients
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -57,6 +83,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
     "tls12",
 ] }
 reqwest = { version = "0.12", default-features = false, optional = true }
+webpki-roots = "0.26"
+http-body-util = "0.1"
 
 # HTTP servers (optional)
 axum-core = { version = "0.4", optional = true }
@@ -72,32 +100,31 @@ tokio = { version = "1", default-features = false, features = [
     "io-util",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
-
-# Compression
-flate2 = "1"
 
 # Encoding and cryptography
 base64 = "0.22"
 sha1 = "0.10"
+rand = "0.8"
 
-# JSON support
+# Utilities
+nom = "7.1"
+pin-project = "1"
+
+# Optional dependencies
+log = { version = "0.4", optional = true }
+simdutf8 = { version = "0.1", optional = true }
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 
-# Utilities
-simdutf8 = { version = "0.1", optional = true }
-bytes = "1"
-http-body-util = "0.1"
-nom = "7.1"
-pin-project = "1"
-rand = "0.8"
-thiserror = "1"
-url = "2"
-log = { version = "0.4", optional = true }
+# Compression
+flate2 = "1"
 
-[dev-dependencies]
-anyhow = "1.0.91"
+
+# ==============================================================================
+# Development dependencies (native only)
+# ==============================================================================
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+anyhow = "1"
 axum = "0.7.7"
 hyper = { version = "1.5.0", features = ["http1", "server", "client"] }
 log = "0.4.22"
@@ -110,4 +137,4 @@ serde_json = "1"
 simple_logger = "5.0.0"
 tokio = { version = "1.41.0", features = ["full"] }
 tokio-stream = { version = "0.1.16", features = ["sync"] }
-webpki-roots = "0.26.6"
+webpki-roots = "0.26"

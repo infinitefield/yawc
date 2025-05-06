@@ -1,16 +1,9 @@
 /// Example WebSocket client that connects to Bybit's public trade stream
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use tokio::time::interval;
-use tokio_rustls::{
-    rustls::{self, pki_types::TrustAnchor},
-    TlsConnector,
-};
-use yawc::{
-    frame::{FrameView, OpCode},
-    CompressionLevel, Options, WebSocket,
-};
+use yawc::{CompressionLevel, FrameView, OpCode, Options, WebSocket};
 
 #[tokio::main]
 async fn main() {
@@ -18,13 +11,10 @@ async fn main() {
     simple_logger::init_with_level(log::Level::Debug).expect("log");
 
     // Connect to the WebSocket server with fast compression enabled
-    let mut client = WebSocket::connect_with_options(
-        "wss://stream.bybit.com/v5/public/linear".parse().unwrap(),
-        Some(tls_connector()),
-        Options::default().with_compression_level(CompressionLevel::fast()),
-    )
-    .await
-    .expect("connection");
+    let mut client = WebSocket::connect("wss://stream.bybit.com/v5/public/linear".parse().unwrap())
+        .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
+        .await
+        .expect("connection");
 
     // JSON-formatted subscription request
     let text = r#"{
@@ -75,24 +65,4 @@ async fn main() {
             }
         }
     }
-}
-
-/// Creates a TLS connector with root certificates for secure WebSocket connections
-///
-/// Returns a TlsConnector configured with the system root certificates
-/// and no client authentication.
-fn tls_connector() -> TlsConnector {
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
-        subject: ta.subject.clone(),
-        subject_public_key_info: ta.subject_public_key_info.clone(),
-        name_constraints: ta.name_constraints.clone(),
-    }));
-    // config.dangerous()... to ignore the cert verification
-
-    TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth(),
-    ))
 }
