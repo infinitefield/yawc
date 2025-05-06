@@ -15,6 +15,7 @@ Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket imp
 - **Zero-Copy Design**: Efficient frame processing with minimal allocations
 - **Automatic Frame Management**: Handles control frames and fragmentation
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
+- **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications
 
 ## Usage
 
@@ -22,7 +23,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-yawc = "0.1"
+yawc = "0.2"
 ```
 
 ### Client Example
@@ -35,12 +36,7 @@ use yawc::{frame::FrameView, frame::OpCode, Options, Result, WebSocket};
 #[tokio::main]
 async fn main() -> Result<()> {
     // Connect with default options
-    let mut ws = WebSocket::reqwest(
-        "wss://echo.websocket.org".parse()?,
-        reqwest::Client::new(),
-        Options::default(),
-    )
-    .await?;
+    let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 
     // Send and receive messages
     ws.send(FrameView::text("Hello WebSocket!")).await?;
@@ -59,10 +55,9 @@ async fn main() -> Result<()> {
 
 ```toml
 [dependencies]
-yawc = { version = "0.1", features = ["reqwest"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
-reqwest = { version = "0.12.9", default-features = false, features = ["rustls-tls", "rustls-tls-webpki-roots"] }
-tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
+yawc = { version = "0.2" }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 ```
 
 ### Server Example
@@ -108,8 +103,8 @@ http-body-util = "0.1.2"
 bytes = "1.8.0"
 ```
 
-The [`examples`](https://github.com/infinitefield/websocket/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
-You can find a particularly comprehensive example in the [`axum_proxy`](https://github.com/infinitefield/websocket/tree/master/examples/axum_proxy) implementation, which demonstrates:
+The [`examples`](https://github.com/infinitefield/yawc/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
+You can find a particularly comprehensive example in the [`axum_proxy`](https://github.com/infinitefield/yawc/tree/master/examples/axum_proxy) implementation, which demonstrates:
 
 - Building a WebSocket broadcast server that efficiently relays messages between multiple connected clients
 - Creating a reverse proxy that transparently forwards WebSocket connections to upstream servers
@@ -242,12 +237,15 @@ none of them provide the full combination of features needed for high-performanc
 production-ready applications while maintaining a simple API.
 Existing libraries lack proper full-duplex stream support, zero-copy operations,
 or compression capabilities - or implement these features with complex, difficult-to-use APIs.
+Additionally, most libraries require significant codebase changes to support WebAssembly,
+whereas yawc maintains compatibility across platforms without forcing developers to rewrite their code.
 This library aims to provide all these critical features with an ergonomic interface
-that makes WebSocket development straightforward and efficient.
+that makes WebSocket development straightforward and efficient across native and WASM environments.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+Contributions are welcome! Please feel free to submit a Pull Request.
+For major changes, please open an issue first to discuss what you would like to change.
 
 ## License
 
