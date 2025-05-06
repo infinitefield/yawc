@@ -2166,7 +2166,7 @@ impl futures::Sink<FrameView> for WebSocket {
 /// After a [`OpCode::Close`] frame is received, the [`ReadHalf`] will no longer accept reads and will
 /// return a [`WebSocketError::ConnectionClosed`] error for all subsequent read attempts.
 ///
-/// # ⚠️ Advanced Usage Only
+/// # Warning
 ///
 /// In most cases, you should **not** use [`ReadHalf`] directly. Instead, use
 /// [`futures::StreamExt::split`](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.split)
@@ -2441,7 +2441,7 @@ impl ReadHalf {
 /// - Protocol-compliant connection closure
 /// - Frame buffering and flushing
 ///
-/// # ⚠️ Advanced Usage Only
+/// # Warning
 ///
 /// In most cases, you should **not** use [`WriteHalf`] directly. Instead, use
 /// [`futures::StreamExt::split`](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.split)
