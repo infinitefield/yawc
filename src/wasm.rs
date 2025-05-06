@@ -251,7 +251,7 @@ impl futures::Stream for WebSocket {
                     Poll::Ready(Some(Err(e)))
                 }
             }
-            None => return Poll::Ready(None),
+            None => Poll::Ready(None),
         }
     }
 }
