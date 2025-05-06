@@ -1,7 +1,7 @@
 use anyhow;
 use bytes::Bytes;
 use futures::{
-    channel::mpsc::{channel, Receiver, Sender},
+    channel::mpsc::{channel, unbounded, Receiver, UnboundedReceiver, UnboundedSender},
     stream::StreamExt,
 };
 use std::{
@@ -19,7 +19,7 @@ pub struct WebSocket {
     /// The underlying browser WebSocket instance
     stream: web_sys::WebSocket,
     /// Channel receiver for incoming messages and errors
-    receiver: Receiver<anyhow::Result<String>>,
+    receiver: UnboundedReceiver<anyhow::Result<String>>,
 }
 
 /// A struct representing a view over a WebSocket frame's payload.
@@ -76,7 +76,7 @@ impl WebSocket {
         let stream = web_sys::WebSocket::new(url.as_str())?;
 
         // Create a communication channel
-        let (tx, rx) = channel(1024);
+        let (tx, rx) = unbounded();
 
         // Set up the event handlers
         Self::setup_message_handler(&stream, tx.clone());
@@ -121,10 +121,15 @@ impl WebSocket {
     ///
     /// * `stream` - Reference to the WebSocket instance
     /// * `tx` - Channel sender to forward received messages
-    fn setup_message_handler(stream: &web_sys::WebSocket, mut tx: Sender<anyhow::Result<String>>) {
-        let onmessage_callback = Closure::new(move |e: MessageEvent| {
+    fn setup_message_handler(
+        stream: &web_sys::WebSocket,
+        tx: UnboundedSender<anyhow::Result<String>>,
+    ) {
+        let onmessage_callback: Closure<dyn Fn(_)> = Closure::new(move |e: MessageEvent| {
             if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
-                tx.try_send(Ok(String::from(txt))).expect("try send");
+                // ignore the error, it could be that the other end closed the
+                // connection and we don't want to panic
+                let _ = tx.unbounded_send(Ok(String::from(txt)));
             }
         });
 
@@ -138,14 +143,63 @@ impl WebSocket {
     ///
     /// * `stream` - Reference to the WebSocket instance
     /// * `tx` - Channel sender to forward error messages
-    fn setup_error_handler(stream: &web_sys::WebSocket, mut tx: Sender<anyhow::Result<String>>) {
-        let onerror_callback = Closure::new(move |e: ErrorEvent| {
+    fn setup_error_handler(
+        stream: &web_sys::WebSocket,
+        tx: UnboundedSender<anyhow::Result<String>>,
+    ) {
+        let onerror_callback: Closure<dyn Fn(_)> = Closure::new(move |e: ErrorEvent| {
             let err = anyhow::anyhow!("{}", e.message());
-            tx.try_send(Err(err)).expect("send");
+            // ignore the error
+            let _ = tx.unbounded_send(Err(err));
         });
 
         stream.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
         onerror_callback.forget();
+    }
+
+    /// Sends a JSON-serialized message over the WebSocket
+    ///
+    /// This method serializes the provided data structure into JSON and sends it
+    /// as a text frame over the WebSocket connection.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Any type that implements the `serde::Serialize` trait
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Reference to the data structure to serialize and send
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or any serialization/transmission errors
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #[derive(serde::Serialize)]
+    /// struct Message {
+    ///     content: String,
+    ///     timestamp: u64,
+    /// }
+    ///
+    /// let msg = Message {
+    ///     content: "Hello, WebSocket!".to_string(),
+    ///     timestamp: 1625097600,
+    /// };
+    ///
+    /// websocket.send_json(&msg).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if JSON serialization fails or if the WebSocket
+    /// connection encounters an error during transmission.
+    #[cfg(feature = "json")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
+    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> Result<()> {
+        let bytes = serde_json::to_vec(data)?;
+        futures::SinkExt::send(self, FrameView::text(bytes)).await
     }
 
     /// Receive the next frame from the websocket

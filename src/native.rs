@@ -1561,7 +1561,6 @@ impl WebSocket {
     /// - By default, no custom options are applied during the connection process. Use
     ///   `Options::default()` for standard WebSocket behavior.
     /// - For secure connections requiring custom TLS settings, use [`WebSocketBuilder::with_connector()`] instead.
-    ///
     pub fn connect(url: Url) -> WebSocketBuilder {
         WebSocketBuilder::new(url)
     }
@@ -3031,6 +3030,12 @@ fn generate_key() -> String {
 /// - Configures with the default crypto provider (or falls back to ring)
 /// - Supports all TLS protocol versions
 /// - Sets up HTTP/1.1 ALPN for protocol negotiation
+///
+/// # Panics
+/// This function will panic if:
+/// - The protocol versions specified in `rustls::ALL_VERSIONS` are not supported by the crypto provider
+/// - The TLS configuration cannot be built with the given parameters
+/// - The root certificate store cannot be properly initialized
 fn tls_connector() -> TlsConnector {
     let mut root_cert_store = rustls::RootCertStore::empty();
     root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
