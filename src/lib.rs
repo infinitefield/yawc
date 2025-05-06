@@ -1,3 +1,105 @@
+//! # yawc
+//! Implementation of the WebSocket protocol (RFC 6455) and permessage-deflate compression (RFC 7692),
+//! offering automatic handling for control frames, message fragmentation, and negotiated compression.
+//!
+//! The WebSocket implementation is fully compliant with the Autobahn test suite for both server and client configurations.
+//!
+//! The library supports WebAssembly (WASM) targets, allowing WebSocket connections in browser environments, with a few caveats:
+//! frame manipulation is not possible since browsers don't allow sending raw frames (though the FrameView struct is still used),
+//! and only text mode (UTF-8 strings) is currently supported. Pull requests are welcome to add binary support.
+//!
+//! # Features
+//! The crate provides several optional features that can be enabled in your `Cargo.toml`:
+//!
+//! - `reqwest`: Enables WebSocket support using reqwest as the HTTP client. Recommended for client-side
+//!   applications that need a higher-level HTTP client interface.
+//!
+//! - `axum`: Enables WebSocket support for the axum web framework through an extractor. Allows handling
+//!   WebSocket connections in axum route handlers.
+//!
+//! - `zlib`: Enables advanced compression options using zlib, including window size control. This allows
+//!   fine-tuning of the compression level and memory usage through `client_max_window_bits` and
+//!   `server_max_window_bits` options.
+//!
+//! - `logging`: Enables debug logging for connection negotiation and frame processing using the `log` crate.
+//!   Useful for debugging WebSocket connections.
+//!
+//! - `json`: Enables serialization of JSON data. Useful for handling JSON payloads in WebSocket messages.
+//!
+//! ## Usage Example
+//! ```toml
+//! [dependencies]
+//! yawc = { version = "0.1", features = ["axum"] }
+//! ```
+//!
+//! # Compression Support
+//! The crate implements the permessage-deflate WebSocket extension (RFC 7692) with configurable options:
+//!
+//! - Context takeover control for both client and server
+//! - Compression level adjustment (0-9)
+//! - Window size configuration (with `zlib` feature)
+//! - Memory usage optimization through no-context-takeover options
+//!
+//! # Client Example
+//! ```rust
+//! use tokio::net::TcpStream;
+//! use futures::{SinkExt, StreamExt};
+//! use yawc::{WebSocket, frame::OpCode};
+//!
+//! async fn client_connect(client: reqwest::Client) -> yawc::Result<()> {
+//!     let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
+//!
+//!     while let Some(frame) = ws.next().await {
+//!         match frame.opcode {
+//!             OpCode::Text | OpCode::Binary => {
+//!                 ws.send(frame).await?;
+//!             }
+//!             _ => {}
+//!         }
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Server Example
+//! ```rust
+//! use http_body_util::Empty;
+//! use futures::StreamExt;
+//! use hyper::{Request, body::{Incoming, Bytes}, Response};
+//! use yawc::{WebSocket};
+//!
+//! async fn server_upgrade(
+//!     mut req: Request<Incoming>,
+//! ) -> yawc::Result<Response<Empty<Bytes>>> {
+//!     let (response, fut) = WebSocket::upgrade(&mut req)?;
+//!
+//!     tokio::spawn(async move {
+//!         if let Ok(mut ws) = fut.await {
+//!             while let Some(frame) = ws.next().await {
+//!               // Process frames from the client here
+//!             }
+//!         }
+//!     });
+//!
+//!     Ok(response)
+//! }
+//! ```
+//!
+//! # Memory Safety
+//! The crate implements several safety measures:
+//! - Maximum payload size limits (configurable, default 2MB)
+//! - Automatic handling of control frames
+//! - Optional UTF-8 validation for text frames
+//! - Protection against memory exhaustion attacks
+//!
+//! # Performance Considerations
+//! - Compression can be tuned for either memory usage or compression ratio
+//! - Context takeover settings allow memory-CPU tradeoffs
+//! - Zero-copy frame processing where possible
+//! - Efficient handling of fragmented messages
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 #[doc(hidden)]
 #[cfg(target_arch = "wasm32")]
 mod wasm;

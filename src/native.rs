@@ -1,106 +1,3 @@
-//! # yawc
-//! Implementation of the WebSocket protocol (RFC 6455) and permessage-deflate compression (RFC 7692),
-//! offering automatic handling for control frames, message fragmentation, and negotiated compression.
-//!
-//! The WebSocket implementation is fully compliant with the Autobahn test suite for both server and client configurations.
-//!
-//! # Features
-//! The crate provides several optional features that can be enabled in your `Cargo.toml`:
-//!
-//! - `reqwest`: Enables WebSocket support using reqwest as the HTTP client. Recommended for client-side
-//!   applications that need a higher-level HTTP client interface.
-//!
-//! - `axum`: Enables WebSocket support for the axum web framework through an extractor. Allows handling
-//!   WebSocket connections in axum route handlers.
-//!
-//! - `zlib`: Enables advanced compression options using zlib, including window size control. This allows
-//!   fine-tuning of the compression level and memory usage through `client_max_window_bits` and
-//!   `server_max_window_bits` options.
-//!
-//! - `logging`: Enables debug logging for connection negotiation and frame processing using the `log` crate.
-//!   Useful for debugging WebSocket connections.
-//!
-//! - `json`: Enables serialization of JSON data. Useful for handling JSON payloads in WebSocket messages.
-//!
-//! ## Usage Example
-//! ```toml
-//! [dependencies]
-//! yawc = { version = "0.1", features = ["axum"] }
-//! ```
-//!
-//! # Compression Support
-//! The crate implements the permessage-deflate WebSocket extension (RFC 7692) with configurable options:
-//!
-//! - Context takeover control for both client and server
-//! - Compression level adjustment (0-9)
-//! - Window size configuration (with `zlib` feature)
-//! - Memory usage optimization through no-context-takeover options
-//!
-//! # Client Example
-//! ```rust
-//! use tokio::net::TcpStream;
-//! use futures::{SinkExt, StreamExt};
-//! use yawc::{WebSocket, Options, frame::OpCode};
-//!
-//! #[cfg(feature = "reqwest")]
-//! async fn connect(client: reqwest::Client) -> yawc::Result<()> {
-//!     let mut ws = WebSocket::reqwest("wss://echo.websocket.org".parse()?, client, Options::default()).await?;
-//!
-//!     while let Some(frame) = ws.next().await {
-//!         match frame.opcode {
-//!             OpCode::Text | OpCode::Binary => {
-//!                 ws.send(frame).await?;
-//!             }
-//!             _ => {}
-//!         }
-//!     }
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Server Example
-//! ```rust
-//! use http_body_util::Empty;
-//! use futures::StreamExt;
-//! use hyper::{Request, body::{Incoming, Bytes}, Response};
-//! use yawc::{WebSocket};
-//!
-//! async fn server_upgrade(
-//!     mut req: Request<Incoming>,
-//! ) -> yawc::Result<Response<Empty<Bytes>>> {
-//!     let (response, fut) = WebSocket::upgrade(&mut req)?;
-//!
-//!     tokio::spawn(async move {
-//!         if let Ok(mut ws) = fut.await {
-//!             while let Some(frame) = ws.next().await {
-//!               // Process frames from the client here
-//!             }
-//!         }
-//!     });
-//!
-//!     Ok(response)
-//! }
-//! ```
-//!
-//! # Feature Combinations
-//! - The `zlib` feature can be combined with either HTTP client to enable advanced compression options
-//! - The `logging` feature works with any combination of other features
-//!
-//! # Memory Safety
-//! The crate implements several safety measures:
-//! - Maximum payload size limits (configurable, default 2MB)
-//! - Automatic handling of control frames
-//! - Optional UTF-8 validation for text frames
-//! - Protection against memory exhaustion attacks
-//!
-//! # Performance Considerations
-//! - Compression can be tuned for either memory usage or compression ratio
-//! - Context takeover settings allow memory-CPU tradeoffs
-//! - Zero-copy frame processing where possible
-//! - Efficient handling of fragmented messages
-
-#![cfg_attr(docsrs, feature(doc_cfg))]
-
 use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
 
 use {
@@ -1321,9 +1218,7 @@ impl Future for WebSocketBuilder {
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let ws = WebSocket::connect(
-///         "wss://echo.websocket.org".parse()?,
-///     ).await?;
+///     let ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 ///     // Use `ws` for WebSocket communication
 ///     Ok(())
 /// }
@@ -2262,14 +2157,22 @@ impl futures::Sink<FrameView> for WebSocket {
 /// The read half of a WebSocket connection, responsible for receiving and processing incoming messages.
 ///
 /// [`ReadHalf`] follows a sans-io design, meaning it does not handle I/O operations directly.
-/// Instead, the user must provide a `futures::Stream` of frames on each function call. This allows
-/// the ReadHalf to be I/O agnostic and work with any underlying transport.
+/// Instead, the user must provide a [`futures::Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html)
+/// of frames on each function call. This allows the ReadHalf to be I/O agnostic and work with any underlying transport.
 ///
 /// [`ReadHalf`] handles decompression and message fragmentation but does not manage WebSocket control frames.
 /// Users are responsible for handling frames with [`OpCode::Ping`], [`OpCode::Pong`], and [`OpCode::Close`] codes.
 ///
 /// After a [`OpCode::Close`] frame is received, the [`ReadHalf`] will no longer accept reads and will
 /// return a [`WebSocketError::ConnectionClosed`] error for all subsequent read attempts.
+///
+/// # ⚠️ Advanced Usage Only
+///
+/// In most cases, you should **not** use [`ReadHalf`] directly. Instead, use
+/// [`futures::StreamExt::split`](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.split)
+/// on the [`WebSocket`] to obtain a stream split that maintains all WebSocket protocol handling.
+/// Direct use of [`ReadHalf`] bypasses important protocol management like automatic control frame handling.
+///
 ///
 /// # Example
 /// ```no_run
@@ -2295,13 +2198,6 @@ impl futures::Sink<FrameView> for WebSocket {
 ///     Ok(())
 /// }
 /// ```
-///
-/// # Fields
-/// - `role`: Specifies whether the connection is acting as a client or server.
-/// - `inflate`: Optional decompressor used for payload decompression if compression is enabled.
-/// - `fragment`: Optional fragment structure to handle fragmented messages.
-/// - `accumulated`: Stores data from fragmented frames, assembling them into a complete message when all fragments are received.
-/// - `is_closed`: Indicates whether the connection has been closed, preventing further reads.
 pub struct ReadHalf {
     role: Role,
     /// Optional decompressor used to decompress incoming payloads.
@@ -2545,7 +2441,12 @@ impl ReadHalf {
 /// - Protocol-compliant connection closure
 /// - Frame buffering and flushing
 ///
-/// The write half can be obtained by splitting a [`WebSocket`] using [`futures::StreamExt::split()`].
+/// # ⚠️ Advanced Usage Only
+///
+/// In most cases, you should **not** use [`WriteHalf`] directly. Instead, use
+/// [`futures::StreamExt::split`](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.split)
+/// on the [`WebSocket`] to obtain stream halves that maintain all WebSocket protocol handling.
+/// Direct use of [`WriteHalf`] bypasses important protocol management like automatic control frame handling.
 ///
 /// # Connection Closure
 /// When closing the connection, [`WriteHalf`] follows the WebSocket protocol by:
@@ -2566,9 +2467,7 @@ impl ReadHalf {
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // Connect WebSocket
-///     let ws = WebSocket::connect(
-///         "wss://example.com/ws".parse()?,
-///     ).await?;
+///     let ws = WebSocket::connect("wss://example.com/ws".parse()?).await?;
 ///
 ///     // Split into read/write halves
 ///     let (stream, read_half, write_half) = unsafe { ws.split_stream() };
@@ -2612,6 +2511,7 @@ impl WriteHalf {
             close_state: None,
         }
     }
+
     /// Polls the readiness of the `WriteHalf` to send a new frame.
     ///
     /// If the WebSocket connection is already closed, this will return an error. Otherwise, it
