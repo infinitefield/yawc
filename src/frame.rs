@@ -175,6 +175,31 @@ pub struct FrameView {
 }
 
 impl FrameView {
+    /// Extracts the close code from a Close frame's payload.
+    ///
+    /// For a valid Close frame, the first two bytes of the payload contain
+    /// a status code indicating why the connection was closed.
+    ///
+    /// # Returns
+    /// - `Some(CloseCode)` if the payload contains a valid close code
+    /// - `None` if the payload is empty or too short to contain a close code
+    pub fn close_code(&self) -> Option<CloseCode> {
+        let code = CloseCode::from(u16::from_be_bytes(self.payload[0..2].try_into().ok()?));
+        Some(code)
+    }
+
+    /// Extracts the close reason from a Close frame's payload.
+    ///
+    /// For a valid Close frame, bytes after the first two bytes may contain
+    /// a UTF-8 encoded reason string explaining why the connection was closed.
+    ///
+    /// # Returns
+    /// - `Some(&str)` containing the reason string if present and valid UTF-8
+    /// - `None` if there is no reason string or it's not valid UTF-8
+    pub fn close_reason(&self) -> Option<&str> {
+        std::str::from_utf8(&self.payload[2..]).ok()
+    }
+
     /// Converts the frame payload to a string slice, expecting valid UTF-8.
     ///
     /// # Returns

@@ -1866,10 +1866,9 @@ impl WebSocket {
                     ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
                     return Poll::Ready(Err(WebSocketError::ConnectionClosed));
                 }
-                Poll::Ready(Ok(frame)) => match self.on_frame(frame) {
-                    Ok(Some(frame)) => return Poll::Ready(Ok(frame)),
-                    Err(err) => return Poll::Ready(Err(err)),
-                    Ok(None) => continue,
+                Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
+                    Some(frame) => return Poll::Ready(Ok(frame)),
+                    None => continue,
                 },
                 Poll::Ready(Err(err)) => {
                     let code = match err {
@@ -1993,10 +1992,9 @@ impl WebSocket {
             0 => {}
             1 => return Err(WebSocketError::InvalidCloseFrame),
             _ => {
-                let code =
-                    CloseCode::from(u16::from_be_bytes(frame.payload[0..2].try_into().unwrap()));
+                let code = frame.close_code().expect("close code");
 
-                if std::str::from_utf8(&frame.payload[2..]).is_err() {
+                if frame.close_reason().is_none() {
                     return Err(WebSocketError::InvalidUTF8);
                 };
 
