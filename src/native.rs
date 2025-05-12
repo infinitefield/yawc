@@ -1975,8 +1975,8 @@ impl WebSocket {
                 self.on_ping(frame);
                 Ok(None)
             }
-            OpCode::Close => match self.on_close(frame) {
-                Ok(_) => Ok(None),
+            OpCode::Close => match self.on_close(&frame) {
+                Ok(_) => Ok(Some(frame)),
                 Err(err) => Err(err),
             },
             OpCode::Continuation => unreachable!(),
@@ -1988,7 +1988,7 @@ impl WebSocket {
             .push_back(FrameView::pong(frame.payload));
     }
 
-    fn on_close(&mut self, frame: FrameView) -> Result<()> {
+    fn on_close(&mut self, frame: &FrameView) -> Result<()> {
         match frame.payload.len() {
             0 => {}
             1 => return Err(WebSocketError::InvalidCloseFrame),
