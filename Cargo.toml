@@ -16,7 +16,7 @@ categories = [
     "wasm",
 ]
 readme = "README.md"
-rust-version = "1.81.0"
+rust-version = "1.82.0"
 
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
