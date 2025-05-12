@@ -95,7 +95,7 @@ async fn main() {
 
 ```toml
 [dependencies]
-yawc = {version = "0.1", features = ["reqwest"] }
+yawc = {version = "0.2", features = ["reqwest"] }
 futures = { version = "0.3.31", default-features = false, features = ["std"] }
 tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
 hyper = { version = "1.5.0", features = ["http1", "server"] }
@@ -163,7 +163,7 @@ To use the Axum integration, add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-yawc = { version = "0.1", features = ["axum"] }
+yawc = { version = "0.2", features = ["axum"] }
 axum = "0.7"
 ```
 
