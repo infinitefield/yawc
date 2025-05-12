@@ -29,7 +29,7 @@
 //! ## Usage Example
 //! ```toml
 //! [dependencies]
-//! yawc = { version = "0.1", features = ["axum"] }
+//! yawc = { version = "0.2", features = ["axum"] }
 //! ```
 //!
 //! # Compression Support
