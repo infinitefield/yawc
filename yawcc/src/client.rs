@@ -1,19 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use clap::Args;
 use futures::{SinkExt, StreamExt};
-use rustls::pki_types::TrustAnchor;
 use rustyline::ExternalPrinter;
 use tokio::{
     runtime,
     sync::mpsc::{unbounded_channel, UnboundedReceiver},
     time::timeout,
 };
-use tokio_rustls::TlsConnector;
 use url::Url;
 use yawc::{
     frame::{FrameView, OpCode},
-    HttpRequest, HttpRequestBuilder, WebSocket,
+    CompressionLevel, HttpRequest, HttpRequestBuilder, Options, WebSocket,
 };
 
 /// Command to connect and interact with a WebSocket server.
@@ -88,7 +86,9 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     let url = cmd.url.clone();
     let ws = runtime.block_on(timeout(
         cmd.timeout,
-        WebSocket::connect_with_request(url, Some(tls_connector()), request_builder),
+        WebSocket::connect(url)
+            .with_request(request_builder)
+            .with_options(Options::default().with_compression_level(CompressionLevel::best())),
     ))??;
 
     println!("> Connected to {}", cmd.url);
@@ -179,20 +179,4 @@ async fn handle_websocket(
     }
 
     let _ = ws.close().await;
-}
-
-fn tls_connector() -> TlsConnector {
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
-        subject: ta.subject.clone(),
-        subject_public_key_info: ta.subject_public_key_info.clone(),
-        name_constraints: ta.name_constraints.clone(),
-    }));
-    // config.dangerous()... to ignore the cert verification
-
-    TlsConnector::from(Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth(),
-    ))
 }

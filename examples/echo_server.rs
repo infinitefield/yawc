@@ -10,7 +10,17 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket, WebSocketError};
+use yawc::{frame::OpCode, CompressionLevel, FrameView, Options, WebSocket, WebSocketError};
+
+pub async fn dummy(mut websocket: WebSocket) {
+    loop {
+        let data = "abc,def,gh,ad,fe,ga,sg,h,as,h\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n";
+        let data = data.to_string();
+        let data_to_send = FrameView::text(data);
+
+        websocket.send(data_to_send).await.ok();
+    }
+}
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
 ///
@@ -22,16 +32,21 @@ use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket, WebSocketError};
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     let mut ws = fut.await?;
 
-    loop {
-        let frame = ws.next().await.ok_or(WebSocketError::ConnectionClosed)?;
-        match frame.opcode {
-            OpCode::Close => break,
-            OpCode::Text | OpCode::Binary => {
-                ws.send(frame).await?;
-            }
-            _ => {}
-        }
-    }
+    dummy(ws).await;
+
+    // loop {
+    //     let frame = ws.next().await.ok_or(WebSocketError::ConnectionClosed)?;
+    //     match frame.opcode {
+    //         OpCode::Close => break,
+    //         OpCode::Text | OpCode::Binary => {
+    //             ws.send(frame).await?;
+    //         }
+    //         _ => {}
+    //     }
+    // }
+    //
+
+    log::debug!("Client disconnected");
 
     Ok(())
 }
@@ -55,7 +70,7 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
 
     tokio::task::spawn(async move {
         if let Err(e) = handle_client(fut).await {
-            eprintln!("Error in websocket connection: {}", e);
+            log::error!("Error in websocket connection: {}", e);
         }
     });
 
@@ -73,9 +88,11 @@ async fn main() -> yawc::Result<()> {
 
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
 
+    log::debug!("Listening on {}", listener.local_addr().unwrap());
+
     loop {
         let (stream, _) = listener.accept().await?;
-        println!("Client connected");
+        log::info!("Client connected");
 
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);
@@ -83,7 +100,7 @@ async fn main() -> yawc::Result<()> {
                 .serve_connection(io, service_fn(server_upgrade))
                 .with_upgrades();
             if let Err(e) = conn_fut.await {
-                println!("An error occurred: {:?}", e);
+                log::error!("An error occurred: {:?}", e);
             }
         });
     }
