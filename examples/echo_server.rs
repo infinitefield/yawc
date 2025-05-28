@@ -10,17 +10,7 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, FrameView, Options, WebSocket, WebSocketError};
-
-pub async fn dummy(mut websocket: WebSocket) {
-    loop {
-        let data = "abc,def,gh,ad,fe,ga,sg,h,as,h\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n1,2,3,4,5,6,7,8,9,,,,,7\n";
-        let data = data.to_string();
-        let data_to_send = FrameView::text(data);
-
-        websocket.send(data_to_send).await.ok();
-    }
-}
+use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket, WebSocketError};
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
 ///
@@ -32,19 +22,16 @@ pub async fn dummy(mut websocket: WebSocket) {
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     let mut ws = fut.await?;
 
-    dummy(ws).await;
-
-    // loop {
-    //     let frame = ws.next().await.ok_or(WebSocketError::ConnectionClosed)?;
-    //     match frame.opcode {
-    //         OpCode::Close => break,
-    //         OpCode::Text | OpCode::Binary => {
-    //             ws.send(frame).await?;
-    //         }
-    //         _ => {}
-    //     }
-    // }
-    //
+    loop {
+        let frame = ws.next().await.ok_or(WebSocketError::ConnectionClosed)?;
+        match frame.opcode {
+            OpCode::Close => break,
+            OpCode::Text | OpCode::Binary => {
+                ws.send(frame).await?;
+            }
+            _ => {}
+        }
+    }
 
     log::debug!("Client disconnected");
 
