@@ -180,7 +180,7 @@ impl WebSocketExtensions {
                     opt(preceded(tag("="), opt(digit1))),
                 ),
             ),
-        )(input)
+        )(input.trim())
         .map(|(key, (key2, value))| (key, (key2, value.flatten())))
     }
 }
