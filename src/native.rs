@@ -1439,7 +1439,7 @@ impl WebSocket {
         url: Url,
         io: S,
         options: Options,
-        builder: HttpRequestBuilder,
+        mut builder: HttpRequestBuilder,
     ) -> Result<WebSocket> {
         let host = url.host().expect("hostname").to_string();
         let port_defined = url.port().is_some();
@@ -1451,12 +1451,20 @@ impl WebSocket {
             host
         };
 
+        // allow the user to set a custom Host header.
+        if !builder
+            .headers_ref()
+            .expect("header")
+            .contains_key(header::HOST)
+        {
+            builder = builder.header(header::HOST, host_header.as_str());
+        }
+
         let target_url = &url[url::Position::BeforePath..];
 
         let mut req = builder
             .method("GET")
             .uri(target_url)
-            .header(header::HOST, host_header.as_str())
             .header(header::UPGRADE, "websocket")
             .header(header::CONNECTION, "upgrade")
             .header(header::SEC_WEBSOCKET_KEY, generate_key())
