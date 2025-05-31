@@ -1155,6 +1155,23 @@ impl WebSocketBuilder {
     ///
     /// # Returns
     /// The builder for method chaining
+    ///
+    /// # Example
+    /// ```no_run
+    /// use yawc::WebSocket;
+    ///
+    /// async fn connect() -> yawc::Result<()> {
+    ///     let ws = WebSocket::connect("wss://example.com/socket".parse()?)
+    ///         .with_request(
+    ///             yawc::HttpRequestBuilder::new()
+    ///                 .header("Host", "custom-host.example.com")
+    ///         )
+    ///         .await?;
+    ///
+    ///     // Use WebSocket...
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn with_request(mut self, builder: HttpRequestBuilder) -> Self {
         let Some(opts) = &mut self.opts else {
             unreachable!()
@@ -1335,8 +1352,20 @@ impl WebSocket {
         let stream = match scheme {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
             "wss" => {
+                // the hostname that we are connecting to
+                let maybe_server_name = if let Some(headers) = builder.headers_ref() {
+                    headers
+                        .get(header::HOST)
+                        .map(|value| value.to_str().expect("valid str").to_owned())
+                } else {
+                    None
+                };
+                // if the server_name is not defined in the header, fetch it from the url
+                let server_name = maybe_server_name
+                    .unwrap_or_else(|| url.host_str().expect("hostname").to_owned());
+
                 let connector = connector.unwrap_or_else(tls_connector);
-                let domain = ServerName::try_from(host.clone())
+                let domain = ServerName::try_from(server_name)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
 
                 MaybeTlsStream::Tls(connector.connect(domain, tcp_stream).await?)
