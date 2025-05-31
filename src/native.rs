@@ -722,7 +722,7 @@ impl AsyncWrite for HttpStream {
 ///
 /// `Options` allows users to set parameters that govern the behavior of a WebSocket connection,
 /// including payload size limits, compression settings, and UTF-8 validation requirements.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Options {
     /// Maximum allowed payload size for incoming messages, in bytes.
     ///
@@ -787,7 +787,7 @@ pub struct Options {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DeflateOptions {
     /// Sets the compression level (0-9), balancing compression ratio against CPU usage.
     ///
