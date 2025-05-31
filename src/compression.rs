@@ -161,7 +161,8 @@ impl WebSocketExtensions {
     /// Parses a single extension parameter from the input string.
     ///
     /// This method identifies key-value pairs in the form `key=value` and returns both
-    /// the key and an optional value if it exists.
+    /// the key and an optional value if it exists. The method handles spaces around
+    /// both the semicolon separator and equals sign.
     ///
     /// # Parameters
     /// - `input`: A string containing a single extension parameter, prefixed with a semicolon (`;`).
@@ -172,12 +173,17 @@ impl WebSocketExtensions {
     fn parse_extension(input: &str) -> IResult<&str, (&str, Option<&str>)> {
         // ; server_no_context_takeover
         preceded(
-            tag(";"),
+            // allow strings preceded by spaces
+            preceded(space0, tag(";")),
             preceded(
                 space0,
                 pair(
                     take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-                    opt(preceded(tag("="), opt(digit1))),
+                    opt(preceded(
+                        // allow space precedence before the `=`
+                        preceded(space0, tag("=")),
+                        preceded(space0, opt(digit1)),
+                    )),
                 ),
             ),
         )(input)
@@ -849,6 +855,56 @@ mod tests {
     fn test_inflate_with_window_bits() {
         let inflate = Inflate::new_with_window_bits(15);
         assert_eq!(inflate.output.capacity(), 1024);
+    }
+
+    #[test]
+    fn test_parse_sec_websocket_extensions_with_spaces() {
+        use std::str::FromStr;
+        let extensions =
+            WebSocketExtensions::from_str("permessage-deflate ; server_no_context_takeover")
+                .unwrap();
+        assert!(extensions.server_no_context_takeover);
+        assert!(!extensions.client_no_context_takeover);
+        assert_eq!(extensions.server_max_window_bits, None);
+        assert_eq!(extensions.client_max_window_bits, None);
+    }
+
+    #[test]
+    fn test_parse_extensions_with_extra_spaces() {
+        use std::str::FromStr;
+        let extensions = WebSocketExtensions::from_str(
+            "permessage-deflate  ; server_no_context_takeover  ;    server_max_window_bits  =    12",
+        )
+        .unwrap();
+        assert!(extensions.server_no_context_takeover);
+        assert!(!extensions.client_no_context_takeover);
+        assert_eq!(extensions.server_max_window_bits, Some(12));
+        assert_eq!(extensions.client_max_window_bits, None);
+    }
+
+    #[test]
+    fn test_parser_robustness_with_unusual_spacing() {
+        use std::str::FromStr;
+        // Test with excessive spaces around semicolons and equals signs
+        let extensions = WebSocketExtensions::from_str(
+            "permessage-deflate    ;     client_no_context_takeover    ;    server_max_window_bits    =    10",
+        )
+        .unwrap();
+        assert!(extensions.client_no_context_takeover);
+        assert_eq!(extensions.server_max_window_bits, Some(10));
+    }
+
+    #[test]
+    fn test_parser_with_mixed_spacing() {
+        use std::str::FromStr;
+        // Test with inconsistent spacing
+        let extensions = WebSocketExtensions::from_str(
+            "permessage-deflate;client_no_context_takeover ;server_max_window_bits=10; client_max_window_bits = 15",
+        )
+        .unwrap();
+        assert!(extensions.client_no_context_takeover);
+        assert_eq!(extensions.server_max_window_bits, Some(10));
+        assert_eq!(extensions.client_max_window_bits, Some(15));
     }
 
     #[test]
