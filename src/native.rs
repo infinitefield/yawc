@@ -1381,16 +1381,16 @@ impl WebSocket {
         options: Options,
         builder: HttpRequestBuilder,
     ) -> Result<WebSocket> {
-        let scheme = url.scheme();
         let host = url.host().expect("hostname").to_string();
 
-        let tcp_address = tcp_address.unwrap_or_else(|| {
+        let tcp_stream = if let Some(tcp_address) = tcp_address {
+            TcpStream::connect(tcp_address).await?
+        } else {
             let port = url.port_or_known_default().expect("port");
-            format!("{host}:{port}").parse().unwrap()
-        });
+            TcpStream::connect(format!("{host}:{port}")).await?
+        };
 
-        let tcp_stream = TcpStream::connect(tcp_address).await?;
-        let stream = match scheme {
+        let stream = match url.scheme() {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
             "wss" => {
                 // if the server_name is not defined in the header, fetch it from the url
