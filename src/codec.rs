@@ -1,3 +1,23 @@
+//! # codec
+//!
+//! WebSocket codec implementation for frame encoding and decoding.
+//!
+//! This module provides the functionality to encode and decode WebSocket frames according to
+//! the WebSocket protocol specification (RFC 6455). It includes implementations for handling
+//! various frame types, masking, fragmentation, control frames, and payload processing.
+//!
+//! The main components of this module are:
+//! - `Codec`: A combined encoder/decoder for bidirectional WebSocket communication
+//! - `Decoder`: Parses raw bytes into structured WebSocket frames
+//! - `Encoder`: Serializes WebSocket frames into raw bytes for transmission
+//!
+//! The implementation handles state transitions during partial frame reception and enforces
+//! protocol constraints like maximum payload sizes and control frame requirements.
+//!
+//! This codec can be used as a foundation for building custom WebSocket implementations.
+//! Users can leverage these components to create their own WebSocket clients, servers,
+//! or protocol extensions by integrating this codec with their networking code.
+
 use bytes::{Buf, BytesMut};
 use tokio_util::codec;
 

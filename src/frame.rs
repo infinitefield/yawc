@@ -106,6 +106,10 @@ use crate::{close::CloseCode, WebSocketError};
 /// - `Ping`: Tests connection liveness, requiring a `Pong` response
 /// - `Pong`: Responds to a `Ping` frame
 ///
+/// # Reserved OpCodes
+/// The ranges 0x3-0x7 and 0xB-0xF are reserved for future protocol extensions.
+/// Frames with these opcodes will be rejected as invalid per RFC 6455.
+///
 /// The numeric values for each OpCode are defined in [RFC 6455, Section 11.8](https://datatracker.ietf.org/doc/html/rfc6455#section-11.8):
 /// - Continuation = 0x0
 /// - Text = 0x1
@@ -126,7 +130,10 @@ pub enum OpCode {
 impl OpCode {
     /// Returns `true` if the `OpCode` represents a control frame (`Close`, `Ping`, or `Pong`).
     ///
-    /// Control frames are used to manage the connection state and cannot be fragmented.
+    /// Control frames are used to manage the connection state and have special constraints:
+    /// - Cannot be fragmented (the FIN bit must be set)
+    /// - Payload must not exceed 125 bytes
+    /// - Must be processed immediately rather than queued with data frames
     pub fn is_control(&self) -> bool {
         matches!(*self, OpCode::Close | OpCode::Ping | OpCode::Pong)
     }
@@ -136,6 +143,9 @@ impl TryFrom<u8> for OpCode {
     type Error = WebSocketError;
 
     /// Attempts to convert a byte value into an `OpCode`, returning an error if the byte does not match any valid `OpCode`.
+    ///
+    /// This conversion is typically used during frame parsing to interpret the opcode field from the frame header.
+    /// Invalid opcodes (0x3-0x7 and 0xB-0xF) will result in a `WebSocketError::InvalidOpCode` error.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0x0 => Ok(Self::Continuation),
@@ -168,9 +178,9 @@ impl From<OpCode> for u8 {
 /// compared to the full `Frame` struct.
 #[derive(Clone)]
 pub struct FrameView {
-    /// The operation code indicating the type of frame
+    /// The operation code indicating the type of frame (Text, Binary, Close, etc.)
     pub opcode: OpCode,
-    /// The frame's payload data as immutable bytes
+    /// The frame's payload data as immutable bytes, already unmasked if it was originally masked
     pub payload: Bytes,
 }
 
