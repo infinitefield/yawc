@@ -17,7 +17,7 @@ readme = "README.md"
 rust-version = "1.75.0"
 
 # [patch.crates-io]
-# yawc = { git = "https://github.com/infinitefield/yawc", branch = "master" }
+# yawc = { path = ".." }
 
 [workspace]
 

@@ -16,6 +16,7 @@ use std::{
     collections::VecDeque,
     future::{poll_fn, Future},
     io,
+    net::SocketAddr,
     pin::{pin, Pin},
     str::FromStr,
     sync::Arc,
@@ -728,6 +729,8 @@ pub struct Options {
     ///
     /// If a message exceeds this size, the connection will be closed immediately
     /// to prevent overloading the receiving end.
+    ///
+    /// Default: 1 MiB (1,048,576 bytes) as defined in [`MAX_PAYLOAD_READ`]
     pub max_payload_read: Option<usize>,
 
     /// Maximum size allowed for the buffer that accumulates fragmented messages.
@@ -736,6 +739,9 @@ pub struct Options {
     /// are accumulated in a read buffer until the complete message is received. To prevent memory
     /// exhaustion attacks using extremely large fragmented messages, once the total size of
     /// accumulated fragments exceeds this limit, the connection is closed.
+    ///
+    /// Default: 2 MiB (2,097,152 bytes) as defined in [`MAX_READ_BUFFER`], or twice the
+    /// configured `max_payload_read` value if that is set.
     pub max_read_buffer: Option<usize>,
 
     /// Compression settings for the WebSocket connection.
@@ -748,6 +754,8 @@ pub struct Options {
     ///
     /// If `true`, the [`ReadHalf`] will validate that received text frames contain valid UTF-8
     /// data, closing the connection on any validation failure.
+    ///
+    /// Default: `false`
     pub check_utf8: bool,
 }
 
@@ -1083,6 +1091,7 @@ pub struct WebSocketBuilder {
 /// including the target URL, TLS connector, connection options, and HTTP request builder.
 struct WsBuilderOpts {
     url: Url,
+    tcp_address: Option<SocketAddr>,
     connector: Option<TlsConnector>,
     establish_options: Option<Options>,
     http_builder: Option<HttpRequestBuilder>,
@@ -1100,6 +1109,7 @@ impl WebSocketBuilder {
         Self {
             opts: Some(WsBuilderOpts {
                 url,
+                tcp_address: None,
                 connector: None,
                 establish_options: None,
                 http_builder: None,
@@ -1124,6 +1134,26 @@ impl WebSocketBuilder {
             unreachable!()
         };
         opts.connector = Some(connector);
+        self
+    }
+
+    /// Sets a custom TCP address for the WebSocket connection.
+    ///
+    /// This allows connecting to a specific IP address or alternate hostname
+    /// rather than resolving the hostname from the URL. This is useful for
+    /// testing, connecting through proxies, or when DNS resolution should
+    /// be handled differently.
+    ///
+    /// # Parameters
+    /// - `address`: The socket address to connect to
+    ///
+    /// # Returns
+    /// The builder for method chaining
+    pub fn with_tcp_address(mut self, address: SocketAddr) -> Self {
+        let Some(opts) = &mut self.opts else {
+            unreachable!()
+        };
+        opts.tcp_address = Some(address);
         self
     }
 
@@ -1199,6 +1229,7 @@ impl Future for WebSocketBuilder {
         if let Some(opts) = this.opts.take() {
             let future = WebSocket::connect_priv(
                 opts.url,
+                opts.tcp_address,
                 opts.connector,
                 opts.establish_options.unwrap_or_default(),
                 opts.http_builder.unwrap_or_else(HttpRequest::builder),
@@ -1309,6 +1340,8 @@ impl WebSocket {
     ///
     /// # Parameters
     /// - `url`: The WebSocket URL to connect to. This can include both `ws` and `wss` schemes.
+    ///   For secure connections, the hostname from this URL is also used as the identity server
+    ///   for TLS verification.
     ///
     /// # Returns
     /// A `Result` containing either a connected `WebSocket` instance or an error if the connection could not be established.
@@ -1334,38 +1367,35 @@ impl WebSocket {
     /// - By default, no custom options are applied during the connection process. Use
     ///   `Options::default()` for standard WebSocket behavior.
     /// - For secure connections requiring custom TLS settings, use [`WebSocketBuilder::with_connector()`] instead.
+    /// - To connect to a different TCP address than what's specified in the URL, use
+    ///   [`WebSocketBuilder::with_tcp_address()`]. This allows connecting to alternative hosts
+    ///   while still using the URL's hostname for TLS identity verification.
     pub fn connect(url: Url) -> WebSocketBuilder {
         WebSocketBuilder::new(url)
     }
 
     async fn connect_priv(
         url: Url,
+        tcp_address: Option<SocketAddr>,
         connector: Option<TlsConnector>,
         options: Options,
         builder: HttpRequestBuilder,
     ) -> Result<WebSocket> {
         let scheme = url.scheme();
-        let host = url.host().expect("hostname").to_string();
-        let port = url.port_or_known_default().expect("port");
+        let host = url.host_str().expect("hostname").to_owned();
 
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}")).await?;
+        let tcp_address = tcp_address.unwrap_or_else(|| {
+            let port = url.port_or_known_default().expect("port");
+            format!("{host}:{port}").parse().unwrap()
+        });
+
+        let tcp_stream = TcpStream::connect(tcp_address).await?;
         let stream = match scheme {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
             "wss" => {
-                // the hostname that we are connecting to
-                let maybe_server_name = if let Some(headers) = builder.headers_ref() {
-                    headers
-                        .get(header::HOST)
-                        .map(|value| value.to_str().expect("valid str").to_owned())
-                } else {
-                    None
-                };
                 // if the server_name is not defined in the header, fetch it from the url
-                let server_name = maybe_server_name
-                    .unwrap_or_else(|| url.host_str().expect("hostname").to_owned());
-
                 let connector = connector.unwrap_or_else(tls_connector);
-                let domain = ServerName::try_from(server_name)
+                let domain = ServerName::try_from(host)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
 
                 MaybeTlsStream::Tls(connector.connect(domain, tcp_stream).await?)
@@ -1422,11 +1452,10 @@ impl WebSocket {
     /// This function is useful when handling WebSocket connections with existing streams, such as when
     /// managing multiple connections in a server context.
     ///
-    pub async fn handshake<S: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
-        url: Url,
-        io: S,
-        options: Options,
-    ) -> Result<WebSocket> {
+    pub async fn handshake<S>(url: Url, io: S, options: Options) -> Result<WebSocket>
+    where
+        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
+    {
         Self::handshake_with_request(url, io, options, HttpRequest::builder()).await
     }
 
@@ -1464,28 +1493,31 @@ impl WebSocket {
     ///     ).await
     /// }
     /// ```
-    pub async fn handshake_with_request<S: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
+    pub async fn handshake_with_request<S>(
         url: Url,
         io: S,
         options: Options,
         mut builder: HttpRequestBuilder,
-    ) -> Result<WebSocket> {
-        let host = url.host().expect("hostname").to_string();
-        let port_defined = url.port().is_some();
-        let port = url.port_or_known_default().expect("port");
-
-        let host_header = if port_defined {
-            format!("{host}:{port}")
-        } else {
-            host
-        };
-
+    ) -> Result<WebSocket>
+    where
+        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
+    {
         // allow the user to set a custom Host header.
         if !builder
             .headers_ref()
             .expect("header")
             .contains_key(header::HOST)
         {
+            let host = url.host().expect("hostname").to_string();
+
+            let is_port_defined = url.port().is_some();
+            let port = url.port_or_known_default().expect("port");
+            let host_header = if is_port_defined {
+                format!("{host}:{port}")
+            } else {
+                host
+            };
+
             builder = builder.header(header::HOST, host_header.as_str());
         }
 

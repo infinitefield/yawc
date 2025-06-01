@@ -2,7 +2,7 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use futures::{SinkExt, StreamExt};
-use yawc::{CompressionLevel, FrameView, HttpRequestBuilder, Options, WebSocket};
+use yawc::{CompressionLevel, FrameView, Options, WebSocket};
 
 struct CustomDnsResolver {
     overrides: HashMap<String, Vec<SocketAddr>>,
@@ -21,7 +21,7 @@ async fn main() {
 
     let dns = CustomDnsResolver {
         overrides: HashMap::from([(
-            "google.com".to_owned(),
+            "echo.websocket.org".to_owned(),
             vec![
                 // this one should fail :(
                 "127.0.0.1:9090".parse().unwrap(),
@@ -41,14 +41,14 @@ async fn main() {
 }
 
 async fn establish(dns: CustomDnsResolver) -> Option<WebSocket> {
-    let addresses = dns.resolve("google.com").expect("addresses");
+    let addresses = dns.resolve("echo.websocket.org").expect("addresses");
 
     for address in addresses {
         log::info!("Connecting to {address}");
 
         // Connect to the WebSocket server with fast compression enabled
-        match WebSocket::connect(format!("ws://{address}").parse().unwrap())
-            .with_request(HttpRequestBuilder::new().header("Host", "google.com"))
+        match WebSocket::connect("ws://echo.websocket.org".parse().unwrap())
+            .with_tcp_address(address)
             .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
             .await
         {

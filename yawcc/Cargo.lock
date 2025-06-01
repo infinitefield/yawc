@@ -1491,9 +1491,9 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 
 [[package]]
 name = "yawc"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cca51fe6fb0a2b0dd4d494b6e3c13ea4bb441ec7752b8ee38b54da16482595b"
+checksum = "c0b6d99a03030e42d0b4ef2ba00aa830e4dab7ba47b5b02a318f46cc83e0e2e3"
 dependencies = [
  "base64",
  "bytes",
