@@ -1382,7 +1382,7 @@ impl WebSocket {
         builder: HttpRequestBuilder,
     ) -> Result<WebSocket> {
         let scheme = url.scheme();
-        let host = url.host_str().expect("hostname").to_owned();
+        let host = url.host().expect("hostname").to_string();
 
         let tcp_address = tcp_address.unwrap_or_else(|| {
             let port = url.port_or_known_default().expect("port");
