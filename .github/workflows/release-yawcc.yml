@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - "yawcc-v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release"
-        required: true
-        type: string
 
 env:
   CARGO_TERM_COLOR: always
