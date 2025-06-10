@@ -27,6 +27,10 @@ pub struct Cmd {
     #[arg(short, long, value_parser = humantime::parse_duration, default_value = "5s")]
     timeout: Duration,
 
+    /// Includes the timestamp for each message.
+    #[arg(long)]
+    include_time: bool,
+
     /// Custom headers to send to the server in "Key: Value" format
     /// For example: --header "Authorization: Bearer token123"
     #[arg(short = 'H', long = "header", value_name = "Headers")]
@@ -96,6 +100,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     // Spawn reading task
     let opts = Opts {
         input_as_json: cmd.input_as_json,
+        include_time: cmd.include_time,
     };
 
     runtime.spawn_blocking(move || loop {
@@ -127,6 +132,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
 
 struct Opts {
     input_as_json: bool,
+    include_time: bool,
 }
 
 async fn handle_websocket(
@@ -167,7 +173,12 @@ async fn handle_websocket(
                                 }
                             }
                         } else {
-                            let _ = printer.print(msg.to_string());
+                            if opts.include_time {
+                                let time = chrono::Local::now().format("%H:%M:%S.%9f");
+                                let _ = printer.print(format!("{} > {:}", time, msg));
+                            } else {
+                                let _ = printer.print(msg.to_string());
+                            }
                         }
                     }
                     _ => {

@@ -1,4 +1,4 @@
-//! Binance proxy sending compressed data to clientand serves order book updates from Binance
+//! Binance proxy sending compressed data to client and serves order book updates from Binance
 
 //! This proxy acts as an intermediary server that:
 //! - Connects to the Binance WebSocket API to receive BTC order book updates
