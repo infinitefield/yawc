@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "yawcc-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., yawcc-v1.0.0)'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,6 +17,8 @@ env:
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       release_id: ${{ steps.create_release.outputs.id }}
       upload_url: ${{ steps.create_release.outputs.upload_url }}
@@ -31,17 +39,19 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.extract_version.outputs.tag }}
-          release_name: yawcc ${{ steps.extract_version.outputs.version }}
+          name: yawcc ${{ steps.extract_version.outputs.version }}
           draft: false
           prerelease: false
 
   build:
     needs: create-release
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -107,22 +117,18 @@ jobs:
 
       - name: Upload Release Asset (Unix)
         if: matrix.os != 'windows-latest'
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}.tar.gz
-          asset_name: ${{ matrix.name }}.tar.gz
-          asset_content_type: application/gzip
+          tag_name: ${{ github.ref_name }}
+          files: ./${{ matrix.name }}.tar.gz
 
       - name: Upload Release Asset (Windows)
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.name }}.zip
-          asset_name: ${{ matrix.name }}.zip
-          asset_content_type: application/zip
+          tag_name: ${{ github.ref_name }}
+          files: ./${{ matrix.name }}.zip
