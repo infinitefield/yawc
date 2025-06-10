@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use clap::Args;
 use futures::{SinkExt, StreamExt};
 use rustyline::ExternalPrinter;
 use tokio::{
+    net::lookup_host,
     runtime,
     sync::mpsc::{unbounded_channel, UnboundedReceiver},
     time::timeout,
@@ -41,6 +42,11 @@ pub struct Cmd {
     #[arg(long)]
     input_as_json: bool,
 
+    /// Connect directly to a TCP host instead of using WebSocket URL.
+    /// Format: host:port (e.g., "127.0.0.1:8080")
+    #[arg(long)]
+    tcp_host: Option<String>,
+
     /// The WebSocket URL to connect to (ws:// or wss://)
     url: Url,
 }
@@ -56,6 +62,60 @@ fn build_request(headers: &[String]) -> anyhow::Result<HttpRequestBuilder> {
     }
 
     Ok(builder)
+}
+
+async fn connect_with_tcp_host(
+    url: &Url,
+    tcp_host: &str,
+    headers: &[String],
+    timeout_duration: Duration,
+) -> anyhow::Result<WebSocket> {
+    // Resolve the TCP host to socket addresses
+    let socket_addrs: Vec<SocketAddr> = lookup_host(tcp_host).await?.collect();
+    if socket_addrs.is_empty() {
+        return Err(anyhow::anyhow!("Failed to resolve TCP host: {}", tcp_host));
+    }
+
+    println!("Resolved {} to {} addresses", tcp_host, socket_addrs.len());
+
+    // Try connecting to each resolved address
+    let mut last_error = None;
+    for (index, addr) in socket_addrs.iter().enumerate() {
+        println!(
+            "Trying address {} ({}/{})",
+            addr,
+            index + 1,
+            socket_addrs.len()
+        );
+
+        // Build a new request for each attempt since HttpRequestBuilder is not Clone
+        let request = build_request(headers)?;
+
+        match timeout(
+            timeout_duration,
+            WebSocket::connect(url.clone())
+                .with_tcp_address(*addr)
+                .with_request(request)
+                .with_options(Options::default().with_compression_level(CompressionLevel::best())),
+        )
+        .await
+        {
+            Ok(Ok(ws)) => {
+                println!("Successfully connected via {}", addr);
+                return Ok(ws);
+            }
+            Ok(Err(e)) => {
+                println!("Connection failed for {}: {}", addr, e);
+                last_error = Some(e.into());
+            }
+            Err(e) => {
+                println!("Connection timeout for {}: {}", addr, e);
+                last_error = Some(anyhow::anyhow!("Timeout: {}", e));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All connection attempts failed")))
 }
 
 pub fn run(cmd: Cmd) -> anyhow::Result<()> {
@@ -87,15 +147,25 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
 
     let (tx, rx) = unbounded_channel();
 
-    let url = cmd.url.clone();
-    let ws = runtime.block_on(timeout(
-        cmd.timeout,
-        WebSocket::connect(url)
-            .with_request(request_builder)
-            .with_options(Options::default().with_compression_level(CompressionLevel::best())),
-    ))??;
+    let ws = if let Some(tcp_host) = &cmd.tcp_host {
+        runtime.block_on(connect_with_tcp_host(
+            &cmd.url,
+            tcp_host,
+            &cmd.headers,
+            cmd.timeout,
+        ))?
+    } else {
+        runtime.block_on(timeout(
+            cmd.timeout,
+            WebSocket::connect(cmd.url.clone())
+                .with_request(request_builder)
+                .with_options(Options::default().with_compression_level(CompressionLevel::best())),
+        ))??
+    };
 
-    println!("> Connected to {}", cmd.url);
+    let url_string = cmd.url.to_string();
+    let connection_target = cmd.tcp_host.as_ref().unwrap_or(&url_string);
+    println!("> Connected to {}", connection_target);
 
     // Spawn reading task
     let opts = Opts {
@@ -172,13 +242,11 @@ async fn handle_websocket(
                                     let _ = printer.print(format!("parsing json: {}", err));
                                 }
                             }
+                        } else if opts.include_time {
+                            let time = chrono::Local::now().format("%H:%M:%S.%9f");
+                            let _ = printer.print(format!("{} > {:}", time, msg));
                         } else {
-                            if opts.include_time {
-                                let time = chrono::Local::now().format("%H:%M:%S.%9f");
-                                let _ = printer.print(format!("{} > {:}", time, msg));
-                            } else {
-                                let _ = printer.print(msg.to_string());
-                            }
+                            let _ = printer.print(msg.to_string());
                         }
                     }
                     _ => {

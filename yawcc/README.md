@@ -34,6 +34,12 @@ yawcc c wss://fstream.binance.com/ws/btcusdt@aggTrade
 yawcc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
 ```
 
+#### Direct TCP Connection
+
+```bash
+yawcc c https://echo.websocket.org --tcp-host 127.0.0.1:8080
+```
+
 ### Server Mode
 
 #### Start a Basic Echo Server
@@ -63,9 +69,12 @@ Arguments:
   <URL>  The WebSocket URL to connect to (ws:// or wss://)
 
 Options:
-  -t, --timeout <TIMEOUT>  Maximum duration to wait when establishing the connection. Accepts human-readable formats like "5s", "1m", "500ms" [default: 5s]
-      --input-as-json      When enabled, validates and pretty-prints received messages as JSON. Invalid JSON messages will result in an error
-  -h, --help               Print help (see more with '--help')
+  -t, --timeout <TIMEOUT>    Maximum duration to wait when establishing the connection. Accepts human-readable formats like "5s", "1m", "500ms" [default: 5s]
+      --include-time         Includes the timestamp for each message
+  -H, --header <Headers>     Custom headers to send to the server in "Key: Value" format For example: --header "Authorization: Bearer token123"
+      --input-as-json        When enabled, validates and pretty-prints received messages as JSON. Invalid JSON messages will result in an error
+      --tcp-host <TCP_HOST>  Connect directly to a TCP host instead of using WebSocket URL. Format: host:port (e.g., "127.0.0.1:8080")
+  -h, --help                 Print help (see more with '--help')
 ```
 
 ### Server Options
