@@ -524,7 +524,7 @@ pub struct UpgradeFut {
 }
 
 impl std::future::Future for UpgradeFut {
-    type Output = Result<WebSocket>;
+    type Output = hyper::Result<WebSocket>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = self.project();
