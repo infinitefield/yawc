@@ -17,6 +17,20 @@ Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket imp
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
 - **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications
 
+## Which crate should I use?
+
+When choosing a WebSocket implementation, many developers default to [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite).
+As the most stable and widely-used crate in the ecosystem, it provides excellent abstraction over the
+WebSocket protocol through its [WebSocketStream](https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/struct.WebSocketStream.html) type,
+which allows projects to implement custom protocols via its generic `<S>` parameter.
+
+While yawc doesn't expose the underlying stream directly,
+it provides access to `poll` methods via [futures::Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html)
+and [futures::Sink](https://docs.rs/futures/latest/futures/prelude/trait.Sink.html) implementations.
+Key features include built-in compression support, zero-copy operations where possible, and first-class WebAssembly support for UI development.
+Beyond passing comprehensive test suites including Autobahn,
+yawc has proven its reliability in production environments powering 24/7 market trading systems.
+
 ## Usage
 
 Add this to your `Cargo.toml`:
