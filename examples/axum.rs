@@ -36,7 +36,14 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
 }
 
 // Handler for upgrading HTTP connections to websocket connections
-async fn ws_handler(ws: yawc::IncomingUpgrade) -> impl IntoResponse {
+async fn ws_handler(
+    headers: axum::http::HeaderMap,
+    ws: yawc::IncomingUpgrade,
+) -> impl IntoResponse {
+    if headers.contains_key("XAUTH") {
+        println!("Client is authenticated");
+    }
+
     // Configure websocket options with best compression
     let options = yawc::Options::default().with_compression_level(yawc::CompressionLevel::best());
     // Upgrade the connection to websocket protocol
