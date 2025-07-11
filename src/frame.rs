@@ -194,7 +194,7 @@ impl FrameView {
     /// - `Some(CloseCode)` if the payload contains a valid close code
     /// - `None` if the payload is empty or too short to contain a close code
     pub fn close_code(&self) -> Option<CloseCode> {
-        let code = CloseCode::from(u16::from_be_bytes(self.payload[0..2].try_into().ok()?));
+        let code = CloseCode::from(u16::from_be_bytes(self.payload.get(0..2)?.try_into().ok()?));
         Some(code)
     }
 
@@ -207,7 +207,7 @@ impl FrameView {
     /// - `Some(&str)` containing the reason string if present and valid UTF-8
     /// - `None` if there is no reason string or it's not valid UTF-8
     pub fn close_reason(&self) -> Option<&str> {
-        std::str::from_utf8(&self.payload[2..]).ok()
+        std::str::from_utf8(self.payload.get(2..).filter(|l| !l.is_empty())?).ok()
     }
 
     /// Converts the frame payload to a string slice, expecting valid UTF-8.
@@ -633,6 +633,17 @@ mod tests {
 
             assert_eq!(frame.opcode, OpCode::Close);
             assert_eq!(frame.payload, Bytes::from(payload));
+            assert!(frame.close_reason().is_none());
+        }
+
+        #[test]
+        fn test_empty_close_frameview() {
+            let frame = FrameView::close_raw(vec![]);
+
+            assert_eq!(frame.opcode, OpCode::Close);
+            assert!(frame.payload.is_empty());
+            assert!(frame.close_code().is_none());
+            assert!(frame.close_reason().is_none());
         }
 
         #[test]
