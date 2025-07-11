@@ -1,6 +1,6 @@
 [package]
 name = "yawc"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["Dario <dario@infinitefieldtrading.com>"]
 description = "Yet another websocket library. But a fast, secure WebSocket implementation with RFC 6455 compliance and compression support"
