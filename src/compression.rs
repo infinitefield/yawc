@@ -4,13 +4,11 @@ use bytes::{BufMut, BytesMut};
 use flate2::{CompressError, DecompressError, Status};
 
 use nom::{
-    bytes::complete::tag,
-    bytes::complete::take_while1,
-    character::complete::digit1,
-    character::complete::space0,
+    bytes::complete::{tag, take_while1},
+    character::complete::{digit1, space0},
     combinator::opt,
     sequence::{pair, preceded},
-    IResult,
+    IResult, Parser,
 };
 
 use crate::{CompressionLevel, DeflateOptions};
@@ -172,7 +170,7 @@ impl WebSocketExtensions {
     ///   along with a tuple of the key and optional value.
     fn parse_extension(input: &str) -> IResult<&str, (&str, Option<&str>)> {
         // ; server_no_context_takeover
-        preceded(
+        let mut parser = preceded(
             // allow strings preceded by spaces
             preceded(space0, tag(";")),
             preceded(
@@ -186,8 +184,11 @@ impl WebSocketExtensions {
                     )),
                 ),
             ),
-        )(input)
-        .map(|(key, (key2, value))| (key, (key2, value.flatten())))
+        );
+
+        parser
+            .parse(input)
+            .map(|(key, (key2, value))| (key, (key2, value.flatten())))
     }
 }
 
@@ -1333,11 +1334,11 @@ mod tests {
                 let decompressed = decompressor
                     .decompress(&compressed, true)
                     .map_err(|e| {
-                        println!("Stress test: POTENTIAL ISSUE! Decompression error on pattern {} message {}: {}", 
+                        println!("Stress test: POTENTIAL ISSUE! Decompression error on pattern {} message {}: {}",
                                 pattern_idx + 1, msg_idx, e);
                         e
                     })
-                    .expect(&format!("Stress test: Decompression failed on pattern {} message {}", 
+                    .expect(&format!("Stress test: Decompression failed on pattern {} message {}",
                                    pattern_idx + 1, msg_idx));
 
                 let decompressed_data = decompressed.unwrap();
