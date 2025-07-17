@@ -55,7 +55,7 @@ async fn main() {
                     }
                     OpCode::Pong => {
                         let data = std::str::from_utf8(&body).unwrap();
-                        log::debug!("Pong: {}", data);
+                        log::debug!("Pong: {data}");
                     }
                     OpCode::Close => {
                         break;

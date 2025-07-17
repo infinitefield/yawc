@@ -57,7 +57,7 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
 
     tokio::task::spawn(async move {
         if let Err(e) = handle_client(fut).await {
-            log::error!("Error in websocket connection: {}", e);
+            log::error!("Error in websocket connection: {e}");
         }
     });
 
@@ -87,7 +87,7 @@ async fn main() -> yawc::Result<()> {
                 .serve_connection(io, service_fn(server_upgrade))
                 .with_upgrades();
             if let Err(e) = conn_fut.await {
-                log::error!("An error occurred: {:?}", e);
+                log::error!("An error occurred: {e:?}");
             }
         });
     }

@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
         //     ws.close().await?;
         // }
 
-        let mut ws = connect(&format!("runCase?case={}&agent=yawc", case)).await?;
+        let mut ws = connect(&format!("runCase?case={case}&agent=yawc")).await?;
         loop {
             let msg = match ws.next().await {
                 Some(msg) => msg,

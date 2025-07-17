@@ -60,18 +60,18 @@ impl std::fmt::Display for WebSocketExtensions {
     /// The output string includes any applicable `server_max_window_bits`, `client_max_window_bits`,
     /// `server_no_context_takeover`, and `client_no_context_takeover` options.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", PERMESSAGE_DEFLATE)?;
+        write!(f, "{PERMESSAGE_DEFLATE}")?;
 
         if let Some(server_max_window_bits) = self.server_max_window_bits {
             if (9..16).contains(&server_max_window_bits) {
-                write!(f, "; server_max_window_bits={}", server_max_window_bits)?;
+                write!(f, "; server_max_window_bits={server_max_window_bits}")?;
             } else {
                 write!(f, "; server_max_window_bits")?;
             }
         }
         if let Some(client_max_window_bits) = self.client_max_window_bits {
             if (9..16).contains(&client_max_window_bits) {
-                write!(f, "; client_max_window_bits={}", client_max_window_bits)?;
+                write!(f, "; client_max_window_bits={client_max_window_bits}")?;
             } else {
                 write!(f, "; client_max_window_bits")?;
             }
@@ -449,14 +449,14 @@ impl Deflate {
 fn deflate_error(err: CompressError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("Compression error: {}", err),
+        format!("Compression error: {err}"),
     )
 }
 
 fn inflate_error(err: DecompressError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("Decompression error: {}", err),
+        format!("Decompression error: {err}"),
     )
 }
 
@@ -1015,12 +1015,12 @@ mod tests {
 
         // Test multiple sequential compressions and decompressions
         for i in 1..=10 {
-            println!("Processing message {}", i);
+            println!("Processing message {i}");
 
             // Compress the data
             let compressed = compressor
                 .compress(csv_like_data.as_bytes())
-                .expect(&format!("Compression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Compression failed on message {i}"));
 
             println!(
                 "Message {}: Original size: {}, Compressed size: {}",
@@ -1032,22 +1032,18 @@ mod tests {
             // Decompress the data
             let decompressed = decompressor
                 .decompress(&compressed, true)
-                .expect(&format!("Decompression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
-                "Decompressed data doesn't match original on message {}",
-                i
+                "Decompressed data doesn't match original on message {i}"
             );
 
             // If the issue reproduces, we should see errors after a few messages
             if i >= 2 {
-                println!(
-                    "Successfully processed {} messages without compression errors",
-                    i
-                );
+                println!("Successfully processed {i} messages without compression errors");
             }
         }
     }
@@ -1062,22 +1058,21 @@ mod tests {
         let mut decompressor = Decompressor::no_context_takeover();
 
         for i in 1..=10 {
-            println!("Processing no-context message {}", i);
+            println!("Processing no-context message {i}");
 
             let compressed = compressor
                 .compress(csv_like_data.as_bytes())
-                .expect(&format!("No-context compression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("No-context compression failed on message {i}"));
 
             let decompressed = decompressor
                 .decompress(&compressed, true)
-                .expect(&format!("No-context decompression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("No-context decompression failed on message {i}"));
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
-                "No-context decompressed data doesn't match original on message {}",
-                i
+                "No-context decompressed data doesn't match original on message {i}"
             );
         }
     }
@@ -1094,11 +1089,11 @@ mod tests {
         let mut decompressor = Decompressor::new();
 
         for i in 1..=5 {
-            println!("=== Processing detailed message {} ===", i);
+            println!("=== Processing detailed message {i} ===");
 
             let compressed = compressor
                 .compress(csv_like_data.as_bytes())
-                .expect(&format!("Compression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Compression failed on message {i}"));
 
             println!("Message {}: Compressed size: {}", i, compressed.len());
 
@@ -1108,26 +1103,25 @@ mod tests {
             } else {
                 &compressed[..]
             };
-            println!("Message {}: End bytes: {:02x?}", i, end_bytes);
+            println!("Message {i}: End bytes: {end_bytes:02x?}");
 
             // Check if it ends with the deflate suffix
             let ends_with_suffix = compressed.ends_with(&[0x0, 0x0, 0xff, 0xff]);
-            println!("Message {}: Ends with suffix: {}", i, ends_with_suffix);
+            println!("Message {i}: Ends with suffix: {ends_with_suffix}");
 
             // Decompress the data
             let decompressed = decompressor
                 .decompress(&compressed, true)
-                .expect(&format!("Decompression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
-                "Decompressed data doesn't match original on message {}",
-                i
+                "Decompressed data doesn't match original on message {i}"
             );
 
-            println!("Message {}: Successfully decompressed", i);
+            println!("Message {i}: Successfully decompressed");
         }
     }
 
@@ -1143,27 +1137,26 @@ mod tests {
         let mut inflate = Inflate::default();
 
         for i in 1..=5 {
-            println!("=== Raw deflate message {} ===", i);
+            println!("=== Raw deflate message {i} ===");
 
             let compressed = deflate
                 .compress(csv_like_data.as_bytes())
-                .expect(&format!("Raw compression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Raw compression failed on message {i}"));
 
             println!("Raw message {}: Compressed size: {}", i, compressed.len());
 
             let decompressed = inflate
                 .decompress(&compressed, true)
-                .expect(&format!("Raw decompression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Raw decompression failed on message {i}"));
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
-                "Raw decompressed data doesn't match original on message {}",
-                i
+                "Raw decompressed data doesn't match original on message {i}"
             );
 
-            println!("Raw message {}: Successfully processed", i);
+            println!("Raw message {i}: Successfully processed");
         }
     }
 
@@ -1179,16 +1172,13 @@ mod tests {
 
         // The issue mentions it happens after 2-5 messages, so let's test exactly that range
         for i in 1..=7 {
-            println!("GitHub issue reproduction - message {}", i);
+            println!("GitHub issue reproduction - message {i}");
 
             let data_to_send = data.clone();
 
             let compressed = compressor
                 .compress(data_to_send.as_bytes())
-                .expect(&format!(
-                    "GitHub issue: Compression failed on message {}",
-                    i
-                ));
+                .unwrap_or_else(|_| panic!("GitHub issue: Compression failed on message {i}"));
 
             println!(
                 "GitHub issue message {}: Original: {}, Compressed: {}",
@@ -1205,28 +1195,21 @@ mod tests {
                     assert_eq!(
                         &decompressed_data[..],
                         data_to_send.as_bytes(),
-                        "GitHub issue: Decompressed data doesn't match original on message {}",
-                        i
+                        "GitHub issue: Decompressed data doesn't match original on message {i}"
                     );
-                    println!("GitHub issue message {}: Successfully processed", i);
+                    println!("GitHub issue message {i}: Successfully processed");
                 }
                 Ok(None) => {
-                    panic!("GitHub issue: Unexpected None result on message {}", i);
+                    panic!("GitHub issue: Unexpected None result on message {i}");
                 }
                 Err(e) => {
-                    println!(
-                        "GitHub issue: REPRODUCED! Decompression error on message {}: {}",
-                        i, e
-                    );
+                    println!("GitHub issue: REPRODUCED! Decompression error on message {i}: {e}");
                     // This is what we expect to see if the issue reproduces
-                    if i >= 2 && i <= 5 {
+                    if (2..=5).contains(&i) {
                         println!("ERROR REPRODUCED: This matches the GitHub issue description!");
-                        panic!(
-                            "Successfully reproduced GitHub issue #7 on message {}: {}",
-                            i, e
-                        );
+                        panic!("Successfully reproduced GitHub issue #7 on message {i}: {e}");
                     } else {
-                        panic!("Unexpected error on message {}: {}", i, e);
+                        panic!("Unexpected error on message {i}: {e}");
                     }
                 }
             }
@@ -1247,18 +1230,15 @@ mod tests {
         let mut decompressor = Decompressor::new();
 
         for i in 1..=8 {
-            println!("Repetitive data test - message {}", i);
+            println!("Repetitive data test - message {i}");
 
             let compressed = compressor
                 .compress(repetitive_data.as_bytes())
                 .map_err(|e| {
-                    println!("Repetitive data: Compression error on message {}: {}", i, e);
+                    println!("Repetitive data: Compression error on message {i}: {e}");
                     e
                 })
-                .expect(&format!(
-                    "Repetitive data: Compression failed on message {}",
-                    i
-                ));
+                .unwrap_or_else(|_| panic!("Repetitive data: Compression failed on message {i}"));
 
             println!(
                 "Repetitive message {}: Original: {}, Compressed: {} (ratio: {:.2}%)",
@@ -1271,27 +1251,26 @@ mod tests {
             let decompressed = decompressor
                 .decompress(&compressed, true)
                 .map_err(|e| {
-                    println!("Repetitive data: POTENTIAL ISSUE REPRODUCED! Decompression error on message {}: {}", i, e);
+                    println!("Repetitive data: POTENTIAL ISSUE REPRODUCED! Decompression error on message {i}: {e}");
                     e
                 })
-                .expect(&format!("Repetitive data: Decompression failed on message {}", i));
+                .unwrap_or_else(|_| panic!("Repetitive data: Decompression failed on message {i}"));
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
                 &decompressed_data[..],
                 repetitive_data.as_bytes(),
-                "Repetitive data: Decompressed data doesn't match original on message {}",
-                i
+                "Repetitive data: Decompressed data doesn't match original on message {i}"
             );
 
-            println!("Repetitive message {}: Successfully processed", i);
+            println!("Repetitive message {i}: Successfully processed");
         }
     }
 
     #[test]
     fn test_stress_compression_with_mixed_data() {
         // Stress test with mixed data patterns that might trigger edge cases
-        let patterns = vec![
+        let patterns = [
             "A".repeat(1000),
             "AB".repeat(500),
             "ABC".repeat(333),
@@ -1325,11 +1304,13 @@ mod tests {
                         );
                         e
                     })
-                    .expect(&format!(
-                        "Stress test: Compression failed on pattern {} message {}",
-                        pattern_idx + 1,
-                        msg_idx
-                    ));
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Stress test: Compression failed on pattern {} message {}",
+                            pattern_idx + 1,
+                            msg_idx
+                        )
+                    });
 
                 let decompressed = decompressor
                     .decompress(&compressed, true)
@@ -1338,7 +1319,7 @@ mod tests {
                                 pattern_idx + 1, msg_idx, e);
                         e
                     })
-                    .expect(&format!("Stress test: Decompression failed on pattern {} message {}",
+                    .unwrap_or_else(|_| panic!("Stress test: Decompression failed on pattern {} message {}",
                                    pattern_idx + 1, msg_idx));
 
                 let decompressed_data = decompressed.unwrap();

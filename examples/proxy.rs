@@ -70,7 +70,7 @@ async fn server_upgrade(
         if let Ok(ws) = fut.await {
             // Call `handle_client` to process the client's WebSocket connection
             if let Err(e) = handle_client(clients, ws).await {
-                log::error!("Error in WebSocket connection: {}", e);
+                log::error!("Error in WebSocket connection: {e}");
             }
         }
     });
@@ -105,7 +105,7 @@ async fn server(clients: Arc<Clients>) -> yawc::Result<()> {
                 .serve_connection(io, service_fn)
                 .with_upgrades();
             if let Err(e) = conn_fut.await {
-                log::error!("an error occurred: {:?}", e);
+                log::error!("an error occurred: {e:?}");
             }
         });
     }
@@ -135,7 +135,7 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
                     // Broadcast message to all connected clients
                     for (key, client) in client_list.iter_mut() {
                         if let Err(err) = client.send(view.clone()).await {
-                            log::error!("client: {}", err);
+                            log::error!("client: {err}");
                             disconnected.push(*key);
                         }
                     }
