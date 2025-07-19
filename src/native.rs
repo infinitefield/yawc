@@ -407,7 +407,6 @@ impl IncomingUpgrade {
 /// ```
 #[cfg(feature = "axum")]
 #[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
-#[async_trait::async_trait]
 impl<S> axum_core::extract::FromRequestParts<S> for IncomingUpgrade
 where
     S: Sync,
