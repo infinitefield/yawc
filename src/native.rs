@@ -421,41 +421,43 @@ where
     /// - The protocol version (must be 13)
     /// - Any extension offers from the client
     /// - The upgrade future from Hyper
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut http::request::Parts,
         _state: &S,
-    ) -> std::result::Result<Self, Self::Rejection> {
-        let key = parts
-            .headers
-            .get(header::SEC_WEBSOCKET_KEY)
-            .ok_or(http::StatusCode::BAD_REQUEST)?;
+    ) -> impl Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
+        async move {
+            let key = parts
+                .headers
+                .get(header::SEC_WEBSOCKET_KEY)
+                .ok_or(http::StatusCode::BAD_REQUEST)?;
 
-        if parts
-            .headers
-            .get(header::SEC_WEBSOCKET_VERSION)
-            .map(|v| v.as_bytes())
-            != Some(b"13")
-        {
-            return Err(hyper::StatusCode::BAD_REQUEST);
+            if parts
+                .headers
+                .get(header::SEC_WEBSOCKET_VERSION)
+                .map(|v| v.as_bytes())
+                != Some(b"13")
+            {
+                return Err(hyper::StatusCode::BAD_REQUEST);
+            }
+
+            let extensions = parts
+                .headers
+                .get(header::SEC_WEBSOCKET_EXTENSIONS)
+                .and_then(|h| h.to_str().ok())
+                .map(WebSocketExtensions::from_str)
+                .and_then(std::result::Result::ok);
+
+            let on_upgrade = parts
+                .extensions
+                .remove::<hyper::upgrade::OnUpgrade>()
+                .ok_or(hyper::StatusCode::BAD_REQUEST)?;
+
+            Ok(Self {
+                on_upgrade,
+                extensions,
+                key: sec_websocket_protocol(key.as_bytes()),
+            })
         }
-
-        let extensions = parts
-            .headers
-            .get(header::SEC_WEBSOCKET_EXTENSIONS)
-            .and_then(|h| h.to_str().ok())
-            .map(WebSocketExtensions::from_str)
-            .and_then(std::result::Result::ok);
-
-        let on_upgrade = parts
-            .extensions
-            .remove::<hyper::upgrade::OnUpgrade>()
-            .ok_or(hyper::StatusCode::BAD_REQUEST)?;
-
-        Ok(Self {
-            on_upgrade,
-            extensions,
-            key: sec_websocket_protocol(key.as_bytes()),
-        })
     }
 }
 
