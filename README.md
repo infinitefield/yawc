@@ -133,6 +133,8 @@ These examples serve as practical reference implementations for common WebSocket
 - `axum`: Enable integration with the Axum web framework
 - `logging`: Enable debug logging for connection events
 - `zlib`: Enable advanced compression options with zlib (not recommended unless you know what you are doing)
+- `rustls-ring`: Enable the fallback rustls crypto provider based on `ring`
+- `rustls-aws-lc-rs`: Enable the fallback rustls crypto provider based on `aws-lc-rs`
 
 ### Axum Server Example
 
