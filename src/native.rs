@@ -2862,6 +2862,7 @@ fn generate_key() -> String {
 ///
 /// # Panics
 /// This function will panic if:
+/// - No rustls crypto provider exists and no `rustls-*` feature is enabled
 /// - The protocol versions specified in `rustls::ALL_VERSIONS` are not supported by the crypto provider
 /// - The TLS configuration cannot be built with the given parameters
 /// - The root certificate store cannot be properly initialized
@@ -2874,9 +2875,27 @@ fn tls_connector() -> TlsConnector {
     }));
 
     // define the provider if any, fallback to ring
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+    let maybe_provider = rustls::crypto::CryptoProvider::get_default().cloned();
+
+    #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
+    // Fallback to ring/aws-lc if enabled
+    let provider = maybe_provider.unwrap_or_else(|| {
+        #[cfg(feature = "rustls-ring")]
+        let provider = rustls::crypto::ring::default_provider();
+        #[cfg(feature = "rustls-aws-lc-rs")]
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+
+        Arc::new(provider)
+    });
+
+    #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+    let provider = maybe_provider.expect(
+        r#"No Rustls crypto provider was enabled for yawc to connect to a `wss://` endpoint!
+
+Either:
+    - provide a `connector` in the WebSocketBuilder options
+    - enable one of the following features: `rustls-ring`, `rustls-aws-lc-rs`"#,
+    );
 
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::ALL_VERSIONS)
