@@ -104,6 +104,7 @@ struct Negotitation {
     extensions: Option<WebSocketExtensions>,
     compression_level: Option<CompressionLevel>,
     max_payload_read: usize,
+    max_payload_write: Option<usize>,
     max_read_buffer: usize,
     utf8: bool,
 }
@@ -726,6 +727,11 @@ impl AsyncWrite for HttpStream {
 /// including payload size limits, compression settings, and UTF-8 validation requirements.
 #[derive(Clone, Default)]
 pub struct Options {
+    /// The maximum payload size in bytes that, when exceeded, causes the
+    /// WebSocket implementation to fragment outgoing messages into multiple
+    /// frames. Messages below this limit are sent in a single frame.
+    pub max_payload_write: Option<usize>,
+
     /// Maximum allowed payload size for incoming messages, in bytes.
     ///
     /// If a message exceeds this size, the connection will be closed immediately
@@ -1831,6 +1837,7 @@ impl WebSocket {
                     .as_ref()
                     .map(|compression| compression.level),
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+                max_payload_write: options.max_payload_write,
                 max_read_buffer,
                 utf8: options.check_utf8,
             }),
@@ -2384,6 +2391,7 @@ impl ReadHalf {
                     .ok_or(WebSocketError::InvalidFragment)?;
 
                 if frame.fin {
+                    // if a last fragment is compressed
                     if fragment.is_compressed {
                         let inflate = self.inflate.as_mut().unwrap();
                         let output = inflate
@@ -2402,7 +2410,9 @@ impl ReadHalf {
 
                         Ok(Some(frame))
                     } else {
+                        // frame is not compressed
                         frame.opcode = fragment.opcode;
+                        // clear the last received payload and append the accumulated
                         frame.payload.clear();
                         frame.payload.extend_from_slice(&self.accumulated);
 
@@ -2545,9 +2555,12 @@ impl ReadHalf {
 /// ```
 pub struct WriteHalf {
     role: Role,
+    // temporary buffer to be able to extract a BytesMut (for masking)
     buffer: BytesMut,
+    pending_frames: VecDeque<Frame>,
     deflate: Option<Compressor>,
     close_state: Option<CloseState>,
+    max_payload_size: Option<usize>,
 }
 
 /// Represents the various states involved in gracefully closing a WebSocket connection.
@@ -2575,8 +2588,10 @@ impl WriteHalf {
         Self {
             role,
             deflate,
+            pending_frames: VecDeque::with_capacity(8),
             buffer: BytesMut::with_capacity(1024),
             close_state: None,
+            max_payload_size: opts.max_payload_write,
         }
     }
 
@@ -2635,27 +2650,52 @@ impl WriteHalf {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        let maybe_frame = if !view.opcode.is_control() {
+        let maybe_payload = if !view.opcode.is_control() {
             if let Some(deflate) = self.deflate.as_mut() {
                 // Compress the payload if compression is enabled
                 let output = deflate.compress(&view.payload)?;
-                Some(Frame::compress(true, view.opcode, None, output))
+                Some(output)
+                // Some(Frame::compress(true, view.opcode, None, output))
             } else {
                 None
             }
         } else {
             None
         };
+        let is_compressed = maybe_payload.is_some();
 
-        let mut frame = maybe_frame.unwrap_or_else(|| {
+        let mut payload = maybe_payload.unwrap_or_else(|| {
             self.buffer.extend_from_slice(&view.payload[..]);
-            Frame::new(true, view.opcode, None, self.buffer.split())
+            // Frame::new(true, view.opcode, None, self.buffer.split())
+            self.buffer.split()
         });
 
-        if self.role == Role::Client {
-            frame.mask();
+        let threshold = self.max_payload_size.unwrap_or(payload.len());
+        let iters = payload.len() / threshold;
+        for _ in 0..iters {
+            let payload = payload.split_to(threshold);
+            let mut frame = Frame::new_priv(false, view.opcode, None, payload, is_compressed);
+            if self.role == Role::Client {
+                frame.mask();
+            }
+            self.pending_frames.push_back(frame);
         }
 
+        if payload.is_empty() {
+            // if the payload.len % threshold == 0 modify the last frame
+            let frame = self.pending_frames.back_mut().expect("back");
+            frame.fin = true;
+        } else {
+            let mut frame = Frame::new_priv(true, view.opcode, None, payload, is_compressed);
+            if self.role == Role::Client {
+                frame.mask();
+            }
+            self.pending_frames.push_back(frame);
+        }
+
+        // we will always have at least one frame
+        let frame = self.pending_frames.pop_front().expect("at least one frame");
+        // if the underlying stream returns an error we can assume the connection is disconnected (?)
         stream.start_send_unpin(frame)
     }
 
@@ -2837,6 +2877,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotitatio
         extensions,
         compression_level,
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+        max_payload_write: options.max_payload_write,
         max_read_buffer,
         utf8: options.check_utf8,
     })

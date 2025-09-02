@@ -175,7 +175,7 @@ impl From<OpCode> for u8 {
 
 /// A lightweight view of a WebSocket frame, containing just the opcode and payload.
 /// This struct provides a more efficient, immutable representation of frame data
-/// compared to the full `Frame` struct.
+/// compared to the full [`Frame`] struct.
 #[derive(Clone)]
 pub struct FrameView {
     /// The operation code indicating the type of frame (Text, Binary, Close, etc.)
@@ -344,19 +344,6 @@ impl From<Frame> for FrameView {
 ///    - Ping frames for connection liveness checks
 ///    - Pong frames for responding to pings
 ///
-/// # Creating Frames
-///
-/// While frames can be constructed directly, it's recommended to use the provided factory methods:
-/// ```rust
-/// use yawc::frame::FrameView;
-/// use yawc::close::CloseCode;
-///
-/// let text_frame = FrameView::text("Hello");
-/// let binary_frame = FrameView::binary(vec![1, 2, 3]);
-/// let ping_frame = FrameView::ping(vec![]);
-/// let close_frame = FrameView::close(CloseCode::Normal, b"Goodbye");
-/// ```
-///
 /// # Fields
 /// - `fin`: Final fragment flag. When `true`, indicates this frame completes a message.
 /// - `opcode`: Defines the frame type and interpretation (text, binary, control, etc).
@@ -438,6 +425,22 @@ impl Frame {
             mask,
             payload: payload.into(),
             is_compressed: true,
+        }
+    }
+
+    pub(super) fn new_priv(
+        fin: bool,
+        opcode: OpCode,
+        mask: Option<[u8; 4]>,
+        payload: impl Into<BytesMut>,
+        is_compressed: bool,
+    ) -> Self {
+        Self {
+            fin,
+            opcode,
+            mask,
+            payload: payload.into(),
+            is_compressed,
         }
     }
 
