@@ -12,6 +12,7 @@ use {
     tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
 };
 
+use bytes::BytesMut;
 use std::{
     collections::VecDeque,
     future::{poll_fn, Future},
@@ -22,8 +23,6 @@ use std::{
     sync::Arc,
     task::{ready, Context, Poll},
 };
-
-use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use close::CloseCode;
@@ -1390,6 +1389,8 @@ impl WebSocket {
             let port = url.port_or_known_default().expect("port");
             TcpStream::connect(format!("{host}:{port}")).await?
         };
+
+        let _ = tcp_stream.set_nodelay(true);
 
         let stream = match url.scheme() {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
