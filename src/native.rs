@@ -126,8 +126,7 @@ impl Negotitation {
             } else {
                 // zlib
                 #[cfg(feature = "zlib")]
-                if config.client_max_window_bits.is_some() {
-                    let window_bits = config.client_max_window_bits.unwrap();
+                if let Some(window_bits) = config.client_max_window_bits {
                     compression::Decompressor::new_with_window_bits(window_bits)
                 } else {
                     compression::Decompressor::new()
@@ -141,8 +140,7 @@ impl Negotitation {
                 compression::Decompressor::no_context_takeover()
             } else {
                 #[cfg(feature = "zlib")]
-                if config.server_max_window_bits.is_some() {
-                    let window_bits = config.server_max_window_bits.unwrap();
+                if let Some(window_bits) = config.server_max_window_bits {
                     compression::Decompressor::new_with_window_bits(window_bits)
                 } else {
                     compression::Decompressor::new()
@@ -173,8 +171,7 @@ impl Negotitation {
             } else {
                 // server
                 #[cfg(feature = "zlib")]
-                if config.client_max_window_bits.is_some() {
-                    let window_bits = config.client_max_window_bits.unwrap();
+                if let Some(window_bits) = config.client_max_window_bits {
                     compression::Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     compression::Compressor::new(level)
@@ -189,8 +186,7 @@ impl Negotitation {
             } else {
                 // zlib
                 #[cfg(feature = "zlib")]
-                if config.server_max_window_bits.is_some() {
-                    let window_bits = config.server_max_window_bits.unwrap();
+                if let Some(window_bits) = config.server_max_window_bits {
                     compression::Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     compression::Compressor::new(level)
@@ -757,6 +753,14 @@ pub struct Options {
     ///
     /// Default: `false`
     pub check_utf8: bool,
+
+    /// Flag to disable [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) on the TCP socket.
+    ///
+    /// If `true`, outgoing WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// Default: `false`
+    pub no_delay: bool,
 }
 
 /// Configuration options for WebSocket message compression using the Deflate algorithm.
@@ -976,6 +980,21 @@ impl Options {
     pub fn with_utf8(self) -> Self {
         Self {
             check_utf8: true,
+            ..self
+        }
+    }
+
+    /// Enables TCP_NODELAY on the TCP stream.
+    ///
+    /// When enabled, [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) will be
+    /// disabled on the TCP socket. WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with TCP_NODELAY enabled.
+    pub fn with_no_delay(self) -> Self {
+        Self {
+            no_delay: true,
             ..self
         }
     }
@@ -1390,7 +1409,8 @@ impl WebSocket {
             TcpStream::connect(format!("{host}:{port}")).await?
         };
 
-        let _ = tcp_stream.set_nodelay(true);
+        // Set TCP_NODELAY option
+        let _ = tcp_stream.set_nodelay(options.no_delay);
 
         let stream = match url.scheme() {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
@@ -1607,10 +1627,8 @@ impl WebSocket {
         options: Options,
     ) -> Result<WebSocket> {
         let host = url.host().expect("hostname").to_string();
-        let port_defined = url.port().is_some();
-        let port = url.port_or_known_default().expect("port");
 
-        let host_header = if port_defined {
+        let host_header = if let Some(port) = url.port() {
             format!("{host}:{port}")
         } else {
             host
