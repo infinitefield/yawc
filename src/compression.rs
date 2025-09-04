@@ -397,37 +397,48 @@ impl Deflate {
         }
     }
 
-    /// Flushes the current compression state and returns the compressed output buffer.
-    ///
-    /// This method performs several steps:
-    /// 1. Flushes any remaining compressed data using `FlushCompress::Sync`
-    /// 2. Continues flushing until no more output is produced
-    /// 3. Removes unnecessary trailing suffix bytes if present
-    /// 4. Returns the final compressed output
-    ///
-    /// # Returns
-    /// - `Ok(BytesMut)`: The compressed output buffer containing all flushed data
-    /// - `Err(io::Error)`: If an error occurs during compression
+    /// Flushes the compressor, syncing any pending data and returning the accumulated output buffer.
     fn flush(&mut self) -> io::Result<BytesMut> {
         let output = &mut self.output;
         let compressor = &mut self.compress;
 
+        // first input flag is Sync
+        let mut flag = flate2::FlushCompress::Sync;
         loop {
             let dst = chunk(output);
             let before_out = compressor.total_out();
-            compressor
-                .compress(&[], dst, flate2::FlushCompress::Sync)
-                .map_err(deflate_error)?;
+
+            compressor.compress(&[], dst, flag).map_err(deflate_error)?;
 
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
 
-            // require the block suffix to be written in order to break the loop
-            if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
-                output.truncate(output.len() - 4);
-                break Ok(output.split());
+            if written == 0 {
+                break;
             }
+
+            flag = flate2::FlushCompress::None;
         }
+
+        // since we don't finish the compressor in order to reuse it later
+        // force sync before returning
+
+        let dst = chunk(output);
+        let before_out = compressor.total_out();
+
+        compressor
+            .compress(&[], dst, flate2::FlushCompress::Sync)
+            .map_err(deflate_error)?;
+
+        let written = (compressor.total_out() - before_out) as usize;
+        unsafe { output.advance_mut(written) };
+
+        // Since the prefix is not mandatory, it might optionally be there
+        if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
+            output.truncate(output.len() - 4);
+        }
+
+        Ok(output.split())
     }
 }
 
@@ -464,9 +475,8 @@ fn inflate_error(err: DecompressError) -> io::Error {
 /// # Returns
 /// A mutable slice of u8 representing the next available chunk of memory
 fn chunk(output: &mut BytesMut) -> &mut [u8] {
-    // always have 128 bytes available
+    // always ensure there's 128 bytes available
     if output.capacity() - output.len() < 128 {
-        // allocate capacity ourselves since chunk_mut reserves only 64 bytes
         output.reserve(128);
     }
 
