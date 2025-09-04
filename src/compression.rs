@@ -412,35 +412,21 @@ impl Deflate {
         let output = &mut self.output;
         let compressor = &mut self.compress;
 
-        let dst = chunk(output);
-        let before_out = compressor.total_out();
-
-        compressor
-            .compress(&[], dst, flate2::FlushCompress::Sync)
-            .map_err(deflate_error)?;
-
-        let written = (compressor.total_out() - before_out) as usize;
-        unsafe { output.advance_mut(written) };
-
         loop {
             let dst = chunk(output);
-
             let before_out = compressor.total_out();
             compressor
-                .compress(&[], dst, flate2::FlushCompress::None)
+                .compress(&[], dst, flate2::FlushCompress::Sync)
                 .map_err(deflate_error)?;
-
-            if before_out == compressor.total_out() {
-                // Strip unnecessary suffix if present
-                if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
-                    output.truncate(output.len() - 4);
-                }
-
-                break Ok(output.split());
-            }
 
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
+
+            // require the block suffix to be written in order to break the loop
+            if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
+                output.truncate(output.len() - 4);
+                break Ok(output.split());
+            }
         }
     }
 }
@@ -478,9 +464,10 @@ fn inflate_error(err: DecompressError) -> io::Error {
 /// # Returns
 /// A mutable slice of u8 representing the next available chunk of memory
 fn chunk(output: &mut BytesMut) -> &mut [u8] {
-    if output.len() == output.capacity() {
+    // always have 128 bytes available
+    if output.capacity() - output.len() < 128 {
         // allocate capacity ourselves since chunk_mut reserves only 64 bytes
-        output.reserve(1024);
+        output.reserve(128);
     }
 
     let uninitbuf = output.spare_capacity_mut();
@@ -1070,8 +1057,8 @@ mod tests {
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
-                &decompressed_data[..],
-                csv_like_data.as_bytes(),
+                std::str::from_utf8(&decompressed_data[..]).unwrap(),
+                csv_like_data,
                 "No-context decompressed data doesn't match original on message {i}"
             );
         }
