@@ -29,7 +29,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # Optional feature configurations
 [features]
-default = ["rustls-ring"] # Enabled the ring crypto provider by default to not have any breaking changes
+default = [
+    "rustls-ring",
+] # Enabled the ring crypto provider by default to not have any breaking changes
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 logging = ["log"]
 simd = ["simdutf8"]
@@ -117,7 +119,6 @@ serde_json = { version = "1", optional = true }
 
 # Compression
 flate2 = "1"
-
 
 # ==============================================================================
 # Development dependencies (native only)
