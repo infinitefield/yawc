@@ -126,8 +126,7 @@ impl Negotitation {
             } else {
                 // zlib
                 #[cfg(feature = "zlib")]
-                if config.client_max_window_bits.is_some() {
-                    let window_bits = config.client_max_window_bits.unwrap();
+                if let Some(window_bits) = config.client_max_window_bits {
                     compression::Decompressor::new_with_window_bits(window_bits)
                 } else {
                     compression::Decompressor::new()
@@ -141,8 +140,7 @@ impl Negotitation {
                 compression::Decompressor::no_context_takeover()
             } else {
                 #[cfg(feature = "zlib")]
-                if config.server_max_window_bits.is_some() {
-                    let window_bits = config.server_max_window_bits.unwrap();
+                if let Some(window_bits) = config.server_max_window_bits {
                     compression::Decompressor::new_with_window_bits(window_bits)
                 } else {
                     compression::Decompressor::new()
@@ -173,8 +171,7 @@ impl Negotitation {
             } else {
                 // server
                 #[cfg(feature = "zlib")]
-                if config.client_max_window_bits.is_some() {
-                    let window_bits = config.client_max_window_bits.unwrap();
+                if let Some(window_bits) = config.client_max_window_bits {
                     compression::Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     compression::Compressor::new(level)
@@ -189,8 +186,7 @@ impl Negotitation {
             } else {
                 // zlib
                 #[cfg(feature = "zlib")]
-                if config.server_max_window_bits.is_some() {
-                    let window_bits = config.server_max_window_bits.unwrap();
+                if let Some(window_bits) = config.server_max_window_bits {
                     compression::Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     compression::Compressor::new(level)
@@ -1631,10 +1627,8 @@ impl WebSocket {
         options: Options,
     ) -> Result<WebSocket> {
         let host = url.host().expect("hostname").to_string();
-        let port_defined = url.port().is_some();
-        let port = url.port_or_known_default().expect("port");
 
-        let host_header = if port_defined {
+        let host_header = if let Some(port) = url.port() {
             format!("{host}:{port}")
         } else {
             host
