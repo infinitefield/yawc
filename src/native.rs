@@ -757,6 +757,14 @@ pub struct Options {
     ///
     /// Default: `false`
     pub check_utf8: bool,
+
+    /// Flag to disable [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) on the TCP socket.
+    ///
+    /// If `true`, outgoing WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// Default: `false`
+    pub no_delay: bool,
 }
 
 /// Configuration options for WebSocket message compression using the Deflate algorithm.
@@ -976,6 +984,21 @@ impl Options {
     pub fn with_utf8(self) -> Self {
         Self {
             check_utf8: true,
+            ..self
+        }
+    }
+
+    /// Enables TCP_NODELAY on the TCP stream.
+    ///
+    /// When enabled, [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) will be
+    /// disabled on the TCP socket. WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with TCP_NODELAY enabled.
+    pub fn with_no_delay(self) -> Self {
+        Self {
+            no_delay: true,
             ..self
         }
     }
@@ -1390,7 +1413,8 @@ impl WebSocket {
             TcpStream::connect(format!("{host}:{port}")).await?
         };
 
-        let _ = tcp_stream.set_nodelay(true);
+        // Set TCP_NODELAY option
+        let _ = tcp_stream.set_nodelay(options.no_delay);
 
         let stream = match url.scheme() {
             "ws" => MaybeTlsStream::Plain(tcp_stream),
