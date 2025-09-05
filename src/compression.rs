@@ -1123,6 +1123,32 @@ mod tests {
     }
 
     #[test]
+    fn test_random_data_compression_and_decompression() {
+        // Generate pseudo-random data deterministically for repeatable tests
+        let data_len = 10_000i32;
+        let data: Vec<u8> = (0..data_len)
+            .map(|i| ((i.wrapping_mul(1234567).wrapping_add(987654321)) % 256) as u8)
+            .collect();
+
+        // Compress the data
+        let mut compressor = Compressor::new(Compression::default());
+        let compressed = compressor.compress(&data).expect("Compression failed");
+
+        // Decompress the data
+        let mut decompressor = Decompressor::new();
+        let decompressed = decompressor
+            .decompress(&compressed, true)
+            .expect("Decompression failed");
+
+        // The decompression result should be Some(BytesMut) for a final frame
+        assert_eq!(
+            decompressed.unwrap(),
+            &data[..],
+            "Decompressed data does not match original"
+        );
+    }
+
+    #[test]
     fn test_raw_deflate_compression_sequence() {
         // Test the raw deflate compression/decompression to see if we can reproduce the issue
         // This bypasses the WebSocket-specific compression wrapper
