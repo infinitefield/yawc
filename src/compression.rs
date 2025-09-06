@@ -1,7 +1,7 @@
 use std::io;
 
 use bytes::{BufMut, BytesMut};
-use flate2::{CompressError, DecompressError, Status};
+use flate2::{CompressError, DecompressError, FlushCompress, Status};
 
 use nom::{
     bytes::complete::{tag, take_while1},
@@ -397,51 +397,39 @@ impl Deflate {
         }
     }
 
-    /// Flushes the current compression state and returns the compressed output buffer.
-    ///
-    /// This method performs several steps:
-    /// 1. Flushes any remaining compressed data using `FlushCompress::Sync`
-    /// 2. Continues flushing until no more output is produced
-    /// 3. Removes unnecessary trailing suffix bytes if present
-    /// 4. Returns the final compressed output
-    ///
-    /// # Returns
-    /// - `Ok(BytesMut)`: The compressed output buffer containing all flushed data
-    /// - `Err(io::Error)`: If an error occurs during compression
+    /// Flushes the compressor, syncing any pending data and returning the accumulated output buffer.
     fn flush(&mut self) -> io::Result<BytesMut> {
-        let output = &mut self.output;
-        let compressor = &mut self.compress;
+        let mut flush_compress = |flag: FlushCompress| -> io::Result<usize> {
+            let output = &mut self.output;
+            let compressor = &mut self.compress;
 
-        let dst = chunk(output);
-        let before_out = compressor.total_out();
-
-        compressor
-            .compress(&[], dst, flate2::FlushCompress::Sync)
-            .map_err(deflate_error)?;
-
-        let written = (compressor.total_out() - before_out) as usize;
-        unsafe { output.advance_mut(written) };
-
-        loop {
             let dst = chunk(output);
-
             let before_out = compressor.total_out();
-            compressor
-                .compress(&[], dst, flate2::FlushCompress::None)
-                .map_err(deflate_error)?;
 
-            if before_out == compressor.total_out() {
-                // Strip unnecessary suffix if present
-                if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
-                    output.truncate(output.len() - 4);
-                }
-
-                break Ok(output.split());
-            }
+            compressor.compress(&[], dst, flag).map_err(deflate_error)?;
 
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
+
+            Ok(written)
+        };
+
+        flush_compress(FlushCompress::Sync)?;
+
+        // force flush until it returns 0
+        while flush_compress(FlushCompress::None)? != 0 {}
+
+        // since we don't finish the compressor in order to reuse it later
+        // force sync before returning
+
+        flush_compress(FlushCompress::Sync)?;
+
+        // Since the prefix is not mandatory, it might optionally be there
+        if self.output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
+            self.output.truncate(self.output.len() - 4);
         }
+
+        Ok(self.output.split())
     }
 }
 
@@ -462,24 +450,10 @@ fn inflate_error(err: DecompressError) -> io::Error {
 
 /// Returns a mutable slice to the next available chunk of memory in the BytesMut buffer.
 ///
-/// This function manages the buffer capacity and provides safe access to uninitialized memory:
-///
-/// * If the buffer is full (len == capacity), reserves an additional 1024 bytes
-/// * Gets a reference to the uninitialized spare capacity
-/// * Performs an unsafe conversion of MaybeUninit<u8> to u8 for the raw bytes
-///
-/// # Safety
-/// The unsafe conversion is necessary to treat uninitialized memory as initialized bytes,
-/// which is valid in this context since the bytes will be written before being read.
-///
-/// # Arguments
-/// * `output` - Mutable reference to the BytesMut buffer
-///
-/// # Returns
-/// A mutable slice of u8 representing the next available chunk of memory
+/// This function ensures that there's always at least 1024 bytes available in the returning byte slice.
 fn chunk(output: &mut BytesMut) -> &mut [u8] {
-    if output.len() == output.capacity() {
-        // allocate capacity ourselves since chunk_mut reserves only 64 bytes
+    // always ensure there's 1024 bytes available
+    if output.capacity() - output.len() < 1024 {
         output.reserve(1024);
     }
 
@@ -1048,11 +1022,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_no_context_takeover_multiple_messages() {
+    fn compress_repetitive_csv_msg(n: usize) {
         // Test the same scenario but with no context takeover to compare
         let csv_like_data = "timestamp,user_id,action,data,more_data,even_more_data,field1,field2,field3,field4,field5,field6,field7,field8,field9,field10"
-            .repeat(100);
+        .repeat(n);
 
         let mut compressor = Compressor::no_context_takeover(Compression::default());
         let mut decompressor = Decompressor::no_context_takeover();
@@ -1070,11 +1043,21 @@ mod tests {
 
             let decompressed_data = decompressed.unwrap();
             assert_eq!(
-                &decompressed_data[..],
-                csv_like_data.as_bytes(),
+                std::str::from_utf8(&decompressed_data[..]).unwrap(),
+                csv_like_data,
                 "No-context decompressed data doesn't match original on message {i}"
             );
         }
+    }
+
+    #[test]
+    fn test_no_context_takeover_multiple_messages() {
+        compress_repetitive_csv_msg(100);
+    }
+
+    #[test]
+    fn test_no_context_takeover_multiple_messages_large() {
+        compress_repetitive_csv_msg(100_000);
     }
 
     #[test]
@@ -1123,6 +1106,32 @@ mod tests {
 
             println!("Message {i}: Successfully decompressed");
         }
+    }
+
+    #[test]
+    fn test_random_data_compression_and_decompression() {
+        // Generate pseudo-random data deterministically for repeatable tests
+        let data_len = 10_000i32;
+        let data: Vec<u8> = (0..data_len)
+            .map(|i| ((i.wrapping_mul(1234567).wrapping_add(987654321)) % 256) as u8)
+            .collect();
+
+        // Compress the data
+        let mut compressor = Compressor::new(Compression::default());
+        let compressed = compressor.compress(&data).expect("Compression failed");
+
+        // Decompress the data
+        let mut decompressor = Decompressor::new();
+        let decompressed = decompressor
+            .decompress(&compressed, true)
+            .expect("Decompression failed");
+
+        // The decompression result should be Some(BytesMut) for a final frame
+        assert_eq!(
+            decompressed.unwrap(),
+            &data[..],
+            "Decompressed data does not match original"
+        );
     }
 
     #[test]

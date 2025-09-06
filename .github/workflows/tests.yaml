@@ -22,6 +22,8 @@ jobs:
         run: cargo build --verbose --all-features --all-targets
       - name: Test
         run: cargo test --verbose
+      - name: Test zlib
+        run: cargo test --verbose --features zlib
       - name: Check formatting
         run: cargo fmt -- --check --verbose
       - name: Autobahn|Testsuite client
