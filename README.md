@@ -17,6 +17,20 @@ Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket imp
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
 - **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications
 
+## About compression
+
+yawc supports websocket compression through the [Options](https://docs.rs/yawc/latest/yawc/struct.Options.html) struct.
+You can use `Options.with_compression_level(CompressLevel::fast())` in order to configure compression.
+
+```rust
+let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwrap())
+    .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
+    .await;
+```
+
+The `zlib` feature is NOT mandatory to enable compression. `zlib` is configured as a feature for the [window](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) parameters.
+By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend. An implementation of miniz using Rust.
+
 ## Which crate should I use?
 
 When choosing a WebSocket implementation, many developers default to [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite).
@@ -132,7 +146,7 @@ These examples serve as practical reference implementations for common WebSocket
 - `reqwest`: Use reqwest as the HTTP client
 - `axum`: Enable integration with the Axum web framework
 - `logging`: Enable debug logging for connection events
-- `zlib`: Enable advanced compression options with zlib (not recommended unless you know what you are doing)
+- `zlib`: Enable advanced compression options with zlib (not recommended unless you know what you are doing). Without this option, yawc will use miniz_oxide, a Rust deflate implementation.
 - `rustls-ring`: Enable the fallback rustls crypto provider based on `ring`
 - `rustls-aws-lc-rs`: Enable the fallback rustls crypto provider based on `aws-lc-rs`
 
