@@ -42,6 +42,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[wasm_bindgen_test::wasm_bindgen_test]
     fn test_apply_mask() {
         let mask = [0x6d, 0xb6, 0xb2, 0x80];
         let unmasked = [

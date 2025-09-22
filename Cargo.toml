@@ -44,13 +44,34 @@ rustls-aws-lc-rs = ["tokio-rustls/aws-lc-rs"]
 # Examples configuration
 [[example]]
 name = "axum"
-path = "examples/axum.rs"
 required-features = ["axum"]
+test = false
 
 [[example]]
 name = "axum_proxy"
 path = "examples/axum_proxy/main.rs"
 required-features = ["axum", "reqwest", "json"]
+test = false
+
+[[example]]
+name = "autobahn_client"
+test = false
+
+[[example]]
+name = "client"
+test = false
+
+[[example]]
+name = "custom_dns"
+test = false
+
+[[example]]
+name = "echo_server"
+test = false
+
+[[example]]
+name = "proxy"
+test = false
 
 # ==============================================================================
 # Common dependencies (shared across all targets)
@@ -60,18 +81,24 @@ url = "2"
 bytes = "1"
 futures = "0.3"
 thiserror = "2"
+rand = "0.8"
 
 # ==============================================================================
 # WebAssembly target-specific dependencies
 # ==============================================================================
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", default-features = false, features = [
+    "console",
     "WebSocket",
+    "BinaryType",
+    "CloseEvent",
     "MessageEvent",
 ] }
+js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
 
 # ==============================================================================
 # Native target-specific dependencies
@@ -105,7 +132,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 # Encoding and cryptography
 base64 = "0.22"
 sha1 = "0.10"
-rand = "0.8"
 
 # Utilities
 nom = "8"
@@ -121,12 +147,18 @@ serde_json = { version = "1", optional = true }
 flate2 = "1"
 
 # ==============================================================================
+# Development dependencies
+# ==============================================================================
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# ==============================================================================
 # Development dependencies (native only)
 # ==============================================================================
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = "1"
 axum = "0.8"
-hyper = { version = "1.6", features = ["http1", "server", "client"] }
+hyper = { version = "1.7", features = ["http1", "server", "client"] }
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-no-provider",
