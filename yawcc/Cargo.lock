@@ -1872,7 +1872,7 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 
 [[package]]
 name = "yawc"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "base64",
  "bytes",

@@ -1324,7 +1324,7 @@ impl Future for WebSocketBuilder {
 ///
 /// In contrast, [`WebSocket::split_stream`] is a low-level API that bypasses critical WebSocket
 /// protocol management and should rarely be used directly. It disables automatic control frame handling
-/// (like Ping/Pong), connection health monitoring, and other protocol-level features. Only use
+/// (like Ping/Pong), and other protocol-level features. Only use
 /// this method if you need direct access to the underlying frame processing and are prepared to
 /// handle all protocol requirements manually.
 ///
@@ -1438,7 +1438,7 @@ impl WebSocket {
     /// - `url`: The WebSocket URL to connect to, which should specify either `ws` or `wss` scheme.
     /// - `io`: An I/O stream that implements `AsyncWrite` and `AsyncRead`, allowing WebSocket communication
     ///         over this stream after the handshake completes. Typically, this is a `TcpStream`.
-    /// - `options`: [`Options`] to configure the WebSocket connection, such as compression and ping intervals.
+    /// - `options`: [`Options`] to configure the WebSocket connection, such as compression.
     ///
     /// # Returns
     /// A `Result` containing either an initialized `WebSocket` instance upon successful handshake or an error
