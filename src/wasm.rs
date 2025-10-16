@@ -1,17 +1,20 @@
-use bytes::Bytes;
 use futures::{
     channel::mpsc::{channel, unbounded, Receiver, UnboundedReceiver, UnboundedSender},
     stream::StreamExt,
 };
 use std::{
     pin::Pin,
+    str::FromStr,
     task::{ready, Context, Poll},
 };
 use url::Url;
 use wasm_bindgen::prelude::*;
 use web_sys::MessageEvent;
 
-use crate::{Result, WebSocketError};
+use crate::{
+    frame::{FrameView, OpCode},
+    Result, WebSocketError,
+};
 
 /// A WebSocket wrapper for WASM applications that provides an async interface
 /// for WebSocket communication. This implementation wraps the browser's native
@@ -20,40 +23,7 @@ pub struct WebSocket {
     /// The underlying browser WebSocket instance
     stream: web_sys::WebSocket,
     /// Channel receiver for incoming messages and errors
-    receiver: UnboundedReceiver<Result<String>>,
-}
-
-/// A struct representing a view over a WebSocket frame's payload.
-///
-/// This struct provides an immutable view of the data payload within a WebSocket frame,
-/// storing the content as bytes that can be used for various message types.
-pub struct FrameView {
-    /// The actual data payload of the frame stored as immutable bytes
-    pub payload: Bytes,
-}
-
-impl FrameView {
-    /// Creates a new immutable text frame view with the given payload.
-    /// The payload is converted to immutable `Bytes`.
-    pub fn text(payload: impl Into<Bytes>) -> Self {
-        Self {
-            payload: payload.into(),
-        }
-    }
-
-    /// Converts the frame's payload to a UTF-8 string slice.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the payload as a UTF-8 string slice.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the payload is not valid UTF-8.
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.payload).expect("utf8")
-    }
+    receiver: UnboundedReceiver<Result<FrameView>>,
 }
 
 impl WebSocket {
@@ -75,6 +45,8 @@ impl WebSocket {
     pub async fn connect(url: Url) -> Result<Self> {
         // Initialize the WebSocket connection
         let stream = web_sys::WebSocket::new(url.as_str()).map_err(WebSocketError::Js)?;
+        // Set the binary type to be arraybuffers so that we can wrap them in `Bytes`
+        stream.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
         // Create a communication channel
         let (tx, rx) = unbounded();
@@ -99,14 +71,24 @@ impl WebSocket {
     ///
     /// * `stream` - Reference to the WebSocket instance
     /// * `tx` - Channel sender to forward close events
-    fn setup_close_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<String>>) {
-        let onclose_callback: Closure<dyn Fn()> = Closure::new(move || {
-            let _ = tx.unbounded_send(Err(WebSocketError::ConnectionClosed));
-        });
+    fn setup_close_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<FrameView>>) {
+        let onclose_callback: Closure<dyn Fn(web_sys::CloseEvent)> =
+            Closure::new(move |close_event: web_sys::CloseEvent| {
+                if !close_event.was_clean() {
+                    web_sys::console::warn_1(
+                        &js_sys::JsString::from_str("WebSocket CloseEvent wasClean() == false")
+                            .unwrap(), // SAFETY: This always succeeds
+                    );
+                }
+                let close_frame = FrameView::close(close_event.code().into(), close_event.reason());
+                let _ = tx.unbounded_send(Ok(close_frame));
+                let _ = tx.unbounded_send(Err(WebSocketError::ConnectionClosed));
+            });
 
         stream.set_onclose(Some(onclose_callback.as_ref().unchecked_ref()));
         onclose_callback.forget();
     }
+
     /// Sets up the open handler for the WebSocket and returns a future that resolves
     /// when the connection is established
     ///
@@ -136,12 +118,24 @@ impl WebSocket {
     ///
     /// * `stream` - Reference to the WebSocket instance
     /// * `tx` - Channel sender to forward received messages
-    fn setup_message_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<String>>) {
+    fn setup_message_handler(stream: &web_sys::WebSocket, tx: UnboundedSender<Result<FrameView>>) {
         let onmessage_callback: Closure<dyn Fn(_)> = Closure::new(move |e: MessageEvent| {
-            if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
+            let data = e.data();
+            let maybe_fv = if data.has_type::<js_sys::JsString>() {
+                let str_value = data.unchecked_into::<js_sys::JsString>();
+                Some(FrameView::text(String::from(str_value)))
+            } else if data.has_type::<js_sys::ArrayBuffer>() {
+                let buffer_value =
+                    js_sys::Uint8Array::new(&data.unchecked_into::<js_sys::ArrayBuffer>()).to_vec();
+                Some(FrameView::binary(buffer_value))
+            } else {
+                None
+            };
+
+            if let Some(fv) = maybe_fv {
                 // ignore the error, it could be that the other end closed the
                 // connection and we don't want to panic
-                let _ = tx.unbounded_send(Ok(String::from(txt)));
+                let _ = tx.unbounded_send(Ok(fv));
             }
         });
 
@@ -220,10 +214,33 @@ impl futures::Sink<FrameView> for WebSocket {
     }
 
     fn start_send(self: Pin<&mut Self>, frame: FrameView) -> Result<()> {
-        // Convert JsValue errors to anyhow errors
-        self.stream
-            .send_with_str(frame.as_str())
-            .map_err(|_| WebSocketError::ConnectionClosed)
+        match frame.opcode {
+            OpCode::Text => self
+                .stream
+                .send_with_str(frame.as_str())
+                .map_err(|_| WebSocketError::ConnectionClosed),
+            OpCode::Binary => self
+                .stream
+                .send_with_js_u8_array(&js_sys::Uint8Array::from(&*frame.payload))
+                .map_err(|_| WebSocketError::ConnectionClosed),
+            OpCode::Close => {
+                if let Some(code) = frame.close_code() {
+                    if let Some(reason) = frame.close_reason() {
+                        self.stream
+                            .close_with_code_and_reason(code.into(), reason)
+                            .map_err(|_| WebSocketError::ConnectionClosed)
+                    } else {
+                        self.stream
+                            .close_with_code(code.into())
+                            .map_err(|_| WebSocketError::ConnectionClosed)
+                    }
+                } else {
+                    Err(WebSocketError::ConnectionClosed)
+                }
+            }
+            // All other types of payloads are taken care by the browser behind the scenes
+            _ => Ok(()),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -243,7 +260,7 @@ impl futures::Stream for WebSocket {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Use the underlying receiver's poll_next and map the result
         match ready!(self.receiver.poll_next_unpin(cx)) {
-            Some(Ok(message)) => Poll::Ready(Some(Ok(FrameView::text(message)))),
+            Some(Ok(message)) => Poll::Ready(Some(Ok(message))),
             Some(Err(e)) => {
                 if matches!(e, WebSocketError::ConnectionClosed) {
                     Poll::Ready(None)
@@ -253,5 +270,36 @@ impl futures::Stream for WebSocket {
             }
             None => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{frame::FrameView, wasm::WebSocket};
+    use futures::SinkExt;
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn can_connect_and_roundtrip_payloads() {
+        const ECHO_URL: &str = "wss://echo.websocket.org";
+        const TEXT_PAYLOAD: &str = "Hello Echo WebSocket in Text!";
+        const BINARY_PAYLOAD: &[u8] = b"Hello Echo WebSocket in Binary!";
+
+        let mut ws = WebSocket::connect(ECHO_URL.parse().unwrap()).await.unwrap();
+        let _ = ws.next_frame().await.unwrap(); // Skip the "Request served by whatever"
+
+        let text_fv = FrameView::text(TEXT_PAYLOAD);
+        let binary_fv = FrameView::binary(BINARY_PAYLOAD);
+
+        ws.send(text_fv.clone()).await.unwrap();
+        assert_eq!(ws.next_frame().await.unwrap(), text_fv);
+
+        ws.send(binary_fv.clone()).await.unwrap();
+        assert_eq!(ws.next_frame().await.unwrap(), binary_fv);
+
+        let close_fv = FrameView::close(crate::close::CloseCode::Normal, b"");
+        ws.send(close_fv.clone()).await.unwrap();
+        assert_eq!(ws.next_frame().await.unwrap(), close_fv);
+
+        ws.close().await.unwrap();
     }
 }
