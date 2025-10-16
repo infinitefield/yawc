@@ -18,10 +18,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.x
+          deno-version: v2.x
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
       - name: Build
         run: cargo build --verbose --all-features --all-targets
       - name: Test
