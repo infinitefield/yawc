@@ -111,13 +111,10 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod compression;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod close;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod codec;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod frame;
-#[cfg(not(target_arch = "wasm32"))]
 mod mask;
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
@@ -234,7 +231,6 @@ pub enum WebSocketError {
     /// Indicates receipt of a frame with an invalid opcode value. RFC 6455 defines a specific
     /// set of valid opcodes (0x0 through 0xF).
     #[error("Invalid opcode (byte={0})")]
-    #[cfg(not(target_arch = "wasm32"))]
     InvalidOpCode(u8),
 
     /// Occurs during handshake when the required "Sec-WebSocket-Key" header is missing from
