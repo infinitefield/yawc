@@ -1,34 +1,34 @@
-use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
+use crate::{Result, WebSocketError, close, codec, compression, frame, stream};
 
 use {
     bytes::Bytes,
     http_body_util::Empty,
-    hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
+    hyper::{Request, Response, StatusCode, body::Incoming, header, upgrade::Upgraded},
     hyper_util::rt::TokioIo,
     pin_project::pin_project,
     sha1::{Digest, Sha1},
     stream::MaybeTlsStream,
     tokio::net::TcpStream,
-    tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
+    tokio_rustls::{TlsConnector, rustls::pki_types::ServerName},
 };
 
 use bytes::BytesMut;
 use std::{
     collections::VecDeque,
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     io,
     net::SocketAddr,
-    pin::{pin, Pin},
+    pin::{Pin, pin},
     str::FromStr,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use close::CloseCode;
 use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
-use futures::{future::BoxFuture, task::AtomicWaker, FutureExt, SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt, future::BoxFuture, task::AtomicWaker};
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
 use url::Url;
@@ -40,6 +40,12 @@ pub use frame::{Frame, FrameView, OpCode};
 /// Frames with a payload size larger than this limit will be rejected to ensure memory safety
 /// and prevent excessively large messages from impacting performance.
 pub const MAX_PAYLOAD_READ: usize = 1024 * 1024;
+
+/// The maximum allowed payload size for writing, set to 1 MiB.
+///
+/// Frames with a payload size larger than this limit will be split into sevearl messages of this
+/// size
+pub const MAX_PAYLOAD_WRITE: usize = 1024 * 1024;
 
 /// The maximum allowed read buffer size, set to 2 MiB.
 ///
@@ -103,6 +109,7 @@ struct Negotitation {
     extensions: Option<WebSocketExtensions>,
     compression_level: Option<CompressionLevel>,
     max_payload_read: usize,
+    max_payload_write: usize,
     max_read_buffer: usize,
     utf8: bool,
 }
@@ -366,6 +373,7 @@ impl IncomingUpgrade {
                     .as_ref()
                     .map(|compression| compression.level),
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+                max_payload_write: options.max_payload_write.unwrap_or(MAX_PAYLOAD_WRITE),
                 max_read_buffer,
                 utf8: options.check_utf8,
             }),
@@ -729,6 +737,14 @@ pub struct Options {
     /// Default: 1 MiB (1,048,576 bytes) as defined in [`MAX_PAYLOAD_READ`]
     pub max_payload_read: Option<usize>,
 
+    /// Maximum allowed payload size for outgoing messages, in bytes.
+    ///
+    /// If a message exceeds this size, the message will be split into different chunks of at
+    /// least `max_payload_write` size.
+    ///
+    /// Default: 1 MiB (1,048,576 bytes) as defined in [`MAX_PAYLOAD_WRITE`]
+    pub max_payload_write: Option<usize>,
+
     /// Maximum size allowed for the buffer that accumulates fragmented messages.
     ///
     /// WebSocket messages can be split into multiple fragments for transmission. These fragments
@@ -946,6 +962,25 @@ impl Options {
     pub fn with_max_payload_read(self, size: usize) -> Self {
         Self {
             max_payload_read: Some(size),
+            ..self
+        }
+    }
+
+    /// Sets the maximum allowed payload size for outgoing messages.
+    ///
+    /// Specifies the maximum size of messages that the WebSocket connection will send in a single
+    /// message.
+    /// If an outgoing message exceeds this size, the connection will split the message in chunks
+    /// of `max_payload_write` size.
+    ///
+    /// # Parameters
+    /// - `size`: The maximum payload size in bytes per message.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified payload size limit.
+    pub fn with_max_payload_write(self, size: usize) -> Self {
+        Self {
+            max_payload_write: Some(size),
             ..self
         }
     }
@@ -1850,6 +1885,7 @@ impl WebSocket {
                     .as_ref()
                     .map(|compression| compression.level),
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+                max_payload_write: options.max_payload_write.unwrap_or(MAX_PAYLOAD_WRITE),
                 max_read_buffer,
                 utf8: options.check_utf8,
             }),
@@ -2556,6 +2592,9 @@ impl ReadHalf {
 pub struct WriteHalf {
     deflate: Option<Compressor>,
     close_state: Option<CloseState>,
+    /// When writing a message, if the size of the message exceed `max_payload_write`, the message
+    /// witll be fragmented in chunks of `message_len / max_payload_write`
+    max_payload_write: usize,
 }
 
 /// Represents the various states involved in gracefully closing a WebSocket connection.
@@ -2583,6 +2622,7 @@ impl WriteHalf {
         Self {
             deflate,
             close_state: None,
+            max_payload_write: opts.max_payload_write,
         }
     }
 
@@ -2785,6 +2825,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         extensions,
         compression_level,
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+        max_payload_write: options.max_payload_write.unwrap_or(MAX_PAYLOAD_WRITE),
         max_read_buffer,
         utf8: options.check_utf8,
     })
@@ -2837,6 +2878,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotitatio
         extensions,
         compression_level,
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+        max_payload_write: options.max_payload_write.unwrap_or(MAX_PAYLOAD_WRITE),
         max_read_buffer,
         utf8: options.check_utf8,
     })
