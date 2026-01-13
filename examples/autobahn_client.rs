@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
-use yawc::{frame::OpCode, CompressionLevel, FrameView, Options, WebSocket};
+use yawc::{close::CloseCode, frame::OpCode, CompressionLevel, FrameView, Options, WebSocket};
 
 async fn connect(path: &str) -> Result<WebSocket> {
     let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
@@ -20,8 +20,7 @@ async fn connect(path: &str) -> Result<WebSocket> {
 async fn get_case_count() -> Result<u32> {
     let mut ws = connect("getCaseCount").await?;
     let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
-    ws.send(FrameView::close(yawc::close::CloseCode::Normal, []))
-        .await?;
+    ws.send(FrameView::close(CloseCode::Normal, [])).await?;
     Ok(std::str::from_utf8(&msg.payload)?.parse()?)
 }
 
@@ -37,11 +36,11 @@ async fn main() -> Result<()> {
     for case in 1..=count {
         log::debug!("Running {case}");
 
-        // if case % 10 == 0 {
-        //     let mut ws = connect("updateReports?agent=websocket").await?;
-        //     ws.send(FrameFrameView::close(1000, &[])).await?;
-        //     ws.close().await?;
-        // }
+        if case % 10 == 0 {
+            let mut ws = connect("updateReports?agent=websocket").await?;
+            ws.send(FrameView::close(CloseCode::Normal, [])).await?;
+            ws.close().await?;
+        }
 
         let mut ws = connect(&format!("runCase?case={case}&agent=yawc")).await?;
         loop {
@@ -53,9 +52,6 @@ async fn main() -> Result<()> {
             match msg.opcode {
                 OpCode::Text | OpCode::Binary => {
                     ws.send(FrameView::from((msg.opcode, msg.payload))).await?;
-                }
-                OpCode::Close => {
-                    break;
                 }
                 _ => {}
             }

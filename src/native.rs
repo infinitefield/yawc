@@ -2117,7 +2117,7 @@ impl WebSocket {
 
         if self.flush_sends {
             ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
-            self.flush_sends = true;
+            self.flush_sends = false;
         }
 
         Poll::Ready(Ok(()))
