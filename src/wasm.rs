@@ -1,19 +1,19 @@
 use futures::{
-    channel::mpsc::{channel, unbounded, Receiver, UnboundedReceiver, UnboundedSender},
+    channel::mpsc::{Receiver, UnboundedReceiver, UnboundedSender, channel, unbounded},
     stream::StreamExt,
 };
 use std::{
     pin::Pin,
     str::FromStr,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 use url::Url;
 use wasm_bindgen::prelude::*;
 use web_sys::MessageEvent;
 
 use crate::{
-    frame::{FrameView, OpCode},
     Result, WebSocketError,
+    frame::{FrameView, OpCode},
 };
 
 /// A WebSocket wrapper for WASM applications that provides an async interface
@@ -224,19 +224,14 @@ impl futures::Sink<FrameView> for WebSocket {
                 .send_with_js_u8_array(&js_sys::Uint8Array::from(&*frame.payload))
                 .map_err(|_| WebSocketError::ConnectionClosed),
             OpCode::Close => {
-                if let Some(code) = frame.close_code() {
-                    if let Some(reason) = frame.close_reason() {
-                        self.stream
-                            .close_with_code_and_reason(code.into(), reason)
-                            .map_err(|_| WebSocketError::ConnectionClosed)
-                    } else {
-                        self.stream
-                            .close_with_code(code.into())
-                            .map_err(|_| WebSocketError::ConnectionClosed)
-                    }
-                } else {
-                    Err(WebSocketError::ConnectionClosed)
+                let code = frame.close_code().ok_or(WebSocketError::ConnectionClosed)?;
+
+                match frame.close_reason() {
+                    Ok(Some(reason)) => self.stream.close_with_code_and_reason(code.into(), reason),
+                    Ok(None)  => self.stream.close_with_code(code.into()),
+                    Err(err) => return Err(err),
                 }
+                .map_err(|_| WebSocketError::ConnectionClosed)
             }
             // All other types of payloads are taken care by the browser behind the scenes
             _ => Ok(()),
