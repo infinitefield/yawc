@@ -2083,9 +2083,7 @@ impl WebSocket {
             _ => {
                 let code = frame.close_code().expect("close code");
 
-                if frame.close_reason().is_none() {
-                    return Err(WebSocketError::InvalidUTF8);
-                };
+                let _ = frame.close_reason()?;
 
                 if !code.is_allowed() {
                     self.emit_close(FrameView::close(CloseCode::Protocol, &frame.payload[2..]));
