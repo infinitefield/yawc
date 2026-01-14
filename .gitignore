@@ -1,3 +1,5 @@
 /target
 /yawcc/target
 /Cargo.lock
+tags*
+.bacon*
