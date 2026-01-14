@@ -209,7 +209,7 @@ impl FrameView {
     /// - `Ok(Some(&str))` containing the reason string if present and valid UTF-8. Could be the
     ///   empty string
     /// - `Ok(None)` if no close reason was given
-    /// - `Err(WebSocketError::InvalidUTF8` if the reason is not valid UTF-8 or did not have the
+    /// - `Err(WebSocketError::InvalidUTF8)` if the reason is not valid UTF-8 or did not have the
     ///   required 2 bytes
     pub fn close_reason(&self) -> Result<Option<&str>, WebSocketError> {
         if self.payload.is_empty() {
