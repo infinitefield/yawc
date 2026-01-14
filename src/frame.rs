@@ -92,7 +92,7 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::{WebSocketError, close::CloseCode};
+use crate::{close::CloseCode, WebSocketError};
 
 /// WebSocket operation code (OpCode) that determines the semantic meaning and handling of a frame.
 ///
@@ -655,11 +655,9 @@ mod tests {
 
             assert_eq!(frame.opcode, OpCode::Close);
             assert_eq!(frame.payload, Bytes::from(payload));
-            assert!(
-                frame
-                    .close_reason()
-                    .is_ok_and(|reason| reason.is_some_and(|reason| reason.is_empty()))
-            );
+            assert!(frame
+                .close_reason()
+                .is_ok_and(|reason| reason.is_some_and(|reason| reason.is_empty())));
         }
 
         #[test]

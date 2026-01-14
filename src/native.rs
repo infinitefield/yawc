@@ -1,34 +1,34 @@
-use crate::{Result, WebSocketError, close, codec, compression, frame, stream};
+use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
 
 use {
     bytes::Bytes,
     http_body_util::Empty,
-    hyper::{Request, Response, StatusCode, body::Incoming, header, upgrade::Upgraded},
+    hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
     pin_project::pin_project,
     sha1::{Digest, Sha1},
     stream::MaybeTlsStream,
     tokio::net::TcpStream,
-    tokio_rustls::{TlsConnector, rustls::pki_types::ServerName},
+    tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
 };
 
 use bytes::BytesMut;
 use std::{
     collections::VecDeque,
-    future::{Future, poll_fn},
+    future::{poll_fn, Future},
     io,
     net::SocketAddr,
-    pin::{Pin, pin},
+    pin::{pin, Pin},
     str::FromStr,
     sync::Arc,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use close::CloseCode;
 use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
-use futures::{FutureExt, SinkExt, StreamExt, future::BoxFuture, task::AtomicWaker};
+use futures::{future::BoxFuture, task::AtomicWaker, FutureExt, SinkExt, StreamExt};
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
 use url::Url;

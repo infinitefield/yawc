@@ -1,19 +1,19 @@
 use futures::{
-    channel::mpsc::{Receiver, UnboundedReceiver, UnboundedSender, channel, unbounded},
+    channel::mpsc::{channel, unbounded, Receiver, UnboundedReceiver, UnboundedSender},
     stream::StreamExt,
 };
 use std::{
     pin::Pin,
     str::FromStr,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 use url::Url;
 use wasm_bindgen::prelude::*;
 use web_sys::MessageEvent;
 
 use crate::{
-    Result, WebSocketError,
     frame::{FrameView, OpCode},
+    Result, WebSocketError,
 };
 
 /// A WebSocket wrapper for WASM applications that provides an async interface
@@ -228,7 +228,7 @@ impl futures::Sink<FrameView> for WebSocket {
 
                 match frame.close_reason() {
                     Ok(Some(reason)) => self.stream.close_with_code_and_reason(code.into(), reason),
-                    Ok(None)  => self.stream.close_with_code(code.into()),
+                    Ok(None) => self.stream.close_with_code(code.into()),
                     Err(err) => return Err(err),
                 }
                 .map_err(|_| WebSocketError::ConnectionClosed)
