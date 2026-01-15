@@ -490,7 +490,7 @@ impl Frame {
     /// Masks the payload using a masking key.
     ///
     /// If no masking key is set, a random key is generated and applied.
-    pub(super) fn mask(&mut self) {
+    pub(super) fn set_mask(&mut self) {
         if self.mask.is_none() {
             let mask: [u8; 4] = rand::random();
             self.mask = Some(mask);

@@ -2553,6 +2553,7 @@ impl ReadHalf {
 /// }
 /// ```
 pub struct WriteHalf {
+    role: Role,
     deflate: Option<Compressor>,
     close_state: Option<CloseState>,
 }
@@ -2580,6 +2581,7 @@ impl WriteHalf {
     fn new(role: Role, opts: &Negotitation) -> Self {
         let deflate = opts.compressor(role);
         Self {
+            role,
             deflate,
             close_state: None,
         }
@@ -2652,8 +2654,12 @@ impl WriteHalf {
             None
         };
 
-        let frame =
+        let mut frame =
             maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
+
+        if self.role == Role::Client {
+            frame.set_mask();
+        }
 
         stream.start_send_unpin(frame)
     }
