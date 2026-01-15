@@ -245,11 +245,10 @@ impl codec::Decoder for Decoder {
                     let payload_len = header_and_mask.payload_len;
 
                     if self.role == Role::Client {
-                        if let Some(mask) = mask {
-                            crate::mask::apply_mask(&mut src[..payload_len], mask);
-                        } else {
+                        let Some(mask) = mask else {
                             return Err(WebSocketError::FrameNotMasked);
-                        }
+                        };
+                        crate::mask::apply_mask(&mut src[..payload_len], mask);
                     }
 
                     let payload = src.split_to(payload_len).freeze();
