@@ -244,7 +244,7 @@ impl codec::Decoder for Decoder {
                     let mask = header_and_mask.mask;
                     let payload_len = header_and_mask.payload_len;
 
-                    if self.role == Role::Client {
+                    if self.role == Role::Server {
                         let Some(mask) = mask else {
                             return Err(WebSocketError::FrameNotMasked);
                         };
@@ -299,9 +299,11 @@ impl codec::Encoder<Frame> for Encoder {
         let size = frame.fmt_head(&mut header[..]);
 
         dst.extend_from_slice(&header[..size]);
-        dst.reserve(frame.payload.len());
+
         let index = dst.len();
+        dst.reserve(frame.payload.len());
         dst.extend_from_slice(&frame.payload);
+
         if self.role == Role::Client {
             let mask = frame.mask.unwrap();
             crate::mask::apply_mask(&mut dst[index..], mask);
