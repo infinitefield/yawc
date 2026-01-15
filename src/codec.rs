@@ -22,9 +22,8 @@ use bytes::{Buf, BytesMut};
 use tokio_util::codec;
 
 use crate::{
-    frame::OpCode,
-    frame::{self, Frame, MAX_HEAD_SIZE},
-    WebSocketError,
+    frame::{self, Frame, OpCode, MAX_HEAD_SIZE},
+    Role, WebSocketError,
 };
 
 /// Represents the reading state of a WebSocket frame.
@@ -96,6 +95,7 @@ impl codec::Encoder<Frame> for Codec {
 /// `Decoder` manages WebSocket frame parsing, including tracking the maximum allowed payload size
 /// and current state. The decoder state changes as each part of the frame (header and payload) is processed.
 pub struct Decoder {
+    role: Role,
     /// Current reading state (header or payload).
     state: Option<ReadState>,
     /// Maximum allowed size for the frame payload.
@@ -110,8 +110,9 @@ impl Decoder {
     ///
     /// # Returns
     /// A `Decoder` instance configured to limit payloads to `max_payload_size`.
-    pub fn new(max_payload_size: usize) -> Self {
+    pub fn new(role: Role, max_payload_size: usize) -> Self {
         Self {
+            role,
             state: None,
             max_payload_size,
         }
@@ -243,6 +244,14 @@ impl codec::Decoder for Decoder {
                     let mask = header_and_mask.mask;
                     let payload_len = header_and_mask.payload_len;
 
+                    if self.role == Role::Client {
+                        if let Some(mask) = mask {
+                            crate::mask::apply_mask(&mut src[..payload_len], mask);
+                        } else {
+                            return Err(WebSocketError::FrameNotMasked);
+                        }
+                    }
+
                     let payload = src.split_to(payload_len).freeze();
                     let mut frame = Frame::new(header.fin, header.opcode, mask, payload);
                     frame.is_compressed = header.rsv1;
@@ -262,7 +271,15 @@ impl codec::Decoder for Decoder {
 ///
 /// # Errors
 /// Returns `WebSocketError` if any issues arise during encoding.
-pub struct Encoder;
+pub struct Encoder {
+    role: Role,
+}
+
+impl Encoder {
+    pub fn new(role: Role) -> Self {
+        Self { role }
+    }
+}
 
 impl codec::Encoder<Frame> for Encoder {
     type Error = WebSocketError;
@@ -283,7 +300,13 @@ impl codec::Encoder<Frame> for Encoder {
         let size = frame.fmt_head(&mut header[..]);
 
         dst.extend_from_slice(&header[..size]);
+        dst.reserve(frame.payload.len());
+        let index = dst.len();
         dst.extend_from_slice(&frame.payload);
+        if self.role == Role::Client {
+            let mask = frame.mask.unwrap();
+            crate::mask::apply_mask(&mut dst[index..], mask);
+        }
 
         Ok(())
     }
