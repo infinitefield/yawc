@@ -206,10 +206,21 @@ impl FrameView {
     /// a UTF-8 encoded reason string explaining why the connection was closed.
     ///
     /// # Returns
-    /// - `Some(&str)` containing the reason string if present and valid UTF-8
-    /// - `None` if there is no reason string or it's not valid UTF-8
-    pub fn close_reason(&self) -> Option<&str> {
-        std::str::from_utf8(self.payload.get(2..).filter(|l| !l.is_empty())?).ok()
+    /// - `Ok(Some(&str))` containing the reason string if present and valid UTF-8. Could be the
+    ///   empty string
+    /// - `Ok(None)` if no close reason was given
+    /// - `Err(WebSocketError::InvalidUTF8)` if the reason is not valid UTF-8 or did not have the
+    ///   required 2 bytes
+    pub fn close_reason(&self) -> Result<Option<&str>, WebSocketError> {
+        if self.payload.is_empty() {
+            return Ok(None);
+        }
+
+        let reason = self.payload.get(2..).ok_or(WebSocketError::InvalidUTF8)?;
+
+        std::str::from_utf8(reason)
+            .map(Some)
+            .map_err(|_| WebSocketError::InvalidUTF8)
     }
 
     /// Converts the frame payload to a string slice, expecting valid UTF-8.
@@ -644,7 +655,9 @@ mod tests {
 
             assert_eq!(frame.opcode, OpCode::Close);
             assert_eq!(frame.payload, Bytes::from(payload));
-            assert!(frame.close_reason().is_none());
+            assert!(frame
+                .close_reason()
+                .is_ok_and(|reason| reason.is_some_and(|reason| reason.is_empty())));
         }
 
         #[test]
@@ -655,7 +668,7 @@ mod tests {
             assert_eq!(frame.opcode, OpCode::Close);
             assert!(frame.payload.is_empty());
             assert!(frame.close_code().is_none());
-            assert!(frame.close_reason().is_none());
+            assert!(frame.close_reason().is_ok_and(|reason| reason.is_none()));
         }
 
         #[test]

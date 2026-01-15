@@ -1972,6 +1972,7 @@ impl WebSocket {
                         _ => CloseCode::Error,
                     };
                     self.emit_close(FrameView::close(code, err.to_string()));
+                    return Poll::Ready(Err(err));
                 }
                 Poll::Pending => {
                     let res = ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)));
@@ -2083,9 +2084,7 @@ impl WebSocket {
             _ => {
                 let code = frame.close_code().expect("close code");
 
-                if frame.close_reason().is_none() {
-                    return Err(WebSocketError::InvalidUTF8);
-                };
+                let _ = frame.close_reason()?;
 
                 if !code.is_allowed() {
                     self.emit_close(FrameView::close(CloseCode::Protocol, &frame.payload[2..]));
