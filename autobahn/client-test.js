@@ -12,7 +12,7 @@ const server =
   wstest -m fuzzingserver -s fuzzingserver.json`.spawn();
 // sleep long because it might take a while to pull the files
 await sleep(30);
-await $`target/release/examples/autobahn_client`;
+await $`target/release/examples/autobahn_client`.env("RUST_BACKTRACE", "full");
 
 const { yawc } = JSON.parse(
   Deno.readTextFileSync("./autobahn/reports/client/index.json"),
