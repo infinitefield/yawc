@@ -2285,7 +2285,6 @@ impl futures::Sink<FrameView> for WebSocket {
 /// }
 /// ```
 pub struct ReadHalf {
-    role: Role,
     /// Optional decompressor used to decompress incoming payloads.
     inflate: Option<Decompressor>,
     /// Structure for handling fragmented message frames.
@@ -2311,7 +2310,6 @@ impl ReadHalf {
     fn new(role: Role, opts: &Negotitation) -> Self {
         let inflate = opts.decompressor(role);
         Self {
-            role,
             inflate,
             max_read_buffer: opts.max_read_buffer,
             fragment: None,
@@ -2428,9 +2426,11 @@ impl ReadHalf {
                 }
             }
             _ => {
-                if self.role == Role::Client && frame.is_masked() {
-                    return Err(WebSocketError::InvalidFragment);
-                }
+                // this case can't happen since the Decoder already takes care of this
+                //
+                // if self.role == Role::Client && frame.is_masked() {
+                //     return Err(WebSocketError::InvalidFragment);
+                // }
 
                 // Control frames cannot be fragmented
                 if !frame.fin {
@@ -2553,7 +2553,6 @@ impl ReadHalf {
 /// }
 /// ```
 pub struct WriteHalf {
-    role: Role,
     deflate: Option<Compressor>,
     close_state: Option<CloseState>,
 }
@@ -2581,7 +2580,6 @@ impl WriteHalf {
     fn new(role: Role, opts: &Negotitation) -> Self {
         let deflate = opts.compressor(role);
         Self {
-            role,
             deflate,
             close_state: None,
         }
@@ -2654,12 +2652,8 @@ impl WriteHalf {
             None
         };
 
-        let mut frame =
+        let frame =
             maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
-
-        if self.role == Role::Client {
-            frame.set_mask();
-        }
 
         stream.start_send_unpin(frame)
     }

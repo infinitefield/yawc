@@ -222,12 +222,6 @@ pub enum WebSocketError {
     #[cfg(not(target_arch = "wasm32"))]
     FrameTooLarge,
 
-    /// Occurs when a server receives a frame without masking from a client.
-    /// RFC 6455 requires all client-to-server frames to be masked.
-    #[error("Frame must be masked")]
-    #[cfg(not(target_arch = "wasm32"))]
-    FrameNotMasked,
-
     /// Returned when the "Sec-WebSocket-Version" header is not set to 13 during handshake.
     /// RFC 6455 requires version 13 for modern WebSocket connections.
     #[error("Sec-Websocket-Version must be 13")]

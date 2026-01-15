@@ -246,7 +246,7 @@ impl codec::Decoder for Decoder {
 
                     if self.role == Role::Server {
                         let Some(mask) = mask else {
-                            return Err(WebSocketError::FrameNotMasked);
+                            return Err(WebSocketError::InvalidFragment);
                         };
                         crate::mask::apply_mask(&mut src[..payload_len], mask);
                     }
@@ -294,7 +294,12 @@ impl codec::Encoder<Frame> for Encoder {
     /// # Returns
     /// - `Ok(())` if encoding is successful.
     /// - `Err(WebSocketError)` if encoding fails.
-    fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, mut frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if self.role == Role::Client {
+            // ensure the mask is set
+            frame.set_mask();
+        }
+
         let mut header = [0; MAX_HEAD_SIZE];
         let size = frame.fmt_head(&mut header[..]);
 

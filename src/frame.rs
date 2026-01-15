@@ -477,19 +477,7 @@ impl Frame {
         std::str::from_utf8(&self.payload).is_ok()
     }
 
-    /// Returns whether the frame is masked.
-    ///
-    /// # Returns
-    /// - `true` if the frame has a masking key.
-    /// - `false` otherwise.
-    #[inline(always)]
-    pub(super) fn is_masked(&self) -> bool {
-        self.mask.is_some()
-    }
-
-    /// Masks the payload using a masking key.
-    ///
-    /// If no masking key is set, a random key is generated and applied.
+    /// Set the mask.
     pub(super) fn set_mask(&mut self) {
         if self.mask.is_none() {
             let mask: [u8; 4] = rand::random();
@@ -815,16 +803,6 @@ mod tests {
             assert!(frame.fin);
             assert_eq!(frame.opcode, frame_view.opcode);
             assert_eq!(frame.payload, frame_view.payload);
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_is_masked() {
-            let frame = Frame::new(true, OpCode::Text, Some([0x00; 4]), BytesMut::from("Test"));
-            assert!(frame.is_masked());
-
-            let frame = Frame::new(true, OpCode::Text, None, BytesMut::from("Test"));
-            assert!(!frame.is_masked());
         }
     }
 }
