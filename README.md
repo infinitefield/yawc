@@ -294,6 +294,24 @@ If you specialize in performance-critical software, understand systems down to t
 
 [Explore career opportunities](https://job-boards.eu.greenhouse.io/infinitefield)
 
+## Dev
+
+#### How to run autobahn tests.
+
+The tests require you to setup docker and install deno.
+
+Client:
+
+```
+deno -A ./autobahn/client-test.js
+```
+
+Server:
+
+```
+deno -A ./autobahn/server-test.js
+```
+
 ## Acknowledgments
 
 Special thanks to:

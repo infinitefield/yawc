@@ -10,22 +10,17 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket, WebSocketError};
+use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket};
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
-///
-/// # Arguments
-/// * `fut` - Future that resolves to the WebSocket connection
-///
-/// # Returns
-/// * `yawc::Result<()>` - Result indicating success or failure of the WebSocket connection handling
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     let mut ws = fut.await?;
 
-    loop {
-        let frame = ws.next().await.ok_or(WebSocketError::ConnectionClosed)?;
+    // Read frames until the user closes the connection.
+    //
+    // By doing this we also close the connection gracefully.
+    while let Some(frame) = ws.next().await {
         match frame.opcode {
-            OpCode::Close => break,
             OpCode::Text | OpCode::Binary => {
                 ws.send(frame).await?;
             }
@@ -39,12 +34,6 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
 }
 
 /// Upgrades an HTTP connection to a WebSocket connection with specific options.
-///
-/// # Arguments
-/// * `req` - The HTTP request to upgrade
-///
-/// # Returns
-/// * `yawc::Result<Response<Empty<Bytes>>>` - The HTTP response for the upgrade
 async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Empty<Bytes>>> {
     let (response, fut) = WebSocket::upgrade_with_options(
         &mut req,
@@ -64,16 +53,12 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
     Ok(response)
 }
 
-/// Main entry point for the WebSocket server.
-///
-/// Initializes logging and starts listening for WebSocket connections on port 8080.
-/// Each client connection is handled in a separate task.
 #[tokio::main]
 async fn main() -> yawc::Result<()> {
     // Initialize logging
     simple_logger::init_with_level(log::Level::Debug).expect("log");
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = TcpListener::bind("0.0.0.0:9001").await?;
 
     log::debug!("Listening on {}", listener.local_addr().unwrap());
 

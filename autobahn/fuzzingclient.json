@@ -3,7 +3,7 @@
   "servers": [
     {
       "agent": "yawc",
-      "url": "ws://127.0.0.1:8080"
+      "url": "ws://host.docker.internal:9001"
     }
   ],
   "cases": [
