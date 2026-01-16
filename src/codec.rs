@@ -306,7 +306,6 @@ impl codec::Encoder<Frame> for Encoder {
         dst.extend_from_slice(&header[..size]);
 
         let index = dst.len();
-        dst.reserve(frame.payload.len());
         dst.extend_from_slice(&frame.payload);
 
         if self.role == Role::Client {
