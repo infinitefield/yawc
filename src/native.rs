@@ -2294,7 +2294,7 @@ pub struct ReadHalf {
     /// Maximum size of the read buffer
     ///
     /// When accumulating fragmented messages, once the read buffer exceeds this size
-    /// it will be reset back to its initial capacity of 8 KiB. This helps prevent
+    /// it will be reset back to its initial capacity of 1 KiB. This helps prevent
     /// unbounded memory growth from receiving very large fragmented messages.
     max_read_buffer: usize,
     /// Indicates if the connection has been closed.
@@ -2385,10 +2385,11 @@ impl ReadHalf {
                 }
             }
             OpCode::Continuation => {
-                self.accumulated.extend_from_slice(&frame.payload);
-                if self.accumulated.len() >= self.max_read_buffer {
+                if self.accumulated.len() + frame.payload.len() >= self.max_read_buffer {
                     return Err(WebSocketError::FrameTooLarge);
                 }
+
+                self.accumulated.extend_from_slice(&frame.payload);
 
                 let fragment = self
                     .fragment
@@ -2396,27 +2397,27 @@ impl ReadHalf {
                     .ok_or(WebSocketError::InvalidFragment)?;
 
                 if frame.fin {
+                    // gather all accumulated buffer and replace it with a new one to avoid
+                    // too many allocations or a potential DoS.
+                    let payload =
+                        std::mem::replace(&mut self.accumulated, BytesMut::with_capacity(1024));
                     if fragment.is_compressed {
                         let inflate = self.inflate.as_mut().unwrap();
                         let output = inflate
-                            .decompress(&self.accumulated, frame.fin)?
+                            .decompress(&payload, frame.fin)?
                             .expect("decompress output");
 
                         frame.opcode = fragment.opcode;
                         frame.is_compressed = false;
                         frame.payload = output.freeze();
 
-                        // reset the buffer
-                        self.accumulated.truncate(0);
                         self.fragment = None;
 
                         Ok(Some(frame))
                     } else {
                         frame.opcode = fragment.opcode;
-                        frame.payload = self.accumulated.split().freeze();
+                        frame.payload = payload.freeze();
 
-                        // reset the buffer
-                        self.accumulated.truncate(0);
                         self.fragment = None;
 
                         Ok(Some(frame))
