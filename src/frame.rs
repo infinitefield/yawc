@@ -603,6 +603,44 @@ impl Frame {
         self.fin = fin;
     }
 
+    /// Sets a custom masking key for this frame.
+    ///
+    /// According to RFC 6455, all frames sent from a client to a server must be masked.
+    /// Normally, the library generates a random mask automatically. This method allows
+    /// you to specify your own mask for testing or special use cases.
+    ///
+    /// # Parameters
+    /// - `mask`: A 4-byte masking key, or `None` to disable masking
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let mut frame = Frame::text("Hello");
+    /// frame.set_mask(Some([0x12, 0x34, 0x56, 0x78]));
+    /// ```
+    #[inline(always)]
+    pub fn set_mask(&mut self, mask: Option<[u8; 4]>) {
+        self.mask = mask;
+    }
+
+    /// Sets a custom masking key for this frame (builder pattern).
+    ///
+    /// This is the builder-style version of [`set_mask`](Self::set_mask).
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello")
+    ///     .with_mask([0x12, 0x34, 0x56, 0x78]);
+    /// ```
+    #[inline(always)]
+    pub fn with_mask(mut self, mask: [u8; 4]) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
     /// Returns the payload as a string slice, expecting valid UTF-8.
     ///
     /// # Panics

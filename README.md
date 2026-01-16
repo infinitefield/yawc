@@ -15,7 +15,7 @@ Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket imp
 - **Zero-Copy Design**: Efficient frame processing with minimal allocations
 - **Automatic Frame Management**: Handles control frames and fragmentation
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
-- **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications
+- **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications (both text and binary modes supported)
 
 ## About compression
 
@@ -30,6 +30,10 @@ let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwr
 
 The `zlib` feature is NOT mandatory to enable compression. `zlib` is configured as a feature for the [window](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) parameters.
 By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend. An implementation of miniz using Rust.
+
+## Migrating from tokio-tungstenite?
+
+See our comprehensive [Migration Guide](MIGRATION.md) for step-by-step instructions on migrating from tokio-tungstenite to yawc.
 
 ## Which crate should I use?
 
@@ -59,7 +63,7 @@ yawc = "0.2"
 ```rust
 use futures::SinkExt;
 use futures::StreamExt;
-use yawc::{frame::FrameView, frame::OpCode, Options, Result, WebSocket};
+use yawc::{frame::Frame, frame::OpCode, Options, Result, WebSocket};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,12 +71,12 @@ async fn main() -> Result<()> {
     let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 
     // Send and receive messages
-    ws.send(FrameView::text("Hello WebSocket!")).await?;
+    ws.send(Frame::text("Hello WebSocket!")).await?;
 
     while let Some(frame) = ws.next().await {
-        match frame.opcode {
-            OpCode::Text => println!("Received: {}", std::str::from_utf8(&frame.payload).unwrap()),
-            OpCode::Binary => println!("Received binary: {} bytes", frame.payload.len()),
+        match frame.opcode() {
+            OpCode::Text => println!("Received: {}", frame.as_str()),
+            OpCode::Binary => println!("Received binary: {} bytes", frame.payload().len()),
             _ => {} // Handle control frames automatically
         }
     }
