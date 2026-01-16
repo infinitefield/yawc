@@ -297,7 +297,7 @@ impl codec::Encoder<Frame> for Encoder {
     fn encode(&mut self, mut frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         if self.role == Role::Client {
             // ensure the mask is set
-            frame.set_mask();
+            frame.set_random_mask_if_not_set();
         }
 
         let mut header = [0; MAX_HEAD_SIZE];

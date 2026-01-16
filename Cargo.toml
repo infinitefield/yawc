@@ -33,7 +33,6 @@ default = [
     "rustls-ring",
 ] # Enabled the ring crypto provider by default to not have any breaking changes
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
-logging = ["log"]
 simd = ["simdutf8"]
 reqwest = ["dep:reqwest"]
 axum = ["axum-core", "http"]
@@ -136,9 +135,9 @@ sha1 = "0.10"
 # Utilities
 nom = "8"
 pin-project = "1"
+log = "0.4"
 
 # Optional dependencies
-log = { version = "0.4", optional = true }
 simdutf8 = { version = "0.1", optional = true }
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }

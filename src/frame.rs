@@ -641,6 +641,39 @@ impl Frame {
         self
     }
 
+    /// Sets a randomly generated masking key for this frame.
+    ///
+    /// This is useful when you want to ensure a frame is masked but don't need
+    /// to specify the exact mask value.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let mut frame = Frame::text("Hello");
+    /// frame.set_random_mask();
+    /// ```
+    #[inline(always)]
+    pub fn set_random_mask(&mut self) {
+        self.mask = Some(rand::random());
+    }
+
+    /// Sets a randomly generated masking key for this frame (builder pattern).
+    ///
+    /// This is the builder-style version of [`set_random_mask`](Self::set_random_mask).
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello").with_random_mask();
+    /// ```
+    #[inline(always)]
+    pub fn with_random_mask(mut self) -> Self {
+        self.mask = Some(rand::random());
+        self
+    }
+
     /// Returns the payload as a string slice, expecting valid UTF-8.
     ///
     /// # Panics
@@ -715,8 +748,9 @@ impl Frame {
         std::str::from_utf8(&self.payload).is_ok()
     }
 
-    /// Set the mask.
-    pub(super) fn set_mask(&mut self) {
+    /// Generates and sets a random mask if none is already set.
+    #[inline]
+    pub(super) fn set_random_mask_if_not_set(&mut self) {
         if self.mask.is_none() {
             let mask: [u8; 4] = rand::random();
             self.mask = Some(mask);

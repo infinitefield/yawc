@@ -94,7 +94,6 @@ impl Negotiation {
     pub(crate) fn decompressor(&self, role: Role) -> Option<Decompressor> {
         let config = self.extensions.as_ref()?;
 
-        #[cfg(feature = "logging")]
         log::debug!(
             "Established decompressor for {role} with settings \
             client_no_context_takeover={} server_no_context_takeover={}",
@@ -136,7 +135,6 @@ impl Negotiation {
     pub(crate) fn compressor(&self, role: Role) -> Option<Compressor> {
         let config = self.extensions.as_ref()?;
 
-        #[cfg(feature = "logging")]
         log::debug!(
             "Established compressor for {role} with settings \
             client_no_context_takeover={} server_no_context_takeover={}",
@@ -475,9 +473,8 @@ impl WebSocket {
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
 
         tokio::spawn(async move {
-            if let Err(_err) = conn.with_upgrades().await {
-                #[cfg(feature = "logging")]
-                log::error!("upgrading connection: {:?}", _err);
+            if let Err(err) = conn.with_upgrades().await {
+                log::error!("upgrading connection: {:?}", err);
             }
         });
 
