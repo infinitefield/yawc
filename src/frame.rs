@@ -383,9 +383,9 @@ pub struct Frame {
     /// Flag indicating whether the payload is compressed.
     pub(super) is_compressed: bool,
     /// The masking key for the frame, if any, used for security in client-to-server frames.
-    mask: Option<[u8; 4]>,
+    pub(super) mask: Option<[u8; 4]>,
     /// The payload of the frame, containing the actual data.
-    pub payload: BytesMut,
+    pub payload: Bytes,
 }
 
 /// Converts a `FrameView` into a `Frame`.
@@ -418,7 +418,7 @@ impl Frame {
         fin: bool,
         opcode: OpCode,
         mask: Option<[u8; 4]>,
-        payload: impl Into<BytesMut>,
+        payload: impl Into<Bytes>,
     ) -> Self {
         Self {
             fin,
@@ -443,7 +443,7 @@ impl Frame {
         fin: bool,
         opcode: OpCode,
         mask: Option<[u8; 4]>,
-        payload: impl Into<BytesMut>,
+        payload: impl Into<Bytes>,
     ) -> Self {
         Self {
             fin,
@@ -457,13 +457,13 @@ impl Frame {
     /// Creates a new WebSocket close frame with a raw payload.
     ///
     /// This method does not validate if `payload` is a valid close frame payload.
-    pub fn close_raw<T: AsRef<[u8]>>(payload: T) -> Self {
+    pub fn close_raw<T: Into<Bytes>>(payload: T) -> Self {
         Self {
             fin: true,
             opcode: OpCode::Close,
             mask: None,
             is_compressed: false,
-            payload: BytesMut::from(payload.as_ref()),
+            payload: payload.into(),
         }
     }
 
@@ -477,37 +477,11 @@ impl Frame {
         std::str::from_utf8(&self.payload).is_ok()
     }
 
-    /// Returns whether the frame is masked.
-    ///
-    /// # Returns
-    /// - `true` if the frame has a masking key.
-    /// - `false` otherwise.
-    #[inline(always)]
-    pub(super) fn is_masked(&self) -> bool {
-        self.mask.is_some()
-    }
-
-    /// Masks the payload using a masking key.
-    ///
-    /// If no masking key is set, a random key is generated and applied.
-    pub(super) fn mask(&mut self) {
-        let payload = &mut self.payload;
-        if let Some(mask) = self.mask {
-            crate::mask::apply_mask(payload, mask);
-        } else {
+    /// Set the mask.
+    pub(super) fn set_mask(&mut self) {
+        if self.mask.is_none() {
             let mask: [u8; 4] = rand::random();
-            crate::mask::apply_mask(payload, mask);
             self.mask = Some(mask);
-        }
-    }
-
-    /// Unmasks the payload.
-    ///
-    /// This reverses any masking applied to the payload using the existing masking key.
-    pub(super) fn unmask(&mut self) {
-        if let Some(mask) = self.mask.take() {
-            let payload = &mut self.payload;
-            crate::mask::apply_mask(payload, mask);
         }
     }
 
@@ -788,27 +762,6 @@ mod tests {
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_frame_mask_unmask() {
-            let payload = BytesMut::from("Mask me");
-            let mut frame = Frame::new(
-                true,
-                OpCode::Binary,
-                Some([0x01, 0x02, 0x03, 0x04]),
-                payload.clone(),
-            );
-
-            // Mask the payload
-            frame.mask();
-            assert_ne!(frame.payload, payload);
-
-            // Unmask the payload
-            frame.unmask();
-            assert_eq!(frame.payload, payload);
-            assert_eq!(frame.mask, None);
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
         fn test_frame_fmt_head() {
             let payload = BytesMut::from("Header test");
             let mask_key = [0xAA, 0xBB, 0xCC, 0xDD];
@@ -834,7 +787,7 @@ mod tests {
         #[wasm_bindgen_test]
         fn test_frame_close_raw() {
             let payload = b"\x03\xE8Goodbye"; // Close code 1000 with reason "Goodbye"
-            let frame = Frame::close_raw(payload);
+            let frame = Frame::close_raw(payload.to_vec());
 
             assert!(frame.fin);
             assert_eq!(frame.opcode, OpCode::Close);
@@ -849,17 +802,7 @@ mod tests {
 
             assert!(frame.fin);
             assert_eq!(frame.opcode, frame_view.opcode);
-            assert_eq!(frame.payload.freeze(), frame_view.payload);
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_is_masked() {
-            let frame = Frame::new(true, OpCode::Text, Some([0x00; 4]), BytesMut::from("Test"));
-            assert!(frame.is_masked());
-
-            let frame = Frame::new(true, OpCode::Text, None, BytesMut::from("Test"));
-            assert!(!frame.is_masked());
+            assert_eq!(frame.payload, frame_view.payload);
         }
     }
 }

@@ -203,7 +203,7 @@ impl Negotitation {
 /// When a server role is taken the frames will not be masked, unlike
 /// the client role, in which frames are masked.
 #[derive(Copy, Clone, PartialEq)]
-enum Role {
+pub enum Role {
     Server,
     Client,
 }
@@ -2027,10 +2027,10 @@ impl WebSocket {
         futures::SinkExt::send(self, FrameView::text(bytes)).await
     }
 
-    /// Creates a new client after an HTTP upgrade.
+    /// Creates a new connection after an HTTP upgrade.
     fn new(role: Role, stream: HttpStream, opts: Negotitation) -> Self {
-        let decoder = codec::Decoder::new(opts.max_payload_read);
-        let encoder = codec::Encoder;
+        let decoder = codec::Decoder::new(role, opts.max_payload_read);
+        let encoder = codec::Encoder::new(role);
         let codec = Codec::from((decoder, encoder));
 
         Self {
@@ -2285,17 +2285,16 @@ impl futures::Sink<FrameView> for WebSocket {
 /// }
 /// ```
 pub struct ReadHalf {
-    role: Role,
     /// Optional decompressor used to decompress incoming payloads.
     inflate: Option<Decompressor>,
     /// Structure for handling fragmented message frames.
     fragment: Option<Fragment>,
     /// Accumulated data from fragmented frames.
-    accumulated: Vec<u8>,
+    accumulated: BytesMut,
     /// Maximum size of the read buffer
     ///
     /// When accumulating fragmented messages, once the read buffer exceeds this size
-    /// it will be reset back to its initial capacity of 8 KiB. This helps prevent
+    /// it will be reset back to its initial capacity of 1 KiB. This helps prevent
     /// unbounded memory growth from receiving very large fragmented messages.
     max_read_buffer: usize,
     /// Indicates if the connection has been closed.
@@ -2311,11 +2310,10 @@ impl ReadHalf {
     fn new(role: Role, opts: &Negotitation) -> Self {
         let inflate = opts.decompressor(role);
         Self {
-            role,
             inflate,
             max_read_buffer: opts.max_read_buffer,
             fragment: None,
-            accumulated: Vec::with_capacity(1024),
+            accumulated: BytesMut::with_capacity(1024),
             is_closed: false,
         }
     }
@@ -2350,10 +2348,6 @@ impl ReadHalf {
             return Err(WebSocketError::CompressionNotSupported);
         }
 
-        if self.role == Role::Server {
-            frame.unmask();
-        }
-
         // log::debug!(
         //     "<<fin={} rsv1={} {:?}",
         //     frame.fin,
@@ -2381,7 +2375,7 @@ impl ReadHalf {
                     let payload = inflate.decompress(&frame.payload, frame.fin)?;
                     if let Some(payload) = payload {
                         frame.is_compressed = false;
-                        frame.payload = payload;
+                        frame.payload = payload.freeze();
                         Ok(Some(frame))
                     } else {
                         Err(WebSocketError::InvalidFragment)
@@ -2391,10 +2385,11 @@ impl ReadHalf {
                 }
             }
             OpCode::Continuation => {
-                self.accumulated.extend_from_slice(&frame.payload);
-                if self.accumulated.len() >= self.max_read_buffer {
+                if self.accumulated.len() + frame.payload.len() >= self.max_read_buffer {
                     return Err(WebSocketError::FrameTooLarge);
                 }
+
+                self.accumulated.extend_from_slice(&frame.payload);
 
                 let fragment = self
                     .fragment
@@ -2402,32 +2397,27 @@ impl ReadHalf {
                     .ok_or(WebSocketError::InvalidFragment)?;
 
                 if frame.fin {
+                    // gather all accumulated buffer and replace it with a new one to avoid
+                    // too many allocations or a potential DoS.
+                    let payload =
+                        std::mem::replace(&mut self.accumulated, BytesMut::with_capacity(1024));
                     if fragment.is_compressed {
                         let inflate = self.inflate.as_mut().unwrap();
                         let output = inflate
-                            .decompress(&self.accumulated, frame.fin)?
+                            .decompress(&payload, frame.fin)?
                             .expect("decompress output");
 
                         frame.opcode = fragment.opcode;
                         frame.is_compressed = false;
-                        frame.payload = output;
+                        frame.payload = output.freeze();
 
-                        // reset the buffer
-                        unsafe { self.accumulated.set_len(0) };
-                        // TODO: we need to improve this
-                        self.accumulated.shrink_to(8192);
                         self.fragment = None;
 
                         Ok(Some(frame))
                     } else {
                         frame.opcode = fragment.opcode;
-                        frame.payload.clear();
-                        frame.payload.extend_from_slice(&self.accumulated);
+                        frame.payload = payload.freeze();
 
-                        // reset the buffer
-                        unsafe { self.accumulated.set_len(0) };
-                        // TODO: we need to improve this
-                        self.accumulated.shrink_to(8192);
                         self.fragment = None;
 
                         Ok(Some(frame))
@@ -2437,9 +2427,11 @@ impl ReadHalf {
                 }
             }
             _ => {
-                if self.role == Role::Client && frame.is_masked() {
-                    return Err(WebSocketError::InvalidFragment);
-                }
+                // this case can't happen since the Decoder already takes care of this
+                //
+                // if self.role == Role::Client && frame.is_masked() {
+                //     return Err(WebSocketError::InvalidFragment);
+                // }
 
                 // Control frames cannot be fragmented
                 if !frame.fin {
@@ -2562,8 +2554,6 @@ impl ReadHalf {
 /// }
 /// ```
 pub struct WriteHalf {
-    role: Role,
-    buffer: BytesMut,
     deflate: Option<Compressor>,
     close_state: Option<CloseState>,
 }
@@ -2591,9 +2581,7 @@ impl WriteHalf {
     fn new(role: Role, opts: &Negotitation) -> Self {
         let deflate = opts.compressor(role);
         Self {
-            role,
             deflate,
-            buffer: BytesMut::with_capacity(1024),
             close_state: None,
         }
     }
@@ -2665,14 +2653,8 @@ impl WriteHalf {
             None
         };
 
-        let mut frame = maybe_frame.unwrap_or_else(|| {
-            self.buffer.extend_from_slice(&view.payload[..]);
-            Frame::new(true, view.opcode, None, self.buffer.split())
-        });
-
-        if self.role == Role::Client {
-            frame.mask();
-        }
+        let frame =
+            maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
 
         stream.start_send_unpin(frame)
     }
