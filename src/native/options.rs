@@ -1,0 +1,503 @@
+//! WebSocket connection configuration options.
+
+use crate::compression::WebSocketExtensions;
+
+/// Type alias for the compression level used in WebSocket compression settings.
+///
+/// This alias refers to `flate2::Compression`, allowing easy configuration of compression levels
+/// when creating compressors and decompressors for WebSocket frames.
+pub type CompressionLevel = flate2::Compression;
+
+/// Configuration options for a WebSocket connection.
+///
+/// `Options` allows users to set parameters that govern the behavior of a WebSocket connection,
+/// including payload size limits, compression settings, and UTF-8 validation requirements.
+#[derive(Clone, Default)]
+pub struct Options {
+    /// Maximum allowed payload size for incoming messages, in bytes.
+    ///
+    /// If a message exceeds this size, the connection will be closed immediately
+    /// to prevent overloading the receiving end.
+    ///
+    /// Default: 1 MiB (1,048,576 bytes) as defined in [`super::MAX_PAYLOAD_READ`]
+    pub max_payload_read: Option<usize>,
+
+    /// Maximum size allowed for the buffer that accumulates fragmented messages.
+    ///
+    /// WebSocket messages can be split into multiple fragments for transmission. These fragments
+    /// are accumulated in a read buffer until the complete message is received. To prevent memory
+    /// exhaustion attacks using extremely large fragmented messages, once the total size of
+    /// accumulated fragments exceeds this limit, the connection is closed.
+    ///
+    /// Default: 2 MiB (2,097,152 bytes) as defined in [`super::MAX_READ_BUFFER`], or twice the
+    /// configured `max_payload_read` value if that is set.
+    pub max_read_buffer: Option<usize>,
+
+    /// Compression settings for the WebSocket connection.
+    ///
+    /// Compression is based on the Deflate algorithm, with additional configuration available
+    /// through [`DeflateOptions`] for finer control over the compression strategy.
+    pub compression: Option<DeflateOptions>,
+
+    /// Flag to determine whether incoming messages should be validated for UTF-8 encoding.
+    ///
+    /// If `true`, the [`super::ReadHalf`] will validate that received text frames contain valid UTF-8
+    /// data, closing the connection on any validation failure.
+    ///
+    /// Default: `false`
+    pub check_utf8: bool,
+
+    /// Flag to disable [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) on the TCP socket.
+    ///
+    /// If `true`, outgoing WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// Default: `false`
+    pub no_delay: bool,
+}
+
+impl Options {
+    /// Configures payload and buffer size limits.
+    ///
+    /// This is a convenience method to set both limits at once instead of calling
+    /// `with_max_payload_read()` and `with_max_read_buffer()` separately.
+    ///
+    /// # Parameters
+    /// - `max_payload`: Maximum size for a single frame's payload
+    /// - `max_buffer`: Maximum size for accumulated fragmented message data
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_limits(2 * 1024 * 1024, 4 * 1024 * 1024); // 2MB payload, 4MB buffer
+    /// ```
+    pub fn with_limits(self, max_payload: usize, max_buffer: usize) -> Self {
+        Self {
+            max_payload_read: Some(max_payload),
+            max_read_buffer: Some(max_buffer),
+            ..self
+        }
+    }
+
+    /// Configures compression using a preset profile optimized for low latency.
+    ///
+    /// This is equivalent to using `DeflateOptions::low_latency()`.
+    /// Use this for real-time applications where response time is critical.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default().with_low_latency_compression();
+    /// ```
+    pub fn with_low_latency_compression(self) -> Self {
+        Self {
+            compression: Some(DeflateOptions::low_latency()),
+            ..self
+        }
+    }
+
+    /// Configures compression using a preset profile optimized for maximum compression ratio.
+    ///
+    /// This is equivalent to using `DeflateOptions::high_compression()`.
+    /// Use this when bandwidth is limited and CPU resources are available.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default().with_high_compression();
+    /// ```
+    pub fn with_high_compression(self) -> Self {
+        Self {
+            compression: Some(DeflateOptions::high_compression()),
+            ..self
+        }
+    }
+
+    /// Configures compression using a balanced preset profile.
+    ///
+    /// This is equivalent to using `DeflateOptions::balanced()`.
+    /// This is a good default for most applications.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default().with_balanced_compression();
+    /// ```
+    pub fn with_balanced_compression(self) -> Self {
+        Self {
+            compression: Some(DeflateOptions::balanced()),
+            ..self
+        }
+    }
+
+    /// Sets the compression level for outgoing messages.
+    ///
+    /// Adjusts the compression level used for message transmission, allowing a balance between
+    /// compression efficiency and CPU usage. This option is useful for controlling bandwidth
+    /// while managing resource consumption.
+    ///
+    /// The WebSocket protocol supports two main compression approaches:
+    /// - Per-message compression (RFC 7692) using the permessage-deflate extension
+    /// - Context takeover, which maintains compression state between messages
+    ///
+    /// Compression levels range from 0-9:
+    /// - 0: No compression (fastest)
+    /// - 1-3: Low compression, minimal CPU usage
+    /// - 4-6: Balanced compression/CPU trade-off
+    /// - 7-9: Maximum compression, highest CPU usage
+    ///
+    /// For real-time applications with latency constraints, lower compression levels (1-3)
+    /// are recommended. For bandwidth-constrained scenarios where CPU usage is less critical,
+    /// higher levels (7-9) may be preferable.
+    ///
+    /// # Parameters
+    /// - `level`: The desired compression level, based on the [`CompressionLevel`] type.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified compression level.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::{Options, CompressionLevel};
+    ///
+    /// let options = Options::default()
+    ///     .with_compression_level(CompressionLevel::new(6)) // Balanced compression
+    ///     .with_utf8(); // Enable UTF-8 validation
+    /// ```
+    pub fn with_compression_level(self, level: CompressionLevel) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.level = level;
+
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
+    /// Disables compression for the WebSocket connection.
+    ///
+    /// Removes any previously configured compression settings, ensuring that
+    /// messages sent over this connection will not be compressed. This is useful
+    /// when compression would add unnecessary overhead, such as when sending
+    /// already-compressed data or small messages.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with compression disabled.
+    pub fn without_compression(self) -> Self {
+        Self {
+            compression: None,
+            ..self
+        }
+    }
+
+    /// Sets the maximum allowed payload size for incoming messages.
+    ///
+    /// Specifies the maximum size of messages that the WebSocket connection will accept.
+    /// If an incoming message exceeds this size, the connection will be terminated to avoid
+    /// overloading the receiver.
+    ///
+    /// # Parameters
+    /// - `size`: The maximum payload size in bytes.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified payload size limit.
+    pub fn with_max_payload_read(self, size: usize) -> Self {
+        Self {
+            max_payload_read: Some(size),
+            ..self
+        }
+    }
+
+    /// Sets the maximum read buffer size for accumulated fragmented messages.
+    ///
+    /// When receiving fragmented WebSocket messages, data is accumulated in a read buffer.
+    /// Once this buffer exceeds the specified size limit, it will be reset back to the
+    /// initial 8 KiB capacity to prevent unbounded memory growth from very large fragmented
+    /// messages.
+    ///
+    /// # Parameters
+    /// - `size`: Maximum size in bytes allowed for the read buffer
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified read buffer size limit.
+    pub fn with_max_read_buffer(self, size: usize) -> Self {
+        Self {
+            max_read_buffer: Some(size),
+            ..self
+        }
+    }
+
+    /// Enables UTF-8 validation for incoming text messages.
+    ///
+    /// When enabled, the WebSocket connection will verify that all received text messages
+    /// contain valid UTF-8 data. This is particularly useful for cases where the source of messages
+    /// is untrusted, ensuring data integrity.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with UTF-8 validation enabled.
+    pub fn with_utf8(self) -> Self {
+        Self {
+            check_utf8: true,
+            ..self
+        }
+    }
+
+    /// Enables TCP_NODELAY on the TCP stream.
+    ///
+    /// When enabled, [Nagle's Algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm) will be
+    /// disabled on the TCP socket. WebSocket messages will be sent immediately without waiting
+    /// for additional data to be buffered, potentially improving latency.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with TCP_NODELAY enabled.
+    pub fn with_no_delay(self) -> Self {
+        Self {
+            no_delay: true,
+            ..self
+        }
+    }
+
+    /// Sets the maximum window size for the client's decompression (LZ77) window.
+    ///
+    /// Limits the size of the client's decompression window, used during message decompression.
+    /// This option is available only when compiled with the `zlib` feature.
+    ///
+    /// # Parameters
+    /// - `max_window_bits`: The maximum number of bits for the client decompression window.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified client max window size.
+    #[cfg(feature = "zlib")]
+    pub fn with_client_max_window_bits(self, max_window_bits: u8) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.client_max_window_bits = Some(max_window_bits);
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
+    /// Disables context takeover for server-side compression.
+    ///
+    /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
+    /// the compression dictionary between messages. With context takeover enabled (default),
+    /// the compression algorithm builds and reuses a dictionary of repeated patterns across
+    /// multiple messages, potentially achieving better compression ratios for similar data.
+    ///
+    /// When disabled via this option:
+    /// - The compression dictionary is reset after each message
+    /// - Memory usage remains constant since the dictionary isn't preserved
+    /// - Compression ratio may be lower since patterns can't be reused
+    /// - Particularly useful for long-lived connections where memory growth is a concern
+    ///
+    /// This setting corresponds to the "server_no_context_takeover" extension parameter
+    /// in the WebSocket protocol negotiation.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with server context takeover disabled.
+    pub fn server_no_context_takeover(self) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.server_no_context_takeover = true;
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
+    /// Disables context takeover for client-side compression.
+    ///
+    /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
+    /// the compression dictionary between messages. The client's compression context is separate
+    /// from the server's, allowing asymmetric configuration based on each endpoint's capabilities.
+    ///
+    /// When disabled via this option:
+    /// - The client's compression dictionary is reset after each message
+    /// - Client memory usage remains constant since the dictionary isn't preserved
+    /// - May reduce compression efficiency but prevents memory growth on clients
+    /// - Useful for memory-constrained clients like mobile devices or browsers
+    ///
+    /// This setting corresponds to the "client_no_context_takeover" extension parameter
+    /// in the WebSocket protocol negotiation.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with client context takeover disabled.
+    pub fn client_no_context_takeover(self) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.client_no_context_takeover = true;
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+}
+
+/// Configuration options for WebSocket message compression using the Deflate algorithm.
+///
+/// The WebSocket protocol supports per-message compression using a Deflate-based algorithm
+/// (RFC 7692) to reduce bandwidth usage. This struct allows fine-grained control over
+/// compression behavior and memory usage through several key settings:
+///
+/// # Compression Level
+/// Controls the tradeoff between compression ratio and CPU usage via the `level` field.
+/// Higher levels provide better compression but require more processing time.
+///
+/// # Context Management
+/// Offers two modes for managing the compression context:
+///
+/// - **Context Takeover** (default): Maintains compression state between messages,
+///   providing better compression ratios at the cost of increased memory usage.
+///   Ideal for applications prioritizing bandwidth efficiency.
+///
+/// - **No Context Takeover**: Resets compression state after each message,
+///   reducing memory usage at the expense of compression efficiency.
+///   Better suited for memory-constrained environments.
+///
+/// # Memory Window Size
+/// When the `zlib` feature is enabled, allows precise control over the compression
+/// window size for both client and server, enabling further optimization of the
+/// memory-compression tradeoff.
+///
+/// # Example
+/// ```
+/// use yawc::{DeflateOptions, CompressionLevel};
+///
+/// let opts = DeflateOptions {
+///     level: CompressionLevel::default(),
+///     server_no_context_takeover: true,
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Clone, Default)]
+pub struct DeflateOptions {
+    /// Sets the compression level (0-9), balancing compression ratio against CPU usage.
+    ///
+    /// - 0: No compression (fastest)
+    /// - 1-3: Low compression (fast)
+    /// - 4-6: Medium compression (default)
+    /// - 7-9: High compression (slow)
+    pub level: CompressionLevel,
+
+    /// Controls the compression window size (in bits) for server-side compression.
+    ///
+    /// Larger windows improve compression but use more memory. Available only with
+    /// the `zlib` feature enabled. Valid range: 8-15 bits.
+    #[cfg(feature = "zlib")]
+    pub server_max_window_bits: Option<u8>,
+
+    /// Controls the compression window size (in bits) for client-side compression.
+    ///
+    /// Larger windows improve compression but use more memory. Available only with
+    /// the `zlib` feature enabled. Valid range: 8-15 bits.
+    #[cfg(feature = "zlib")]
+    pub client_max_window_bits: Option<u8>,
+
+    /// Controls server-side compression context management.
+    ///
+    /// When `true`, compression state is reset after each message, reducing
+    /// memory usage at the cost of compression efficiency.
+    pub server_no_context_takeover: bool,
+
+    /// Controls client-side compression context management.
+    ///
+    /// When `true`, compression state is reset after each message, reducing
+    /// memory usage at the cost of compression efficiency.
+    pub client_no_context_takeover: bool,
+}
+
+impl DeflateOptions {
+    /// Creates compression settings optimized for low latency.
+    ///
+    /// This profile uses:
+    /// - Fast compression level (level 1)
+    /// - No context takeover on both sides to minimize memory and processing
+    ///
+    /// Best for real-time applications where latency is critical.
+    pub fn low_latency() -> Self {
+        Self {
+            level: CompressionLevel::fast(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: Some(9), // Minimal window
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: Some(9),
+            server_no_context_takeover: true,
+            client_no_context_takeover: true,
+        }
+    }
+
+    /// Creates compression settings optimized for maximum compression.
+    ///
+    /// This profile uses:
+    /// - Best compression level (level 9)
+    /// - Context takeover enabled for better compression ratios
+    ///
+    /// Best for bandwidth-constrained scenarios where CPU is available.
+    pub fn high_compression() -> Self {
+        Self {
+            level: CompressionLevel::best(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: Some(15), // Maximum window
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: Some(15),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        }
+    }
+
+    /// Creates balanced compression settings.
+    ///
+    /// This profile uses:
+    /// - Default compression level (level 6)
+    /// - Moderate window sizes
+    /// - No context takeover to prevent memory growth
+    ///
+    /// Best general-purpose configuration for most applications.
+    pub fn balanced() -> Self {
+        Self {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: Some(12),
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: Some(12),
+            server_no_context_takeover: true,
+            client_no_context_takeover: true,
+        }
+    }
+
+    pub(super) fn merge(&self, offered: &WebSocketExtensions) -> WebSocketExtensions {
+        WebSocketExtensions {
+            // Accept client's no_context_takeover settings
+            client_no_context_takeover: offered.client_no_context_takeover
+                || self.client_no_context_takeover,
+            server_no_context_takeover: offered.server_no_context_takeover
+                || self.server_no_context_takeover,
+            // For window bits, take the minimum of what client offers and what server supports
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: match (
+                offered.client_max_window_bits,
+                self.client_max_window_bits,
+            ) {
+                (Some(c), Some(s)) => Some(c.min(s)),
+                (Some(c), None) => Some(c),
+                (None, s) => s,
+            },
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: match (
+                offered.server_max_window_bits,
+                self.server_max_window_bits,
+            ) {
+                (Some(c), Some(s)) => Some(c.min(s)),
+                (Some(c), None) => Some(c),
+                (None, s) => s,
+            },
+            #[cfg(not(feature = "zlib"))]
+            client_max_window_bits: None,
+            #[cfg(not(feature = "zlib"))]
+            server_max_window_bits: None,
+        }
+    }
+}

@@ -57,7 +57,7 @@ use tokio::{
 use tokio_stream::{wrappers::BroadcastStream, StreamMap};
 use url::Url;
 use yawc::{
-    close::CloseCode, CompressionLevel, FrameView, IncomingUpgrade, OpCode, Options, UpgradeFut,
+    close::CloseCode, CompressionLevel, Frame, IncomingUpgrade, OpCode, Options, UpgradeFut,
     WebSocket,
 };
 
@@ -218,7 +218,7 @@ async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Res
             Some((_, res)) = streams.next() => {
                 match res {
                     Ok(input) => {
-                        let _ = ws.send(FrameView::text(input)).await;
+                        let _ = ws.send(Frame::text(input)).await;
                     }
                     Err(_) => {
                         // Stream error - drop the stream
@@ -240,16 +240,16 @@ async fn on_websocket_client(state: Arc<AppState>, fut: UpgradeFut) -> yawc::Res
                     return Ok(());
                 };
 
-                match serde_json::from_slice(&frame.payload) {
+                match serde_json::from_slice(frame.payload()) {
                     Ok(ok) => {
                        if let Err(err) = on_subscription(&state, &mut streams, ok) {
-                           let _ = ws.send(FrameView::close(CloseCode::Abnormal, err)).await;
+                           let _ = ws.send(Frame::close(CloseCode::Abnormal, err)).await;
                        }
                     }
                     Err(err) => {
                         log::warn!("user: {}", err);
                         let _ = ws
-                            .send(FrameView::text(format!("unable to parse input: {err}")))
+                            .send(Frame::text(format!("unable to parse input: {err}")))
                             .await;
                     }
                 }
@@ -415,13 +415,13 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
                         break;
                     };
 
-                    if msg.opcode == OpCode::Text {
+                    if msg.opcode() == OpCode::Text {
                         on_upstream_message(&state, msg);
                     }
                 }
                 // Send periodic ping to keep connection alive
                 _ = ping_ticker.tick() => {
-                    let _ = ws.send(FrameView::ping("ping")).await;
+                    let _ = ws.send(Frame::ping("ping")).await;
                 }
             }
         }
@@ -450,8 +450,8 @@ struct BybitSub<'a> {
 }
 
 /// Processes messages received from upstream and broadcasts to subscribers
-fn on_upstream_message(state: &AppState, frame: FrameView) {
-    match serde_json::from_slice::<BybitMsg>(&frame.payload) {
+fn on_upstream_message(state: &AppState, frame: Frame) {
+    match serde_json::from_slice::<BybitMsg>(frame.payload()) {
         Ok(ok) => {
             // Parse topic string into internal Topic struct
             let topic = Topic::try_from(ok.topic).expect("topic");
@@ -459,15 +459,15 @@ fn on_upstream_message(state: &AppState, frame: FrameView) {
             // Broadcast message to all subscribers of this topic
             let topics = state.topics.read().unwrap();
             if let Some(tx) = topics.get(&topic).cloned() {
-                let _ = tx.send(frame.payload);
+                let _ = tx.send(frame.into_payload());
             }
         }
-        Err(_) => match serde_json::from_slice::<BybitSub>(&frame.payload) {
+        Err(_) => match serde_json::from_slice::<BybitSub>(frame.payload()) {
             Ok(ok) => {
                 log::debug!("{} completed", ok.op);
             }
             Err(err) => {
-                let text = std::str::from_utf8(&frame.payload).unwrap();
+                let text = std::str::from_utf8(frame.payload()).unwrap();
                 log::warn!("{}: {}", err, text);
             }
         },

@@ -5,8 +5,8 @@
 //! The WebSocket implementation is fully compliant with the Autobahn test suite for both server and client configurations.
 //!
 //! The library supports WebAssembly (WASM) targets, allowing WebSocket connections in browser environments, with a few caveats:
-//! frame manipulation is not possible since browsers don't allow sending raw frames (though the FrameView struct is still used),
-//! and only text mode (UTF-8 strings) is currently supported. Pull requests are welcome to add binary support.
+//! frame manipulation is not possible since browsers don't allow sending raw frames (though the Frame struct is still used for API consistency).
+//! Both text and binary modes are supported, but advanced features like compression and frame fragmentation are handled by the browser.
 //!
 //! # Features
 //! The crate provides several optional features that can be enabled in your `Cargo.toml`:
@@ -50,7 +50,7 @@
 //!     let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 //!
 //!     while let Some(frame) = ws.next().await {
-//!         match frame.opcode {
+//!         match frame.opcode() {
 //!             OpCode::Text | OpCode::Binary => {
 //!                 ws.send(frame).await?;
 //!             }
