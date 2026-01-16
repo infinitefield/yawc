@@ -16,15 +16,15 @@ This guide helps you migrate from `tokio-tungstenite` to `yawc`. Both libraries 
 
 ## Quick Comparison
 
-| Feature             | tokio-tungstenite | yawc           |
-| ------------------- | ----------------- | -------------- |
-| RFC 6455 Compliance | Yes               | Yes            |
-| Autobahn Tests      | Yes               | Yes            |
-| Compression         | No                | Yes            |
-| WebAssembly         | No                | Yes            |
-| Stream Access       | Direct            | Abstracted     |
-| reqwest Integration | No                | Yes            |
-| Zero-copy Design    | Partial           | More extensive |
+| Feature             | tokio-tungstenite | yawc       |
+| ------------------- | ----------------- | ---------- |
+| RFC 6455 Compliance | Yes               | Yes        |
+| Autobahn Tests      | Yes               | Yes        |
+| Compression         | No                | Yes        |
+| WebAssembly         | No                | Yes        |
+| Stream Access       | Direct            | Abstracted |
+| reqwest Integration | No                | Yes        |
+| Zero-copy Design    | No                | Yes        |
 
 ## Basic Client Connection
 
