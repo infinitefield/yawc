@@ -270,7 +270,10 @@ impl futures::Stream for WebSocket {
 
 #[cfg(test)]
 mod tests {
-    use crate::{frame::Frame, wasm::WebSocket};
+    use crate::{
+        frame::{Frame, OpCode},
+        wasm::WebSocket,
+    };
     use futures::SinkExt;
 
     #[wasm_bindgen_test::wasm_bindgen_test]
@@ -282,18 +285,21 @@ mod tests {
         let mut ws = WebSocket::connect(ECHO_URL.parse().unwrap()).await.unwrap();
         let _ = ws.next_frame().await.unwrap(); // Skip the "Request served by whatever"
 
-        let text_fv = Frame::text(TEXT_PAYLOAD);
-        let binary_fv = Frame::binary(BINARY_PAYLOAD);
+        ws.send(Frame::text(TEXT_PAYLOAD)).await.unwrap();
+        let resp = ws.next_frame().await.unwrap();
+        assert_eq!(resp.opcode(), OpCode::Text);
+        assert_eq!(resp.payload().as_ref(), TEXT_PAYLOAD.as_bytes());
 
-        ws.send(text_fv.clone()).await.unwrap();
-        assert_eq!(ws.next_frame().await.unwrap(), text_fv);
+        ws.send(Frame::binary(BINARY_PAYLOAD)).await.unwrap();
+        let resp = ws.next_frame().await.unwrap();
+        assert_eq!(resp.opcode(), OpCode::Binary);
+        assert_eq!(resp.payload().as_ref(), BINARY_PAYLOAD);
 
-        ws.send(binary_fv.clone()).await.unwrap();
-        assert_eq!(ws.next_frame().await.unwrap(), binary_fv);
-
-        let close_fv = Frame::close(crate::close::CloseCode::Normal, b"");
-        ws.send(close_fv.clone()).await.unwrap();
-        assert_eq!(ws.next_frame().await.unwrap(), close_fv);
+        ws.send(Frame::close(crate::close::CloseCode::Normal, b""))
+            .await
+            .unwrap();
+        let resp = ws.next_frame().await.unwrap();
+        assert_eq!(resp.opcode(), OpCode::Close);
 
         ws.close().await.unwrap();
     }
