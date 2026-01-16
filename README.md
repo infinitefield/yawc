@@ -298,7 +298,9 @@ If you specialize in performance-critical software, understand systems down to t
 
 #### How to run autobahn tests.
 
-The tests require you to setup docker and install deno.
+The tests require you to have docker started and install deno.
+
+The tests will generate reports with further information on `./autobahn/reports/client/index.html` and `./autobahn/reports/servers/index.html`
 
 Client:
 
@@ -311,6 +313,10 @@ Server:
 ```
 deno -A ./autobahn/server-test.js
 ```
+
+When testing the server, it will produce a lot of logs stating that clients have connected and disconnected.
+
+This is expected, as the fuzzing client will setup different connections to fuzz the server. This means means that it's working correctly.
 
 ## Acknowledgments
 

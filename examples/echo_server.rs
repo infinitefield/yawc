@@ -58,7 +58,7 @@ async fn main() -> yawc::Result<()> {
     // Initialize logging
     simple_logger::init_with_level(log::Level::Debug).expect("log");
 
-    let listener = TcpListener::bind("0.0.0.0:9001").await?;
+    let listener = TcpListener::bind("0.0.0.0:9002").await?;
 
     log::debug!("Listening on {}", listener.local_addr().unwrap());
 
