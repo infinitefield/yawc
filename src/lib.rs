@@ -88,6 +88,11 @@ pub enum WebSocketError {
     #[cfg(not(target_arch = "wasm32"))]
     InvalidFragment,
 
+    /// Fragmented message timed out.
+    #[error("Fragmented message timed out")]
+    #[cfg(not(target_arch = "wasm32"))]
+    FragmentTimeout,
+
     /// Payload contains invalid UTF-8.
     #[error("Invalid UTF-8")]
     InvalidUTF8,
@@ -206,6 +211,7 @@ impl WebSocketError {
         matches!(
             self,
             Self::InvalidFragment
+                | Self::FragmentTimeout
                 | Self::InvalidContinuationFrame
                 | Self::InvalidCloseFrame
                 | Self::InvalidCloseCode

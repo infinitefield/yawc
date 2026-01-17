@@ -1,6 +1,9 @@
 //! Split read/write halves for WebSocket connections.
 
-use std::task::{ready, Context, Poll};
+use std::{
+    task::{ready, Context, Poll},
+    time::{Duration, Instant},
+};
 
 use bytes::BytesMut;
 use futures::SinkExt;
@@ -73,11 +76,15 @@ pub struct ReadHalf {
     /// it will be reset back to its initial capacity of 1 KiB. This helps prevent
     /// unbounded memory growth from receiving very large fragmented messages.
     max_read_buffer: usize,
+    /// Maximum time allowed to receive all fragments of a fragmented message.
+    fragment_timeout: Option<Duration>,
     /// Indicates if the connection has been closed.
     pub(super) is_closed: bool,
 }
 
+/// Fragmented message header.
 struct Fragment {
+    started: Instant,
     opcode: OpCode,
     is_compressed: bool,
 }
@@ -88,6 +95,7 @@ impl ReadHalf {
         Self {
             inflate,
             max_read_buffer: opts.max_read_buffer,
+            fragment_timeout: opts.fragment_timeout,
             fragment: None,
             accumulated: BytesMut::with_capacity(1024),
             is_closed: false,
@@ -132,6 +140,7 @@ impl ReadHalf {
 
                 if !frame.fin {
                     self.fragment = Some(Fragment {
+                        started: Instant::now(),
                         opcode: frame.opcode,
                         is_compressed: frame.is_compressed,
                     });
@@ -191,6 +200,11 @@ impl ReadHalf {
 
                         Ok(Some(frame))
                     }
+                } else if self
+                    .fragment_timeout
+                    .is_some_and(|timeout| fragment.started.elapsed() > timeout)
+                {
+                    Err(WebSocketError::FragmentTimeout)
                 } else {
                     Ok(None)
                 }

@@ -1,5 +1,7 @@
 //! WebSocket connection configuration options.
 
+use std::time::Duration;
+
 use crate::compression::WebSocketExtensions;
 
 /// Type alias for the compression level used in WebSocket compression settings.
@@ -54,6 +56,19 @@ pub struct Options {
     ///
     /// Default: `false`
     pub no_delay: bool,
+
+    /// Maximum time allowed to receive all fragments of a fragmented message.
+    ///
+    /// When receiving a fragmented WebSocket message, this timeout limits how long
+    /// the connection will wait for all fragments to arrive. If the timeout expires
+    /// before the final fragment is received, the connection returns a
+    /// [`FragmentTimeout`](crate::WebSocketError::FragmentTimeout) error.
+    ///
+    /// This protects against slow-loris style attacks where a peer sends fragments
+    /// very slowly to hold resources.
+    ///
+    /// Default: `None` (no timeout)
+    pub fragment_timeout: Option<Duration>,
 }
 
 impl Options {
@@ -258,6 +273,32 @@ impl Options {
     pub fn with_no_delay(self) -> Self {
         Self {
             no_delay: true,
+            ..self
+        }
+    }
+
+    /// Sets the maximum time allowed to receive all fragments of a fragmented message.
+    ///
+    /// This protects against slow-loris style attacks where a peer sends fragments
+    /// very slowly to hold connection resources.
+    ///
+    /// # Parameters
+    /// - `timeout`: Maximum duration to wait for all fragments
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified fragment timeout.
+    ///
+    /// # Example
+    /// ```rust
+    /// use std::time::Duration;
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_fragment_timeout(Duration::from_secs(30));
+    /// ```
+    pub fn with_fragment_timeout(self, timeout: Duration) -> Self {
+        Self {
+            fragment_timeout: Some(timeout),
             ..self
         }
     }

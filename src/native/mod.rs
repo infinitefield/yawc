@@ -26,6 +26,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     task::{ready, Context, Poll},
+    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -88,6 +89,7 @@ pub(crate) struct Negotiation {
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
     pub(crate) utf8: bool,
+    pub(crate) fragment_timeout: Option<Duration>,
 }
 
 impl Negotiation {
@@ -628,6 +630,7 @@ impl WebSocket {
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
                 max_read_buffer,
                 utf8: options.check_utf8,
+                fragment_timeout: options.fragment_timeout,
             }),
         };
 
@@ -668,6 +671,7 @@ impl WebSocket {
                         | WebSocketError::ControlFrameFragmented
                         | WebSocketError::PingFrameTooLarge
                         | WebSocketError::InvalidFragment
+                        | WebSocketError::FragmentTimeout
                         | WebSocketError::InvalidContinuationFrame
                         | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
                         _ => CloseCode::Error,
@@ -935,6 +939,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
+        fragment_timeout: options.fragment_timeout,
     })
 }
 
@@ -985,6 +990,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
+        fragment_timeout: options.fragment_timeout,
     })
 }
 
