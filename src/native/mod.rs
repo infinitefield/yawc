@@ -51,7 +51,7 @@ pub use upgrade::UpgradeFut;
 /// which handles both plain TCP and TLS connections over TCP streams.
 pub type TcpWebSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
-/// Type alias for server-side WebSocket connections from HTTP upgrades.
+/// Type alias for server-side WebSocket connections from HTTP upgrades or when using reqwest.
 ///
 /// This is the WebSocket type returned by [`WebSocket::upgrade`] and [`UpgradeFut`],
 /// which wraps hyper's upgraded HTTP connections.
