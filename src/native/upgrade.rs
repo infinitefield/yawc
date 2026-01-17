@@ -9,13 +9,14 @@ use hyper_util::rt::TokioIo;
 use pin_project::pin_project;
 use sha1::{Digest, Sha1};
 
+use bytes::Bytes;
+
 use super::{HttpStream, Negotiation, Role, WebSocket};
 
 #[cfg(feature = "axum")]
 use {
     super::{Options, MAX_PAYLOAD_READ, MAX_READ_BUFFER},
     crate::{compression::WebSocketExtensions, Result},
-    bytes::Bytes,
     http_body_util::Empty,
     hyper::{header, Response},
     std::future::Future,
@@ -323,13 +324,13 @@ pub struct UpgradeFut {
 }
 
 impl std::future::Future for UpgradeFut {
-    type Output = hyper::Result<WebSocket>;
+    type Output = hyper::Result<WebSocket<HttpStream>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let this = self.project();
         let upgraded = match this.inner.poll(cx) {
-            Poll::Pending => return Poll::Pending,
             Poll::Ready(x) => x,
+            Poll::Pending => return Poll::Pending,
         };
 
         let io = TokioIo::new(upgraded?);
@@ -338,6 +339,7 @@ impl std::future::Future for UpgradeFut {
         Poll::Ready(Ok(WebSocket::new(
             Role::Server,
             HttpStream::from(io),
+            Bytes::new(),
             negotiation,
         )))
     }
