@@ -371,13 +371,13 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
             next_id += 1;
             let id = next_id;
 
-            let _ = ws
-                .send_json(&BybitSubscribe {
-                    req_id: id.to_string(),
-                    op: "subscribe",
-                    args: subscriptions,
-                })
-                .await;
+            let msg = serde_json::to_string(&BybitSubscribe {
+                req_id: id.to_string(),
+                op: "subscribe",
+                args: subscriptions,
+            })
+            .unwrap();
+            let _ = ws.send(msg.into()).await;
         }
 
         let mut ping_ticker = interval(Duration::from_secs(5));

@@ -197,11 +197,6 @@ pub enum WebSocketError {
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
     #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
     Reqwest(#[from] reqwest::Error),
-
-    /// JSON serialization error.
-    #[cfg(all(feature = "json", not(target_arch = "wasm32")))]
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
 }
 
 impl WebSocketError {

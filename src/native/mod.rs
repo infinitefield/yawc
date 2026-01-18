@@ -695,14 +695,6 @@ impl WebSocket {
         poll_fn(|cx| self.poll_next_frame(cx)).await
     }
 
-    /// Serializes data to JSON and sends it as a text frame.
-    #[cfg(feature = "json")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
-    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = serde_json::to_vec(data)?;
-        futures::SinkExt::send(self, Frame::text(bytes)).await
-    }
-
     /// Sends a message as multiple fragmented frames.
     pub async fn send_fragmented(
         &mut self,
