@@ -21,42 +21,6 @@ cd benches
 make
 ```
 
-This will:
-
-1. Clone uSockets (if not present)
-2. Build uSockets library
-3. Compile the load_test C client
-4. Link everything together
-
-The expected directory structure after setup:
-
-```
-yawc/
-└── benches/
-    ├── Makefile
-    ├── load_test.c
-    ├── load_test (compiled binary)
-    ├── run.js
-    └── uSockets/          (auto-cloned)
-        ├── src/
-        └── *.o (compiled objects)
-```
-
-## Manual Setup (Optional)
-
-If you prefer to set up dependencies manually:
-
-```bash
-# Setup dependencies only
-make setup
-
-# Or manually:
-cd benches
-git clone https://github.com/uNetworking/uSockets.git
-cd uSockets
-make WITH_OPENSSL=1
-```
-
 ## Running Benchmarks
 
 ### Quick Start - Automated Setup
@@ -75,28 +39,6 @@ make            # Builds only load_test (for manual testing)
 ```
 
 The `make setup-all` command will:
-
-1. Build yawc echo_server
-2. Clone and build **fastwebsockets**
-3. Clone and build **uWebSockets**
-4. Clone and build **tokio-tungstenite**
-
-All repositories will be cloned to the parent directory (`../`).
-
-### Manual Setup (Optional)
-
-If you prefer to set up libraries manually:
-
-```bash
-# From the parent directory of yawc
-cd ..
-
-# Build each library
-cd yawc && cargo build --release --example echo_server && cd ..
-git clone https://github.com/denoland/fastwebsockets.git && cd fastwebsockets && cargo build --release --example echo_server && cd ..
-git clone --recursive https://github.com/uNetworking/uWebSockets.git && cd uWebSockets && WITH_OPENSSL=1 make examples && cd ..
-git clone https://github.com/snapview/tokio-tungstenite.git && cd tokio-tungstenite && cargo build --release --example echo-server && cd ..
-```
 
 ### Benchmark Results
 
