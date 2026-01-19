@@ -61,7 +61,6 @@ use yawc::{
     WebSocket,
 };
 
-/// Application entry point - initializes logging and starts the server
 #[tokio::main]
 async fn main() {
     // Initialize logging for debugging
@@ -336,7 +335,7 @@ enum Subscription {
 /// - Connection health checks
 async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<AppState>) {
     let base_url: Url = "wss://stream.bybit.com/v5/public/linear".parse().unwrap();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().http1_only().build().unwrap();
 
     loop {
         log::info!("Connecting upstream {base_url}");
@@ -347,7 +346,7 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
             WebSocket::reqwest(
                 base_url.clone(),
                 client.clone(),
-                Options::default().with_compression_level(CompressionLevel::best()),
+                Options::default().with_high_compression(),
             ),
         )
         .await
@@ -371,13 +370,13 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
             next_id += 1;
             let id = next_id;
 
-            let _ = ws
-                .send_json(&BybitSubscribe {
-                    req_id: id.to_string(),
-                    op: "subscribe",
-                    args: subscriptions,
-                })
-                .await;
+            let msg = serde_json::to_string(&BybitSubscribe {
+                req_id: id.to_string(),
+                op: "subscribe",
+                args: subscriptions,
+            })
+            .unwrap();
+            let _ = ws.send(Frame::text(msg)).await;
         }
 
         let mut ping_ticker = interval(Duration::from_secs(5));
@@ -402,11 +401,12 @@ async fn connect_upstream(mut rx: UnboundedReceiver<Subscription>, state: Arc<Ap
                         }
                     };
 
-                    let _ = ws.send_json(&BybitSubscribe {
+                    let msg = serde_json::to_string(&BybitSubscribe {
                         req_id: id.to_string(),
                         op,
                         args: vec![topic],
-                    }).await;
+                    }).unwrap();
+                    let _ = ws.send(Frame::text(msg)).await;
                 }
                 // Handle upstream messages
                 maybe_msg = ws.next() => {

@@ -26,6 +26,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     task::{ready, Context, Poll},
+    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -101,6 +102,7 @@ pub(crate) struct Negotiation {
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
     pub(crate) utf8: bool,
+    pub(crate) fragment_timeout: Option<Duration>,
 }
 
 impl Negotiation {
@@ -740,6 +742,7 @@ impl WebSocket<HttpStream> {
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
                 max_read_buffer,
                 utf8: options.check_utf8,
+                fragment_timeout: options.fragment_timeout,
             }),
         };
 
@@ -785,6 +788,7 @@ where
                         | WebSocketError::ControlFrameFragmented
                         | WebSocketError::PingFrameTooLarge
                         | WebSocketError::InvalidFragment
+                        | WebSocketError::FragmentTimeout
                         | WebSocketError::InvalidContinuationFrame
                         | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
                         _ => CloseCode::Error,
@@ -806,14 +810,6 @@ where
     /// Asynchronously retrieves the next frame from the WebSocket stream.
     pub async fn next_frame(&mut self) -> Result<Frame> {
         poll_fn(|cx| self.poll_next_frame(cx)).await
-    }
-
-    /// Serializes data to JSON and sends it as a text frame.
-    #[cfg(feature = "json")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
-    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = serde_json::to_vec(data)?;
-        futures::SinkExt::send(self, Frame::text(bytes)).await
     }
 
     /// Sends a message as multiple fragmented frames.
@@ -1064,6 +1060,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
+        fragment_timeout: options.fragment_timeout,
     })
 }
 
@@ -1114,6 +1111,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
+        fragment_timeout: options.fragment_timeout,
     })
 }
 

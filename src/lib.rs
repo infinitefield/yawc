@@ -88,6 +88,11 @@ pub enum WebSocketError {
     #[cfg(not(target_arch = "wasm32"))]
     InvalidFragment,
 
+    /// Fragmented message timed out.
+    #[error("Fragmented message timed out")]
+    #[cfg(not(target_arch = "wasm32"))]
+    FragmentTimeout,
+
     /// Payload contains invalid UTF-8.
     #[error("Invalid UTF-8")]
     InvalidUTF8,
@@ -192,11 +197,6 @@ pub enum WebSocketError {
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
     #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
     Reqwest(#[from] reqwest::Error),
-
-    /// JSON serialization error.
-    #[cfg(all(feature = "json", not(target_arch = "wasm32")))]
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
 }
 
 impl WebSocketError {
@@ -206,6 +206,7 @@ impl WebSocketError {
         matches!(
             self,
             Self::InvalidFragment
+                | Self::FragmentTimeout
                 | Self::InvalidContinuationFrame
                 | Self::InvalidCloseFrame
                 | Self::InvalidCloseCode
