@@ -432,11 +432,110 @@ where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     /// Performs a WebSocket handshake over an existing connection.
+    ///
+    /// This is a lower-level API that allows you to perform a WebSocket handshake
+    /// on an already established I/O stream (such as a TcpStream or TLS stream).
+    /// For most use cases, prefer using [`WebSocket::connect`] which handles both
+    /// connection establishment and handshake automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Perform the WebSocket handshake over the existing stream
+    ///     let ws = WebSocket::handshake(url, stream, Options::default()).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Use a custom connection method (e.g., SOCKS proxy, custom DNS resolution)
+    /// - Reuse an existing stream or connection
+    /// - Implement custom connection logic before the WebSocket handshake
+    ///
+    /// For adding custom headers to the handshake request, use
+    /// [`WebSocket::handshake_with_request`] instead.
     pub async fn handshake(url: Url, io: S, options: Options) -> Result<WebSocket<S>> {
         Self::handshake_with_request(url, io, options, HttpRequest::builder()).await
     }
 
     /// Performs a WebSocket handshake with a customizable HTTP request.
+    ///
+    /// This is similar to [`WebSocket::handshake`] but allows you to customize
+    /// the HTTP upgrade request by providing your own [`HttpRequestBuilder`].
+    /// This is useful when you need to add custom headers (e.g., authentication
+    /// tokens, API keys, or other metadata) to the handshake request.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    /// * `builder` - An HTTP request builder for customizing the handshake request
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options, HttpRequest};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Create a custom HTTP request with authentication headers
+    ///     let request = HttpRequest::builder()
+    ///         .header("Authorization", "Bearer my-secret-token")
+    ///         .header("X-Custom-Header", "custom-value");
+    ///
+    ///     // Perform the WebSocket handshake with custom headers
+    ///     let ws = WebSocket::handshake_with_request(
+    ///         url,
+    ///         stream,
+    ///         Options::default(),
+    ///         request
+    ///     ).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Add authentication headers to the handshake request
+    /// - Include custom metadata or API keys
+    /// - Control the exact HTTP request sent during the WebSocket upgrade
+    /// - Combine custom connection logic with custom headers
     pub async fn handshake_with_request(
         url: Url,
         io: S,
