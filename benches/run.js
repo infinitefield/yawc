@@ -13,6 +13,12 @@ function load_test(conn, port, bytes) {
 }
 
 const targets = [
+  // https://github.com/infinitefield/yawc
+  {
+    port: 9002,
+    name: "yawc",
+    server: "../target/release/examples/echo_server",
+  },
   // https://github.com/denoland/fastwebsockets
   {
     port: 8080,
@@ -26,12 +32,6 @@ const targets = [
     port: 8080,
     name: "tokio-tungstenite",
     server: "./tokio-tungstenite/target/release/examples/echo-server",
-  },
-  // https://github.com/infinitefield/yawc
-  {
-    port: 9002,
-    name: "yawc",
-    server: "../target/release/examples/echo_server",
   },
 ];
 
