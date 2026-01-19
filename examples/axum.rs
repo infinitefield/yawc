@@ -1,7 +1,7 @@
 // Required imports for axum web framework, futures, and websocket operations
 use axum::{response::IntoResponse, routing::get, Router};
 use futures::SinkExt;
-use yawc::frame::OpCode;
+use yawc::{Frame, OpCode};
 
 // Main entry point using tokio async runtime
 #[tokio::main]
@@ -24,7 +24,7 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     // Continuously process incoming websocket frames
     loop {
         let frame = ws.next_frame().await?;
-        match frame.opcode {
+        match frame.opcode() {
             // For text or binary frames, echo them back to the client
             OpCode::Text | OpCode::Binary => {
                 ws.send(frame).await?;

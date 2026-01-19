@@ -2,7 +2,7 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use futures::{SinkExt, StreamExt};
-use yawc::{CompressionLevel, FrameView, Options, WebSocket};
+use yawc::{CompressionLevel, Frame, Options, WebSocket};
 
 struct CustomDnsResolver {
     overrides: HashMap<String, Vec<SocketAddr>>,
@@ -35,7 +35,7 @@ async fn main() {
 
     log::debug!("Connected");
 
-    let _ = websocket.send(FrameView::text("hello")).await;
+    let _ = websocket.send(Frame::text("hello")).await;
     let _ = websocket.next().await;
     let _ = websocket.close().await;
 }

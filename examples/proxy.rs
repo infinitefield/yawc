@@ -26,11 +26,11 @@ use hyper::{
     {Request, Response},
 };
 use tokio::net::TcpListener;
-use yawc::{CompressionLevel, FrameView, OpCode, WebSocket};
+use yawc::{CompressionLevel, Frame, OpCode, WebSocket};
 
 // Type alias for storing connected clients
 // Uses BTreeMap for ordered storage of client IDs -> WebSocket sinks
-type Clients = Mutex<BTreeMap<u64, SplitSink<WebSocket, FrameView>>>;
+type Clients = Mutex<BTreeMap<u64, SplitSink<WebSocket, Frame>>>;
 
 // Atomic counter for generating unique client IDs
 static CLIENT_ID: AtomicU64 = AtomicU64::new(0);
@@ -48,7 +48,7 @@ async fn handle_client(clients: Arc<Clients>, ws: WebSocket) -> yawc::Result<()>
 
     // Listen for incoming frames until a Close frame is received
     while let Some(frame) = stream.next().await {
-        if let OpCode::Close = frame.opcode {
+        if let OpCode::Close = frame.opcode() {
             break;
         }
     }
@@ -125,8 +125,8 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
         .await?;
 
         // Process incoming messages
-        while let Some(view) = ws.next().await {
-            match view.opcode {
+        while let Some(frame) = ws.next().await {
+            match frame.opcode() {
                 OpCode::Text => {
                     // Track disconnected clients
                     let mut disconnected = vec![];
@@ -134,7 +134,7 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
 
                     // Broadcast message to all connected clients
                     for (key, client) in client_list.iter_mut() {
-                        if let Err(err) = client.send(view.clone()).await {
+                        if let Err(err) = client.send(frame.clone()).await {
                             log::error!("client: {err}");
                             disconnected.push(*key);
                         }

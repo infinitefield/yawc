@@ -10,7 +10,7 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket};
+use yawc::{CompressionLevel, OpCode, Options, WebSocket};
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
@@ -20,7 +20,7 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     //
     // By doing this we also close the connection gracefully.
     while let Some(frame) = ws.next().await {
-        match frame.opcode {
+        match frame.opcode() {
             OpCode::Text | OpCode::Binary => {
                 ws.send(frame).await?;
             }
