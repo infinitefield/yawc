@@ -91,7 +91,7 @@
 //! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://datatracker.ietf.org/doc/html/rfc6455#section-5).
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))] // Silence dead code warning for WASM
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use crate::{close::CloseCode, WebSocketError};
 
@@ -190,30 +190,16 @@ impl From<Frame> for (OpCode, Bytes) {
 ///
 /// This allows constructing a `Frame` from an opcode and immutable bytes payload.
 /// The frame will have `fin` set to `true` by default.
-impl From<(OpCode, Bytes)> for Frame {
-    fn from((opcode, payload): (OpCode, Bytes)) -> Self {
+impl<T> From<(OpCode, T)> for Frame
+where
+    T: Into<Bytes>,
+{
+    fn from((opcode, payload): (OpCode, T)) -> Self {
         Self {
             fin: true,
             opcode,
             mask: None,
-            payload,
-            is_compressed: false,
-        }
-    }
-}
-
-/// Converts a tuple of `(OpCode, BytesMut)` to a `Frame`.
-///
-/// This allows constructing a `Frame` from an opcode and mutable bytes payload,
-/// automatically freezing the bytes into an immutable form.
-/// The frame will have `fin` set to `true` by default.
-impl From<(OpCode, BytesMut)> for Frame {
-    fn from((opcode, payload): (OpCode, BytesMut)) -> Self {
-        Self {
-            fin: true,
-            opcode,
-            mask: None,
-            payload: payload.freeze(),
+            payload: payload.into(),
             is_compressed: false,
         }
     }
@@ -466,18 +452,11 @@ impl Frame {
     /// - `opcode`: The operation code of the frame, defining its type.
     /// - `mask`: Optional 4-byte masking key for client-to-server frames.
     /// - `payload`: The compressed frame payload data.
-    pub(crate) fn compress(
-        fin: bool,
-        opcode: OpCode,
-        mask: Option<[u8; 4]>,
-        payload: impl Into<Bytes>,
-    ) -> Self {
+    pub(crate) fn into_compressed(self, payload: impl Into<Bytes>) -> Self {
         Self {
-            fin,
-            opcode,
-            mask,
             payload: payload.into(),
             is_compressed: true,
+            ..self
         }
     }
 
@@ -538,19 +517,19 @@ impl Frame {
         self.payload
     }
 
-    /// Consumes the frame and returns its opcode and payload.
+    /// Consumes the frame and returns its opcode, whether it is final or not and payload.
     ///
     /// # Example
     /// ```rust
     /// use yawc::frame::{Frame, OpCode};
     ///
     /// let frame = Frame::text("Hello");
-    /// let (opcode, payload) = frame.into_parts();
+    /// let (opcode, is_fin, payload) = frame.into_parts();
     /// assert_eq!(opcode, OpCode::Text);
     /// ```
     #[inline(always)]
-    pub fn into_parts(self) -> (OpCode, Bytes) {
-        (self.opcode, self.payload)
+    pub fn into_parts(self) -> (OpCode, bool, Bytes) {
+        (self.opcode, self.fin, self.payload)
     }
 
     /// Returns the opcode and payload as a string slice.

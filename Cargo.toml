@@ -29,9 +29,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # Optional feature configurations
 [features]
-default = [
-    "rustls-ring",
-] # Enabled the ring crypto provider by default to not have any breaking changes
+default = ["rustls-ring"]
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 simd = ["simdutf8"]
 reqwest = ["dep:reqwest"]
@@ -148,6 +146,7 @@ flate2 = "1"
 # Development dependencies
 # ==============================================================================
 [dev-dependencies]
+anyhow = "1"
 serde_json = "1"
 wasm-bindgen-test = "0.3"
 
@@ -165,3 +164,5 @@ simple_logger = "5"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 webpki-roots = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+rand = "0.8"

@@ -1160,3 +1160,492 @@ Either:
 
     TlsConnector::from(Arc::new(config))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::SinkExt;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+
+    /// A mock duplex stream that wraps tokio's DuplexStream for testing.
+    struct MockStream {
+        inner: DuplexStream,
+    }
+
+    impl MockStream {
+        /// Creates a pair of connected mock streams.
+        fn pair(buffer_size: usize) -> (Self, Self) {
+            let (a, b) = tokio::io::duplex(buffer_size);
+            (Self { inner: a }, Self { inner: b })
+        }
+    }
+
+    impl AsyncRead for MockStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for MockStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// Helper function to create a WebSocket pair for testing.
+    fn create_websocket_pair(buffer_size: usize) -> (WebSocket<MockStream>, WebSocket<MockStream>) {
+        let (client_stream, server_stream) = MockStream::pair(buffer_size);
+
+        let negotiation = Negotiation {
+            extensions: None,
+            compression_level: None,
+            max_payload_read: MAX_PAYLOAD_READ,
+            max_read_buffer: MAX_READ_BUFFER,
+            utf8: false,
+            fragment_timeout: None,
+        };
+
+        let client_ws = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            negotiation.clone(),
+        );
+
+        let server_ws = WebSocket::new(Role::Server, server_stream, Bytes::new(), negotiation);
+
+        (client_ws, server_ws)
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_text_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let text = "Hello, WebSocket!";
+        client
+            .send(Frame::text(text))
+            .await
+            .expect("Failed to send text frame");
+
+        let frame = server.next_frame().await.expect("Failed to receive frame");
+
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert_eq!(frame.payload(), text.as_bytes());
+        assert!(frame.is_fin());
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_binary_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let data = vec![1u8, 2, 3, 4, 5];
+        client
+            .send(Frame::binary(data.clone()))
+            .await
+            .expect("Failed to send binary frame");
+
+        let frame = server.next_frame().await.expect("Failed to receive frame");
+
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload(), &data[..]);
+        assert!(frame.is_fin());
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_communication() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        client
+            .send(Frame::text("Client message"))
+            .await
+            .expect("Failed to send from client");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive at server");
+        assert_eq!(frame.payload(), b"Client message" as &[u8]);
+
+        server
+            .send(Frame::text("Server response"))
+            .await
+            .expect("Failed to send from server");
+
+        let frame = client
+            .next_frame()
+            .await
+            .expect("Failed to receive at client");
+        assert_eq!(frame.payload(), b"Server response" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_ping_pong() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        // Ping frames are handled automatically by the WebSocket implementation
+        // The server will automatically respond with a pong, but we won't receive it via next_frame()
+        // Instead, test that we can send and receive pong frames explicitly
+
+        client
+            .send(Frame::pong("pong_data"))
+            .await
+            .expect("Failed to send pong");
+
+        let frame = server.next_frame().await.expect("Failed to receive pong");
+        assert_eq!(frame.opcode(), OpCode::Pong);
+        assert_eq!(frame.payload(), b"pong_data" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_close_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::close(close::CloseCode::Normal, b"Goodbye"))
+            .await
+            .expect("Failed to send close frame");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive close frame");
+
+        assert_eq!(frame.opcode(), OpCode::Close);
+        assert_eq!(frame.close_code(), Some(close::CloseCode::Normal));
+        assert_eq!(
+            frame.close_reason().expect("Invalid close reason"),
+            Some("Goodbye")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_message() {
+        let (mut client, mut server) = create_websocket_pair(65536);
+
+        let large_data = vec![42u8; 10240];
+        client
+            .send(Frame::binary(large_data.clone()))
+            .await
+            .expect("Failed to send large message");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive large message");
+
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload().len(), 10240);
+        assert_eq!(frame.payload(), &large_data[..]);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_messages() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        for i in 0..10 {
+            let msg = format!("Message {}", i);
+            client
+                .send(Frame::text(msg.clone()))
+                .await
+                .expect("Failed to send message");
+
+            let frame = server
+                .next_frame()
+                .await
+                .expect("Failed to receive message");
+            assert_eq!(frame.payload(), msg.as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_payload() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::text(Bytes::new()))
+            .await
+            .expect("Failed to send empty frame");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive empty frame");
+
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert_eq!(frame.payload().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fragmented_message() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        let mut frame1 = Frame::text("Hello, ");
+        frame1.set_fin(false);
+        client
+            .send(frame1)
+            .await
+            .expect("Failed to send first fragment");
+
+        let frame2 = Frame::continuation("World!");
+        client
+            .send(frame2)
+            .await
+            .expect("Failed to send final fragment");
+
+        // WebSocket automatically reassembles fragments
+        // We receive one complete message with the concatenated payload
+        let received = server
+            .next_frame()
+            .await
+            .expect("Failed to receive message");
+        assert_eq!(received.opcode(), OpCode::Text);
+        assert!(received.is_fin());
+        assert_eq!(received.payload(), b"Hello, World!" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_send_receive() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        let client_task = tokio::spawn(async move {
+            for i in 0..5 {
+                client
+                    .send(Frame::text(format!("Client {}", i)))
+                    .await
+                    .expect("Failed to send from client");
+
+                let frame = client
+                    .next_frame()
+                    .await
+                    .expect("Failed to receive at client");
+                assert_eq!(frame.payload(), format!("Server {}", i).as_bytes());
+            }
+            client
+        });
+
+        let server_task = tokio::spawn(async move {
+            for i in 0..5 {
+                let frame = server
+                    .next_frame()
+                    .await
+                    .expect("Failed to receive at server");
+                assert_eq!(frame.payload(), format!("Client {}", i).as_bytes());
+
+                server
+                    .send(Frame::text(format!("Server {}", i)))
+                    .await
+                    .expect("Failed to send from server");
+            }
+            server
+        });
+
+        client_task.await.expect("Client task failed");
+        server_task.await.expect("Server task failed");
+    }
+
+    #[tokio::test]
+    async fn test_utf8_validation() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let valid_utf8 = "Hello, 世界! 🌍";
+        client
+            .send(Frame::text(valid_utf8))
+            .await
+            .expect("Failed to send UTF-8 text");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive UTF-8 text");
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert!(frame.is_utf8());
+        assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), valid_utf8);
+    }
+
+    #[tokio::test]
+    async fn test_stream_trait_implementation() {
+        use futures::StreamExt;
+
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        tokio::spawn(async move {
+            for i in 0..3 {
+                client
+                    .send(Frame::text(format!("Message {}", i)))
+                    .await
+                    .expect("Failed to send message");
+            }
+        });
+
+        let mut count = 0;
+        while let Some(frame) = server.next().await {
+            assert_eq!(frame.opcode(), OpCode::Text);
+            count += 1;
+            if count == 3 {
+                break;
+            }
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_sink_trait_implementation() {
+        use futures::SinkExt;
+
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::text("Sink message"))
+            .await
+            .expect("Failed to send via Sink");
+
+        client.flush().await.expect("Failed to flush");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive message");
+        assert_eq!(frame.payload(), b"Sink message" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_rapid_small_messages() {
+        let (mut client, mut server) = create_websocket_pair(8192);
+
+        let count = 100;
+
+        let sender = tokio::spawn(async move {
+            for i in 0..count {
+                client
+                    .send(Frame::text(format!("{}", i)))
+                    .await
+                    .expect("Failed to send");
+            }
+            client
+        });
+
+        for i in 0..count {
+            let frame = server.next_frame().await.expect("Failed to receive");
+            assert_eq!(frame.payload(), format!("{}", i).as_bytes());
+        }
+
+        sender.await.expect("Sender task failed");
+    }
+
+    #[tokio::test]
+    async fn test_interleaved_control_and_data_frames() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        client
+            .send(Frame::text("Data 1"))
+            .await
+            .expect("Failed to send");
+
+        // Ping frames are handled automatically and don't appear in next_frame()
+        // Use pong frames instead to test control frame interleaving
+        client
+            .send(Frame::pong("pong"))
+            .await
+            .expect("Failed to send pong");
+
+        client
+            .send(Frame::binary(vec![1, 2, 3]))
+            .await
+            .expect("Failed to send");
+
+        let f1 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f1.opcode(), OpCode::Text);
+        assert_eq!(f1.payload(), b"Data 1" as &[u8]);
+
+        let f2 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f2.opcode(), OpCode::Pong);
+
+        let f3 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f3.opcode(), OpCode::Binary);
+        assert_eq!(f3.payload(), &[1u8, 2, 3] as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_client_sends_masked_frames() {
+        let (mut client, mut _server) = create_websocket_pair(1024);
+
+        // Create a frame and send it through the client
+        let frame = Frame::text("test");
+        client.send(frame).await.expect("Failed to send");
+
+        // The frame should be automatically masked by the client encoder
+        // We can't directly verify this without inspecting the wire format,
+        // but the test verifies the codec path works correctly
+    }
+
+    #[tokio::test]
+    async fn test_server_sends_unmasked_frames() {
+        let (mut _client, mut server) = create_websocket_pair(1024);
+
+        // Server frames should not be masked
+        let frame = Frame::text("test");
+        server.send(frame).await.expect("Failed to send");
+
+        // Similar to above - verifies the codec path
+    }
+
+    #[tokio::test]
+    async fn test_close_code_variants() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::close(close::CloseCode::Away, b""))
+            .await
+            .expect("Failed to send close");
+
+        let frame = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(frame.close_code(), Some(close::CloseCode::Away));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_fragments() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        // Send 5 fragments
+        for i in 0..5 {
+            let is_last = i == 4;
+            let opcode = if i == 0 {
+                OpCode::Text
+            } else {
+                OpCode::Continuation
+            };
+
+            let mut frame = Frame::from((opcode, format!("part{}", i)));
+            frame.set_fin(is_last);
+            client.send(frame).await.expect("Failed to send fragment");
+        }
+
+        // WebSocket automatically reassembles fragments
+        // We receive one complete message, not individual fragments
+        let frame = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert!(frame.is_fin());
+
+        // The payload should be the concatenation of all fragments
+        let expected = "part0part1part2part3part4";
+        assert_eq!(frame.payload(), expected.as_bytes());
+    }
+}

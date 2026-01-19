@@ -1,6 +1,122 @@
 //! Split read/write halves for WebSocket connections.
+//!
+//! # Sans-IO Design
+//!
+//! This module implements a **sans-io** (I/O-free) design pattern where the protocol logic
+//! is completely separated from the I/O operations. This design provides several benefits:
+//!
+//! ## Why Sans-IO?
+//!
+//! 1. **Testability**: Protocol logic can be tested without actual network I/O, making tests
+//!    faster, more reliable, and deterministic.
+//!
+//! 2. **Transport Agnostic**: The same protocol implementation works with any transport layer:
+//!    - TCP sockets
+//!    - Unix domain sockets
+//!    - In-memory buffers (for testing)
+//!    - Custom transports (QUIC, etc.)
+//!
+//! 3. **Flexibility**: Users can implement custom flow control, buffering strategies, and
+//!    error handling without being constrained by the protocol implementation.
+//!
+//! 4. **Performance**: Avoid unnecessary abstractions and allow for zero-copy optimizations
+//!    in user code.
+//!
+//! ## How It Works
+//!
+//! Instead of performing I/O directly, [`ReadHalf`] and [`WriteHalf`] operate on streams
+//! of frames:
+//!
+//! ```text
+//! ┌─────────────┐         ┌──────────────┐         ┌─────────────┐
+//! │   Network   │  Frames │  ReadHalf/   │  Frames │ Application │
+//! │   Socket    │────────>│  WriteHalf   │────────>│    Logic    │
+//! │   (I/O)     │<────────│  (Protocol)  │<────────│             │
+//! └─────────────┘         └──────────────┘         └─────────────┘
+//! ```
+//!
+//! The user provides frames to `ReadHalf`/`WriteHalf`, which handle:
+//! - Message fragmentation/reassembly
+//! - Compression/decompression
+//! - Protocol validation
+//!
+//! But NOT:
+//! - Reading from sockets
+//! - Writing to sockets
+//! - Connection management
+//!
+//! # Thread Safety Through `split()`
+//!
+//! WebSocket connections can be split into separate read and write halves for concurrent
+//! operation. This is achieved through the `split()` method on `WebSocket`:
+//!
+//! ## Using `futures::StreamExt::split()` (Recommended)
+//!
+//! ```no_run
+//! use futures::{StreamExt, SinkExt};
+//! use yawc::{WebSocket, Frame};
+//!
+//! # async fn example() -> yawc::Result<()> {
+//! let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+//!
+//! // Split into read and write halves
+//! let (mut write, mut read) = ws.split();
+//!
+//! // Spawn a task to read messages
+//! tokio::spawn(async move {
+//!     while let Some(frame) = read.next().await {
+//!         println!("Received: {:?}", frame.opcode());
+//!     }
+//! });
+//!
+//! // Write from the main task
+//! write.send(Frame::text("Hello!")).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Thread Safety Guarantees
+//!
+//! 1. **No Shared Mutable State**: Read and write halves operate independently with no
+//!    shared mutable state between them.
+//!
+//! 2. **Borrowing Rules**: Rust's ownership system ensures only one task can access each
+//!    half at a time, preventing data races at compile time.
+//!
+//! 3. **Send + Sync**: Both halves implement `Send`, allowing them to be moved across
+//!    thread boundaries safely.
+//!
+//! 4. **Protocol Correctness**: Each half maintains its own protocol state (fragmentation,
+//!    compression windows) ensuring WebSocket protocol correctness even with concurrent
+//!    read/write operations.
+//!
+//! ## Low-Level `split_stream()` (Advanced)
+//!
+//! For advanced use cases requiring direct access to the underlying stream and protocol
+//! handlers, use the unsafe `split_stream()` method:
+//!
+//! ```no_run
+//! # use yawc::WebSocket;
+//! # async fn example() -> yawc::Result<()> {
+//! let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+//!
+//! // SAFETY: User must ensure the stream is not used after splitting
+//! let (mut stream, mut read_half, mut write_half) = unsafe { ws.split_stream() };
+//!
+//! // Manual protocol handling required
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! **Warning**: This is unsafe because it requires manual protocol handling. Users must:
+//! - Correctly handle control frames (Ping, Pong, Close)
+//! - Maintain proper message ordering
+//! - Handle compression state correctly
+//!
+//! Prefer `futures::StreamExt::split()` unless you have specific low-level requirements.
 
 use std::{
+    future::poll_fn,
     task::{ready, Context, Poll},
     time::{Duration, Instant},
 };
@@ -284,6 +400,33 @@ impl ReadHalf {
 
         Poll::Ready(Err(WebSocketError::ConnectionClosed))
     }
+
+    /// Convenience method to read the next frame from the stream.
+    ///
+    /// This is a higher-level alternative to [`poll_frame`](Self::poll_frame) that handles
+    /// the polling loop for you.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::WebSocket;
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, mut read_half, _write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Read frames one by one
+    /// while let Ok(frame) = read_half.next_frame(&mut stream).await {
+    ///     println!("Received: {:?}", frame.opcode());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn next_frame<S>(&mut self, stream: &mut S) -> Result<Frame>
+    where
+        S: futures::Stream<Item = Result<Frame>> + Unpin,
+    {
+        poll_fn(|cx| self.poll_frame(stream, cx)).await
+    }
 }
 
 // ================ WriteHalf ====================
@@ -412,30 +555,27 @@ impl WriteHalf {
     /// - Non-control frames are compressed if compression is enabled
     /// - Client frames are masked per WebSocket protocol requirement
     /// - Close frames transition the connection to closing state
-    pub fn start_send<S>(&mut self, stream: &mut S, view: Frame) -> Result<()>
+    pub fn start_send<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
     where
         S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
     {
-        if view.opcode == OpCode::Close {
+        if frame.opcode == OpCode::Close {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        let maybe_frame = if !view.opcode.is_control() {
+        let final_frame = if !frame.opcode.is_control() {
             if let Some(deflate) = self.deflate.as_mut() {
                 // Compress the payload if compression is enabled
-                let output = deflate.compress(&view.payload)?;
-                Some(Frame::compress(true, view.opcode, None, output))
+                let output = deflate.compress(&frame.payload)?;
+                frame.into_compressed(output)
             } else {
-                None
+                frame
             }
         } else {
-            None
+            frame
         };
 
-        let frame =
-            maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
-
-        stream.start_send_unpin(frame)
+        stream.start_send_unpin(final_frame)
     }
 
     /// Polls to flush all pending frames in the `WriteHalf`.
@@ -513,5 +653,64 @@ impl WriteHalf {
                 Some(CloseState::Done) => break Poll::Ready(Ok(())),
             }
         }
+    }
+
+    /// Convenience method to send a frame to the stream.
+    ///
+    /// This is a higher-level alternative to the poll-based methods that handles
+    /// the polling loop for you. It ensures the sink is ready, sends the frame,
+    /// and flushes it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::{WebSocket, Frame};
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, _read_half, mut write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Send a frame
+    /// write_half.send_frame(&mut stream, Frame::text("Hello")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_frame<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
+    where
+        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+    {
+        // Wait until ready
+        poll_fn(|cx| self.poll_ready(stream, cx)).await?;
+
+        // Send the frame
+        self.start_send(stream, frame)?;
+
+        // Flush to ensure it's sent
+        poll_fn(|cx| self.poll_flush(stream, cx)).await?;
+
+        Ok(())
+    }
+
+    /// Convenience method to close the connection.
+    ///
+    /// This sends a close frame and waits for the connection to close gracefully.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::WebSocket;
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, _read_half, mut write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Close the connection
+    /// write_half.close(&mut stream).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn close<S>(&mut self, stream: &mut S) -> Result<()>
+    where
+        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+    {
+        poll_fn(|cx| self.poll_close(stream, cx)).await
     }
 }

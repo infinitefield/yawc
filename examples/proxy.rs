@@ -26,7 +26,7 @@ use hyper::{
     {Request, Response},
 };
 use tokio::net::TcpListener;
-use yawc::{CompressionLevel, Frame, HttpWebSocket, OpCode, TcpWebSocket, WebSocket};
+use yawc::{CompressionLevel, Frame, HttpWebSocket, OpCode, WebSocket};
 
 // Type alias for storing connected clients
 // Uses BTreeMap for ordered storage of client IDs -> WebSocket sinks
@@ -158,14 +158,11 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> yawc::Result<()> {
-    // Initialize logging
     simple_logger::init_with_level(log::Level::Debug).expect("log");
 
-    // Create shared clients state
     let clients = Arc::new(Mutex::new(BTreeMap::default()));
-
-    // Spawn client task and run server
     tokio::spawn(client(Arc::clone(&clients)));
+
     let _ = server(clients).await;
 
     Ok(())

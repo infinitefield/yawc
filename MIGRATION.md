@@ -60,7 +60,7 @@ let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 ws.send(Frame::text("Hello")).await?;
 
 while let Some(frame) = ws.next().await {
-    let (opcode, payload) = frame.into_parts();
+    let (opcode, _is_fin, payload) = frame.into_parts();
     match opcode {
         OpCode::Text => {
             let text = std::str::from_utf8(&payload)?;
@@ -77,7 +77,7 @@ while let Some(frame) = ws.next().await {
 - yawc uses `Frame` instead of `Message`
 - URL parsing is explicit in yawc (`.parse()?`)
 - yawc returns `Frame` directly (no `Result` wrapping each frame)
-- Use `frame.into_parts()` to get `(OpCode, Bytes)` or accessors like `frame.payload()`, `frame.as_str()`
+- Use `frame.into_parts()` to get `(OpCode, bool, Bytes)` or accessors like `frame.payload()`, `frame.as_str()`
 
 ## Basic Server Connection
 
@@ -183,7 +183,7 @@ match frame.opcode() {
 }
 
 // Handling frames - Option 2: Using into_parts() for ownership
-let (opcode, payload) = frame.into_parts();
+let (opcode, _is_fin, payload) = frame.into_parts();
 match opcode {
     OpCode::Text => {
         let text = std::str::from_utf8(&payload)?;

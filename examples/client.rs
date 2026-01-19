@@ -46,7 +46,7 @@ async fn main() {
                 }
 
                 let frame = frame.unwrap();
-                let (opcode, body) = frame.into_parts();
+                let (opcode, _is_fin, body) = frame.into_parts();
                 match opcode {
                     OpCode::Text => {
                         let text = std::str::from_utf8(&body).expect("utf8");
