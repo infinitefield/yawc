@@ -12,7 +12,8 @@ use tokio_rustls::TlsConnector;
 use url::Url;
 
 use super::{Options, WebSocket};
-use crate::Result;
+use crate::{stream::MaybeTlsStream, Result};
+use tokio::net::TcpStream;
 
 /// Type alias for HTTP requests used in WebSocket connection handling.
 ///
@@ -65,7 +66,7 @@ pub type HttpRequestBuilder = hyper::http::request::Builder;
 /// ```
 pub struct WebSocketBuilder {
     pub(super) opts: Option<WsBuilderOpts>,
-    pub(super) future: Option<BoxFuture<'static, Result<WebSocket>>>,
+    pub(super) future: Option<BoxFuture<'static, Result<WebSocket<MaybeTlsStream<TcpStream>>>>>,
 }
 
 /// Internal options structure for WebSocketBuilder.
@@ -195,7 +196,7 @@ impl WebSocketBuilder {
 }
 
 impl Future for WebSocketBuilder {
-    type Output = Result<WebSocket>;
+    type Output = Result<WebSocket<MaybeTlsStream<TcpStream>>>;
 
     /// Polls the future to establish the WebSocket connection.
     ///

@@ -26,11 +26,11 @@ use hyper::{
     {Request, Response},
 };
 use tokio::net::TcpListener;
-use yawc::{CompressionLevel, Frame, OpCode, WebSocket};
+use yawc::{CompressionLevel, Frame, HttpWebSocket, OpCode, TcpWebSocket, WebSocket};
 
 // Type alias for storing connected clients
 // Uses BTreeMap for ordered storage of client IDs -> WebSocket sinks
-type Clients = Mutex<BTreeMap<u64, SplitSink<WebSocket, Frame>>>;
+type Clients = Mutex<BTreeMap<u64, SplitSink<HttpWebSocket, Frame>>>;
 
 // Atomic counter for generating unique client IDs
 static CLIENT_ID: AtomicU64 = AtomicU64::new(0);
@@ -38,7 +38,7 @@ static CLIENT_ID: AtomicU64 = AtomicU64::new(0);
 // =============== server functions ================
 
 // Handles an individual WebSocket client connection
-async fn handle_client(clients: Arc<Clients>, ws: WebSocket) -> yawc::Result<()> {
+async fn handle_client(clients: Arc<Clients>, ws: HttpWebSocket) -> yawc::Result<()> {
     // Split WebSocket into sink (for sending) and stream (for receiving)
     let (sink, mut stream) = ws.split();
 

@@ -5,19 +5,19 @@ mod options;
 mod split;
 mod upgrade;
 
-use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
+use crate::{close, codec, compression, frame, Result, WebSocketError};
 
 use {
     bytes::Bytes,
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
-    stream::MaybeTlsStream,
     tokio::net::TcpStream,
     tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
 };
 
 use std::{
+    borrow::BorrowMut,
     collections::VecDeque,
     future::poll_fn,
     io,
@@ -35,15 +35,28 @@ use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
 use futures::task::AtomicWaker;
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, FramedParts};
 use url::Url;
 
 // Re-exports
+pub use crate::stream::MaybeTlsStream;
 pub use builder::{HttpRequest, HttpRequestBuilder, WebSocketBuilder};
 pub use frame::{Frame, OpCode};
 pub use options::{CompressionLevel, DeflateOptions, Options};
 pub use split::{ReadHalf, WriteHalf};
 pub use upgrade::UpgradeFut;
+
+/// Type alias for WebSocket connections established via `connect`.
+///
+/// This is the default WebSocket type returned by [`WebSocket::connect`],
+/// which handles both plain TCP and TLS connections over TCP streams.
+pub type TcpWebSocket = WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// Type alias for server-side WebSocket connections from HTTP upgrades or when using reqwest.
+///
+/// This is the WebSocket type returned by [`WebSocket::upgrade`] and [`UpgradeFut`],
+/// which wraps hyper's upgraded HTTP connections.
+pub type HttpWebSocket = WebSocket<HttpStream>;
 
 #[cfg(feature = "axum")]
 pub use upgrade::IncomingUpgrade;
@@ -347,8 +360,8 @@ impl AsyncWrite for HttpStream {
 ///     Ok(())
 /// }
 /// ```
-pub struct WebSocket {
-    stream: Framed<HttpStream, Codec>,
+pub struct WebSocket<S> {
+    stream: Framed<S, Codec>,
     read_half: ReadHalf,
     write_half: WriteHalf,
     wake_proxy: Arc<WakeProxy>,
@@ -357,9 +370,7 @@ pub struct WebSocket {
     check_utf8: bool,
 }
 
-impl WebSocket {
-    // ================== Client ====================
-
+impl WebSocket<MaybeTlsStream<TcpStream>> {
     /// Establishes a WebSocket connection to the specified `url`.
     ///
     /// This asynchronous function supports both `ws://` (non-secure) and `wss://` (secure) schemes.
@@ -390,7 +401,7 @@ impl WebSocket {
         connector: Option<TlsConnector>,
         options: Options,
         builder: HttpRequestBuilder,
-    ) -> Result<WebSocket> {
+    ) -> Result<TcpWebSocket> {
         let host = url.host().expect("hostname").to_string();
 
         let tcp_stream = if let Some(tcp_address) = tcp_address {
@@ -414,27 +425,125 @@ impl WebSocket {
             _ => return Err(WebSocketError::InvalidHttpScheme),
         };
 
-        Self::handshake_with_request(url, stream, options, builder).await
+        WebSocket::handshake_with_request(url, stream, options, builder).await
     }
+}
 
+impl<S> WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
     /// Performs a WebSocket handshake over an existing connection.
-    pub async fn handshake<S>(url: Url, io: S, options: Options) -> Result<WebSocket>
-    where
-        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
-    {
+    ///
+    /// This is a lower-level API that allows you to perform a WebSocket handshake
+    /// on an already established I/O stream (such as a TcpStream or TLS stream).
+    /// For most use cases, prefer using [`WebSocket::connect`] which handles both
+    /// connection establishment and handshake automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Perform the WebSocket handshake over the existing stream
+    ///     let ws = WebSocket::handshake(url, stream, Options::default()).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Use a custom connection method (e.g., SOCKS proxy, custom DNS resolution)
+    /// - Reuse an existing stream or connection
+    /// - Implement custom connection logic before the WebSocket handshake
+    ///
+    /// For adding custom headers to the handshake request, use
+    /// [`WebSocket::handshake_with_request`] instead.
+    pub async fn handshake(url: Url, io: S, options: Options) -> Result<WebSocket<S>> {
         Self::handshake_with_request(url, io, options, HttpRequest::builder()).await
     }
 
     /// Performs a WebSocket handshake with a customizable HTTP request.
-    pub async fn handshake_with_request<S>(
+    ///
+    /// This is similar to [`WebSocket::handshake`] but allows you to customize
+    /// the HTTP upgrade request by providing your own [`HttpRequestBuilder`].
+    /// This is useful when you need to add custom headers (e.g., authentication
+    /// tokens, API keys, or other metadata) to the handshake request.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    /// * `builder` - An HTTP request builder for customizing the handshake request
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options, HttpRequest};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Create a custom HTTP request with authentication headers
+    ///     let request = HttpRequest::builder()
+    ///         .header("Authorization", "Bearer my-secret-token")
+    ///         .header("X-Custom-Header", "custom-value");
+    ///
+    ///     // Perform the WebSocket handshake with custom headers
+    ///     let ws = WebSocket::handshake_with_request(
+    ///         url,
+    ///         stream,
+    ///         Options::default(),
+    ///         request
+    ///     ).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Add authentication headers to the handshake request
+    /// - Include custom metadata or API keys
+    /// - Control the exact HTTP request sent during the WebSocket upgrade
+    /// - Combine custom connection logic with custom headers
+    pub async fn handshake_with_request(
         url: Url,
         io: S,
         options: Options,
         mut builder: HttpRequestBuilder,
-    ) -> Result<WebSocket>
-    where
-        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
-    {
+    ) -> Result<WebSocket<S>> {
         if !builder
             .headers_ref()
             .expect("header")
@@ -484,15 +593,17 @@ impl WebSocket {
         let negotiated = verify(&response, options)?;
 
         let upgraded = hyper::upgrade::on(&mut response).await?;
-        let stream = TokioIo::new(upgraded);
+        let parts = upgraded.downcast::<TokioIo<S>>().unwrap();
 
-        Ok(WebSocket::new(
-            Role::Client,
-            HttpStream::from(stream),
-            negotiated,
-        ))
+        // Extract the original stream and any leftover read buffer
+        let stream = parts.io.into_inner();
+        let read_buf = parts.read_buf;
+
+        Ok(WebSocket::new(Role::Client, stream, read_buf, negotiated))
     }
+}
 
+impl WebSocket<HttpStream> {
     /// Performs a WebSocket handshake when using the `reqwest` HTTP client.
     #[cfg(feature = "reqwest")]
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
@@ -500,7 +611,7 @@ impl WebSocket {
         mut url: Url,
         client: reqwest::Client,
         options: Options,
-    ) -> Result<WebSocket> {
+    ) -> Result<WebSocket<HttpStream>> {
         let host = url.host().expect("hostname").to_string();
 
         let host_header = if let Some(port) = url.port() {
@@ -545,6 +656,7 @@ impl WebSocket {
         Ok(WebSocket::new(
             Role::Client,
             HttpStream::from(upgraded),
+            Bytes::new(),
             negotiated,
         ))
     }
@@ -552,13 +664,13 @@ impl WebSocket {
     // ================== Server ====================
 
     /// Upgrades an HTTP connection to a WebSocket one.
-    pub fn upgrade<B>(request: impl std::borrow::BorrowMut<Request<B>>) -> UpgradeResult {
+    pub fn upgrade<B>(request: impl BorrowMut<Request<B>>) -> UpgradeResult {
         Self::upgrade_with_options(request, Options::default())
     }
 
     /// Attempts to upgrade an incoming `hyper::Request` to a WebSocket connection with customizable options.
     pub fn upgrade_with_options<B>(
-        mut request: impl std::borrow::BorrowMut<Request<B>>,
+        mut request: impl BorrowMut<Request<B>>,
         options: Options,
     ) -> UpgradeResult {
         let request = request.borrow_mut();
@@ -636,14 +748,19 @@ impl WebSocket {
 
         Ok((response, stream))
     }
+}
 
-    // ======== common websocket functions =============
+// ======== Generic WebSocket implementation =============
 
+impl<S> WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     /// Splits the [`WebSocket`] into its low-level components for advanced usage.
     ///
     /// # Safety
     /// This function is unsafe because it splits ownership of shared state.
-    pub unsafe fn split_stream(self) -> (Framed<HttpStream, Codec>, ReadHalf, WriteHalf) {
+    pub unsafe fn split_stream(self) -> (Framed<S, Codec>, ReadHalf, WriteHalf) {
         (self.stream, self.read_half, self.write_half)
     }
 
@@ -734,14 +851,20 @@ impl WebSocket {
         Ok(())
     }
 
-    /// Creates a new connection after an HTTP upgrade.
-    pub(crate) fn new(role: Role, stream: HttpStream, opts: Negotiation) -> Self {
+    /// Creates a new WebSocket from an existing stream.
+    ///
+    /// The `read_buf` parameter should contain any bytes that were read from the stream
+    /// during the HTTP upgrade but weren't consumed (leftover data after the HTTP response).
+    pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, opts: Negotiation) -> Self {
         let decoder = codec::Decoder::new(role, opts.max_payload_read);
         let encoder = codec::Encoder::new(role);
         let codec = Codec::from((decoder, encoder));
 
+        let mut parts = FramedParts::new(stream, codec);
+        parts.read_buf = read_buf.into();
+
         Self {
-            stream: Framed::new(stream, codec),
+            stream: Framed::from_parts(parts),
             read_half: ReadHalf::new(role, &opts),
             write_half: WriteHalf::new(role, &opts),
             wake_proxy: Arc::new(WakeProxy::default()),
@@ -827,7 +950,10 @@ impl WebSocket {
     }
 }
 
-impl futures::Stream for WebSocket {
+impl<S> futures::Stream for WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     type Item = Frame;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -839,7 +965,10 @@ impl futures::Stream for WebSocket {
     }
 }
 
-impl futures::Sink<Frame> for WebSocket {
+impl<S> futures::Sink<Frame> for WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     type Error = WebSocketError;
 
     fn poll_ready(
