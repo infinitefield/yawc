@@ -10,8 +10,8 @@ OPENSSL_FLAGS=-L/opt/homebrew/opt/openssl@3/lib -I/opt/homebrew/opt/openssl@3/in
 
 # Default target - build load_test only
 default: setup
-	clang -flto -O3 -DLIBUS_USE_OPENSSL $(OPENSSL_FLAGS) -I$(PATH_TO_USOCKETS)/src load_test.c -c
-	clang++ -flto -O3 -DLIBUS_USE_OPENSSL $(OPENSSL_FLAGS) load_test.o $(PATH_TO_USOCKETS)/*.o -lssl -lcrypto -o load_test
+	clang -O3 -DLIBUS_USE_OPENSSL $(OPENSSL_FLAGS) -I$(PATH_TO_USOCKETS)/src load_test.c -c
+	clang++ -O3 -DLIBUS_USE_OPENSSL $(OPENSSL_FLAGS) load_test.o $(PATH_TO_USOCKETS)/*.o -lssl -lcrypto -o load_test
 
 # Setup target - downloads and builds uSockets for load_test
 setup:
