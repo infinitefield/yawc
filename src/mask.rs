@@ -1,9 +1,15 @@
-// all this methods have been copied from tungstenite
+// Optimized masking implementation
 
 /// Mask/unmask a frame.
 #[inline]
 pub fn apply_mask(buf: &mut [u8], mask: [u8; 4]) {
-    apply_mask_fast32(buf, mask);
+    // For small buffers, use the fast32 path
+    // For larger buffers (>128 bytes), the 64-bit path is faster
+    if buf.len() <= 128 {
+        apply_mask_fast32(buf, mask);
+    } else {
+        apply_mask_fast64(buf, mask);
+    }
 }
 
 /// A safe unoptimized mask application.
@@ -15,6 +21,7 @@ fn apply_mask_fallback(buf: &mut [u8], mask: [u8; 4]) {
 }
 
 /// Faster version of `apply_mask()` which operates on 4-byte blocks.
+#[doc(hidden)]
 #[inline]
 pub fn apply_mask_fast32(buf: &mut [u8], mask: [u8; 4]) {
     let mask_u32 = u32::from_ne_bytes(mask);
@@ -35,6 +42,35 @@ pub fn apply_mask_fast32(buf: &mut [u8], mask: [u8; 4]) {
         *word ^= mask_u32;
     }
     apply_mask_fallback(suffix, mask_u32.to_ne_bytes());
+}
+
+/// Even faster version using 64-bit blocks for larger buffers.
+#[doc(hidden)]
+#[inline]
+pub fn apply_mask_fast64(buf: &mut [u8], mask: [u8; 4]) {
+    // Create 64-bit mask by repeating the 32-bit mask
+    let mask_u32 = u32::from_ne_bytes(mask);
+    let mask_u64 = ((mask_u32 as u64) << 32) | (mask_u32 as u64);
+
+    let (prefix, words, suffix) = unsafe { buf.align_to_mut::<u64>() };
+    apply_mask_fallback(prefix, mask);
+
+    let head = prefix.len() & 3;
+    let mask_u64 = if head > 0 {
+        if cfg!(target_endian = "big") {
+            mask_u64.rotate_left(8 * head as u32)
+        } else {
+            mask_u64.rotate_right(8 * head as u32)
+        }
+    } else {
+        mask_u64
+    };
+
+    for word in words.iter_mut() {
+        *word ^= mask_u64;
+    }
+
+    apply_mask_fallback(suffix, mask_u64.to_ne_bytes()[..4].try_into().unwrap());
 }
 
 #[cfg(test)]
@@ -60,10 +96,14 @@ mod tests {
                 let mut masked = unmasked.to_vec();
                 apply_mask_fallback(&mut masked[off..], mask);
 
-                let mut masked_fast = unmasked.to_vec();
-                apply_mask_fast32(&mut masked_fast[off..], mask);
+                let mut masked_fast32 = unmasked.to_vec();
+                apply_mask_fast32(&mut masked_fast32[off..], mask);
 
-                assert_eq!(masked, masked_fast);
+                let mut masked_fast64 = unmasked.to_vec();
+                apply_mask_fast64(&mut masked_fast64[off..], mask);
+
+                assert_eq!(masked, masked_fast32);
+                assert_eq!(masked, masked_fast64);
             }
         }
     }
@@ -203,18 +243,27 @@ mod tests {
         ];
 
         for mask in masks {
-            for size in 0..=100 {
+            for size in 0..=200 {
                 let data: Vec<u8> = (0..size).map(|i| (i * 7) as u8).collect();
 
                 let mut fallback_result = data.clone();
                 apply_mask_fallback(&mut fallback_result, mask);
 
-                let mut fast_result = data.clone();
-                apply_mask_fast32(&mut fast_result, mask);
+                let mut fast32_result = data.clone();
+                apply_mask_fast32(&mut fast32_result, mask);
+
+                let mut fast64_result = data.clone();
+                apply_mask_fast64(&mut fast64_result, mask);
 
                 assert_eq!(
-                    fallback_result, fast_result,
-                    "Mismatch for mask {:?} with size {}",
+                    fallback_result, fast32_result,
+                    "fast32 mismatch for mask {:?} with size {}",
+                    mask, size
+                );
+
+                assert_eq!(
+                    fallback_result, fast64_result,
+                    "fast64 mismatch for mask {:?} with size {}",
                     mask, size
                 );
             }

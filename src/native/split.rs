@@ -118,10 +118,8 @@
 use std::{
     future::poll_fn,
     task::{ready, Context, Poll},
-    time::{Duration, Instant},
 };
 
-use bytes::BytesMut;
 use futures::SinkExt;
 
 use crate::{
@@ -181,28 +179,9 @@ use super::{Negotiation, Role};
 /// ```
 pub struct ReadHalf {
     /// Optional decompressor used to decompress incoming payloads.
-    inflate: Option<Decompressor>,
-    /// Structure for handling fragmented message frames.
-    fragment: Option<Fragment>,
-    /// Accumulated data from fragmented frames.
-    accumulated: BytesMut,
-    /// Maximum size of the read buffer
-    ///
-    /// When accumulating fragmented messages, once the read buffer exceeds this size
-    /// it will be reset back to its initial capacity of 1 KiB. This helps prevent
-    /// unbounded memory growth from receiving very large fragmented messages.
-    max_read_buffer: usize,
-    /// Maximum time allowed to receive all fragments of a fragmented message.
-    fragment_timeout: Option<Duration>,
+    pub(super) inflate: Option<Decompressor>,
     /// Indicates if the connection has been closed.
     pub(super) is_closed: bool,
-}
-
-/// Fragmented message header.
-struct Fragment {
-    started: Instant,
-    opcode: OpCode,
-    is_compressed: bool,
 }
 
 impl ReadHalf {
@@ -210,10 +189,6 @@ impl ReadHalf {
         let inflate = opts.decompressor(role);
         Self {
             inflate,
-            max_read_buffer: opts.max_read_buffer,
-            fragment_timeout: opts.fragment_timeout,
-            fragment: None,
-            accumulated: BytesMut::with_capacity(1024),
             is_closed: false,
         }
     }
@@ -246,104 +221,28 @@ impl ReadHalf {
     /// - `Ok(None)` if the frame is part of a fragmented message and not yet complete.
     /// - `Err(WebSocketError)` if an error occurs, such as invalid fragment or unsupported compression.
     fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
+        // Check compression support
         if frame.is_compressed && self.inflate.is_none() {
             return Err(WebSocketError::CompressionNotSupported);
         }
 
-        match frame.opcode {
-            OpCode::Text | OpCode::Binary => {
-                if self.fragment.is_some() {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                if !frame.fin {
-                    self.fragment = Some(Fragment {
-                        started: Instant::now(),
-                        opcode: frame.opcode,
-                        is_compressed: frame.is_compressed,
-                    });
-
-                    self.accumulated.extend_from_slice(&frame.payload);
-
-                    Ok(None)
-                } else if frame.is_compressed {
-                    let inflate = self.inflate.as_mut().unwrap();
-                    let payload = inflate.decompress(&frame.payload, frame.fin)?;
-                    if let Some(payload) = payload {
-                        frame.is_compressed = false;
-                        frame.payload = payload.freeze();
-                        frame.mask = None;
-                        Ok(Some(frame))
-                    } else {
-                        Err(WebSocketError::InvalidFragment)
-                    }
-                } else {
-                    frame.mask = None;
-                    Ok(Some(frame))
-                }
-            }
-            OpCode::Continuation => {
-                if self.accumulated.len() + frame.payload.len() >= self.max_read_buffer {
-                    return Err(WebSocketError::FrameTooLarge);
-                }
-
-                self.accumulated.extend_from_slice(&frame.payload);
-
-                let fragment = self
-                    .fragment
-                    .as_ref()
-                    .ok_or(WebSocketError::InvalidFragment)?;
-
-                if frame.fin {
-                    // gather all accumulated buffer and replace it with a new one to avoid
-                    // too many allocations or a potential DoS.
-                    let payload =
-                        std::mem::replace(&mut self.accumulated, BytesMut::with_capacity(1024));
-                    if fragment.is_compressed {
-                        let inflate = self.inflate.as_mut().unwrap();
-                        let output = inflate
-                            .decompress(&payload, frame.fin)?
-                            .expect("decompress output");
-
-                        frame.opcode = fragment.opcode;
-                        frame.is_compressed = false;
-                        frame.payload = output.freeze();
-                        frame.mask = None;
-
-                        self.fragment = None;
-
-                        Ok(Some(frame))
-                    } else {
-                        frame.opcode = fragment.opcode;
-                        frame.payload = payload.freeze();
-                        frame.mask = None;
-
-                        self.fragment = None;
-
-                        Ok(Some(frame))
-                    }
-                } else if self
-                    .fragment_timeout
-                    .is_some_and(|timeout| fragment.started.elapsed() > timeout)
-                {
-                    Err(WebSocketError::FragmentTimeout)
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => {
-                // Control frames cannot be fragmented
-                if !frame.fin {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                frame.mask = None;
-
-                self.is_closed = frame.opcode == OpCode::Close;
-
-                Ok(Some(frame))
+        // Handle decompression if needed
+        if frame.is_compressed {
+            let inflate = self.inflate.as_mut().unwrap();
+            let payload = inflate.decompress(&frame.payload, frame.fin)?;
+            if let Some(payload) = payload {
+                frame.is_compressed = false;
+                frame.payload = payload.freeze();
+            } else {
+                return Err(WebSocketError::InvalidFragment);
             }
         }
+
+        // Remove mask and mark if closed
+        frame.mask = None;
+        self.is_closed = frame.opcode == OpCode::Close;
+
+        Ok(Some(frame))
     }
 
     /// Polls the WebSocket stream for the next frame, managing frame processing and protocol compliance.

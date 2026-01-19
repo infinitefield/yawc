@@ -66,7 +66,8 @@ pub mod close;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod codec;
 pub mod frame;
-mod mask;
+#[doc(hidden)]
+pub mod mask;
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
 

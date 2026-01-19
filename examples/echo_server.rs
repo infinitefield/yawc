@@ -36,14 +36,14 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
     let (response, fut) = WebSocket::upgrade_with_options(
         &mut req,
         Options::default()
-            .with_utf8()
+            // .with_utf8()
             .with_max_payload_read(100 * 1024 * 1024)
             .with_max_read_buffer(200 * 1024 * 1024)
             .with_compression_level(CompressionLevel::none()),
     )?;
 
     tokio::task::spawn(async move {
-        if let Err(e) = handle_client(fut).await {
+        if let Err(e) = tokio::task::unconstrained(handle_client(fut)).await {
             log::error!("Error in websocket connection: {e}");
         }
     });

@@ -16,7 +16,6 @@
 use futures::SinkExt;
 use std::fs::File;
 use std::io::Write;
-use tokio_stream::StreamExt;
 use yawc::{Frame, OpCode, WebSocket};
 
 #[tokio::main]
@@ -35,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     log::info!("Connected to streaming server");
 
     // SAFETY: We're taking ownership of the stream and will handle all protocol details manually
-    let (mut stream, _read_half, _write_half) = unsafe { ws.split_stream() };
+    let (mut stream, mut read_half, mut write_half) = unsafe { ws.split_stream() };
 
     // Open file for writing
     let mut file = File::create("received_stream.txt")?;
@@ -49,13 +48,10 @@ async fn main() -> anyhow::Result<()> {
     // Process fragments as they arrive
     loop {
         // Use the convenience method instead of manual polling
-        let frame = match stream.next().await {
-            Some(Ok(frame)) => frame,
-            Some(Err(err)) => {
+        let frame = match read_half.next_frame(&mut stream).await {
+            Ok(frame) => frame,
+            Err(err) => {
                 log::error!("Error reading frame: {}", err);
-                break;
-            }
-            None => {
                 break;
             }
         };
@@ -103,7 +99,9 @@ async fn main() -> anyhow::Result<()> {
             }
             OpCode::Ping => {
                 // Manually handle ping by sending pong
-                stream.send(Frame::pong(payload)).await?;
+                write_half
+                    .send_frame(&mut stream, Frame::pong(payload))
+                    .await?;
             }
             OpCode::Pong => {
                 // Ignore pong frames
@@ -119,8 +117,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Send close frame
-    stream
-        .send(Frame::close(yawc::close::CloseCode::Normal, b"Done"))
+    write_half
+        .send_frame(
+            &mut stream,
+            Frame::close(yawc::close::CloseCode::Normal, b"Done"),
+        )
         .await?;
 
     server_handle.abort();
