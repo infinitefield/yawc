@@ -245,6 +245,7 @@ impl codec::Decoder for Decoder {
                     let payload_len = header_and_mask.payload_len;
 
                     if self.role == Role::Server {
+                        // All user frames must contain the mask
                         let Some(mask) = mask else {
                             return Err(WebSocketError::InvalidFragment);
                         };
@@ -308,8 +309,7 @@ impl codec::Encoder<Frame> for Encoder {
         let index = dst.len();
         dst.extend_from_slice(&frame.payload);
 
-        if self.role == Role::Client {
-            let mask = frame.mask.unwrap();
+        if let Some(mask) = frame.mask {
             crate::mask::apply_mask(&mut dst[index..], mask);
         }
 

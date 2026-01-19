@@ -28,8 +28,6 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
         }
     }
 
-    log::debug!("Client disconnected");
-
     Ok(())
 }
 
@@ -64,7 +62,6 @@ async fn main() -> yawc::Result<()> {
 
     loop {
         let (stream, _) = listener.accept().await?;
-        log::info!("Client connected");
 
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);

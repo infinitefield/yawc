@@ -225,6 +225,8 @@ impl ReadHalf {
     /// decompression if needed. If an uncompressed frame is received but compression is required, an error
     /// is returned.
     ///
+    /// This function also removes the mask from every message to avoid forwarding in case the user is echoing the frame.
+    ///
     /// - For `OpCode::Text` and `OpCode::Binary` frames:
     ///     - If the frame is final (`fin` flag set), it processes the frame as a complete message.
     ///     - If the frame is part of a fragmented message (`fin` flag not set), it starts accumulating
@@ -270,11 +272,13 @@ impl ReadHalf {
                     if let Some(payload) = payload {
                         frame.is_compressed = false;
                         frame.payload = payload.freeze();
+                        frame.mask = None;
                         Ok(Some(frame))
                     } else {
                         Err(WebSocketError::InvalidFragment)
                     }
                 } else {
+                    frame.mask = None;
                     Ok(Some(frame))
                 }
             }
@@ -304,6 +308,7 @@ impl ReadHalf {
                         frame.opcode = fragment.opcode;
                         frame.is_compressed = false;
                         frame.payload = output.freeze();
+                        frame.mask = None;
 
                         self.fragment = None;
 
@@ -311,6 +316,7 @@ impl ReadHalf {
                     } else {
                         frame.opcode = fragment.opcode;
                         frame.payload = payload.freeze();
+                        frame.mask = None;
 
                         self.fragment = None;
 
@@ -330,6 +336,8 @@ impl ReadHalf {
                 if !frame.fin {
                     return Err(WebSocketError::InvalidFragment);
                 }
+
+                frame.mask = None;
 
                 self.is_closed = frame.opcode == OpCode::Close;
 
