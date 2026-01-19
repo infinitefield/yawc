@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use yawc::{close::CloseCode, frame::OpCode, CompressionLevel, FrameView, Options, WebSocket};
@@ -10,6 +12,7 @@ async fn connect(path: &str) -> Result<WebSocket> {
                 .with_utf8()
                 .with_max_payload_read(100 * 1024 * 1024)
                 .with_max_read_buffer(200 * 1024 * 1024)
+                .with_max_payload_write(8192)
                 .client_no_context_takeover()
                 .server_no_context_takeover(),
         )
@@ -31,6 +34,7 @@ async fn main() -> Result<()> {
 
     let count = get_case_count().await?;
 
+    let now = Instant::now();
     log::debug!("Running {count} cases");
 
     for case in 1..=count {
@@ -60,6 +64,8 @@ async fn main() -> Result<()> {
 
     let mut ws = connect("updateReports?agent=yawc").await?;
     ws.close().await?;
+
+    log::info!("Finished in {:?}", now.elapsed());
 
     Ok(())
 }

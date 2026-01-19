@@ -7,7 +7,6 @@ const AUTOBAHN_TESTSUITE_DOCKER =
   "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
 
 const CONTAINER_NAME = "fuzzingserver";
-const CLIENT_EXE = "target/release/examples/autobahn_client";
 
 async function containerExists(name) {
   const result = await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
@@ -18,16 +17,6 @@ async function containerRunning(name) {
   const result = await $`docker ps --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
   return result.stdout.trim().length > 0;
 }
-
-async function ensureClientBuilt() {
-  try {
-    await Deno.stat(CLIENT_EXE);
-  } catch {
-    console.log("autobahn_client not found, building...");
-    await $`cargo build --release --example autobahn_client`;
-  }
-}
-
 
 // Start
 if (await containerExists(CONTAINER_NAME)) {
@@ -50,8 +39,7 @@ if (await containerExists(CONTAINER_NAME)) {
    await sleep(30);
 }
 
-await ensureClientBuilt();
-await $`${CLIENT_EXE}`.env("RUST_BACKTRACE", "full");
+await $`cargo run --release --example autobahn_client`.env("RUST_BACKTRACE", "full");
 
 const { yawc } = JSON.parse(
   Deno.readTextFileSync("./autobahn/reports/client/index.json"),

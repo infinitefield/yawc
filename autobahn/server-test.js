@@ -6,7 +6,6 @@ const AUTOBAHN_TESTSUITE_DOCKER =
 
 const pwd = new URL(".", import.meta.url).pathname;
 const CONTAINER_NAME = "fuzzingclient";
-const ECHO_SERVER_EXE = "target/release/examples/echo_server";
 
 const isMac = Deno.build.os === "darwin";
 const dockerHost = isMac ? "host.docker.internal" : "localhost";
@@ -22,15 +21,6 @@ async function containerRunning(name) {
   return r.stdout.trim().length > 0;
 }
 
-async function ensureEchoServerBuilt() {
-  try {
-    await Deno.stat(ECHO_SERVER_EXE);
-  } catch {
-    console.log("echo_server not found, building...");
-    await $`cargo build --release --example echo_server`;
-  }
-}
-
 // Start
 
 const configPath = `${pwd}/fuzzingclient.json`;
@@ -38,14 +28,17 @@ const config = JSON.parse(Deno.readTextFileSync(configPath));
 config.servers[0].url = `ws://${dockerHost}:9002`;
 Deno.writeTextFileSync(configPath, JSON.stringify(config, null, 2));
 
-await ensureEchoServerBuilt();
+
+console.log("Building echo_server");
+await $`cargo build --release --example echo_server`;
 
 const controller = new AbortController();
-const server = new Deno.Command(ECHO_SERVER_EXE, {
+const server = new Deno.Command("target/release/examples/echo_server", {
   signal: controller.signal,
 }).spawn();
 
 // Give server time to start
+console.log("Waiting 5s for echo_server to start...")
 await sleep(5);
 
 if (await containerExists(CONTAINER_NAME)) {

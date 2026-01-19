@@ -2681,22 +2681,46 @@ impl WriteHalf {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        let maybe_frame = if !view.opcode.is_control() {
-            if let Some(deflate) = self.deflate.as_mut() {
+        // Control messages have no compression and can't be fragmented
+        if view.opcode.is_control() {
+            let frame = Frame::new(true, view.opcode, None, view.payload);
+            return stream.start_send_unpin(frame);
+        }
+
+        // Check if we need to chunk the payload in fragments
+        if view.payload.len() <= self.max_payload_write {
+            let maybe_frame = if let Some(deflate) = self.deflate.as_mut() {
                 // Compress the payload if compression is enabled
                 let output = deflate.compress(&view.payload)?;
                 Some(Frame::compress(true, view.opcode, None, output))
             } else {
                 None
-            }
+            };
+
+            let frame =
+                maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
+
+            stream.start_send_unpin(frame)
         } else {
-            None
-        };
+            let compressed;
+            let maybe_compressed_payload = if let Some(deflate) = self.deflate.as_mut() {
+                compressed = true;
+                // Compress the payload if compression is enabled
+                Some(deflate.compress(&view.payload)?.freeze())
+            } else {
+                compressed = false;
+                None
+            };
 
-        let frame =
-            maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
+            let payload = maybe_compressed_payload.unwrap_or(view.payload);
 
-        stream.start_send_unpin(frame)
+            for frame in Fragments::new(payload, self.max_payload_write, view.opcode, compressed) {
+                // If sending fails, stop immediately and propagate the error
+                stream.start_send_unpin(frame)?;
+            }
+
+            Ok(())
+        }
     }
 
     /// Polls to flush all pending frames in the `WriteHalf`.
@@ -2774,6 +2798,54 @@ impl WriteHalf {
                 Some(CloseState::Done) => break Poll::Ready(Ok(())),
             }
         }
+    }
+}
+
+struct Fragments {
+    payload: Bytes,
+    max_payload: usize,
+    opcode: OpCode,
+    compressed: bool,
+}
+
+impl Fragments {
+    fn new(payload: Bytes, max_payload: usize, opcode: OpCode, compressed: bool) -> Self {
+        Self {
+            payload,
+            max_payload,
+            opcode,
+            compressed,
+        }
+    }
+}
+
+impl Iterator for Fragments {
+    type Item = Frame;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.payload.is_empty() {
+            return None;
+        }
+
+        let chunk = if self.payload.len() > self.max_payload {
+            self.payload.split_to(self.max_payload)
+        } else {
+            self.payload.split_off(0)
+        };
+
+        let fin = self.payload.is_empty();
+
+        let mut frame = Frame::new(fin, self.opcode, None, chunk);
+        frame.is_compressed = self.compressed;
+
+        // Modify state for subsequent calls to next. The rest of the frames need to be
+        // continuation frames, and the compressed flag needs to be false (only the first frame in
+        // a compressed fragmented message needs to have the compressed flag set). This way we
+        // also avoid branches and extra state to see if this is the first frame being produced
+        self.opcode = OpCode::Continuation;
+        self.compressed = false;
+
+        Some(frame)
     }
 }
 
