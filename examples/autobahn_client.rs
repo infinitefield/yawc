@@ -12,6 +12,7 @@ async fn connect(path: &str) -> Result<TcpWebSocket> {
                 .with_utf8()
                 .with_max_payload_read(100 * 1024 * 1024)
                 .with_max_read_buffer(200 * 1024 * 1024)
+                .with_max_payload_write(1024)
                 .client_no_context_takeover()
                 .server_no_context_takeover(),
         )

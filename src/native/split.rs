@@ -538,7 +538,7 @@ impl WriteHalf {
     ///
     /// # Parameters
     /// - `stream`: The WebSocket sink that will transmit the frame
-    /// - `view`: A Frame containing the frame payload and metadata
+    /// - `frame`: A Frame containing the frame payload and metadata
     ///
     /// # Returns
     /// - `Ok(())` if the frame was successfully prepared and queued

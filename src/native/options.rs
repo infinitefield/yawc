@@ -24,6 +24,14 @@ pub struct Options {
     /// Default: 1 MiB (1,048,576 bytes) as defined in [`super::MAX_PAYLOAD_READ`]
     pub max_payload_read: Option<usize>,
 
+    /// Maximum allowed payload size for outgoing messages, in bytes.
+    ///
+    /// If a message exceeds this size, the message will be split into different chunks of at
+    /// least `max_payload_write` size.
+    ///
+    /// Default: 1 MiB (1,048,576 bytes) as defined in [`MAX_PAYLOAD_WRITE`]
+    pub max_payload_write: Option<usize>,
+
     /// Maximum size allowed for the buffer that accumulates fragmented messages.
     ///
     /// WebSocket messages can be split into multiple fragments for transmission. These fragments
@@ -224,6 +232,25 @@ impl Options {
     pub fn with_max_payload_read(self, size: usize) -> Self {
         Self {
             max_payload_read: Some(size),
+            ..self
+        }
+    }
+
+    /// Sets the maximum allowed payload size for outgoing messages by enabling fragmentation.
+    ///
+    /// Specifies the maximum size of messages that the WebSocket connection will send in a single
+    /// message.
+    /// If an outgoing message exceeds this size, the connection will split the message in chunks
+    /// of `max_payload_write` size.
+    ///
+    /// # Parameters
+    /// - `size`: The maximum payload size in bytes per message.
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified payload size limit.
+    pub fn with_max_payload_write(self, size: usize) -> Self {
+        Self {
+            max_payload_write: Some(size),
             ..self
         }
     }

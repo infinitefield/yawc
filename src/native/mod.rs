@@ -161,6 +161,7 @@ pub(crate) struct Negotiation {
     pub(crate) extensions: Option<WebSocketExtensions>,
     pub(crate) compression_level: Option<CompressionLevel>,
     pub(crate) max_payload_read: usize,
+    pub(crate) max_payload_write: Option<usize>,
     pub(crate) max_read_buffer: usize,
     pub(crate) utf8: bool,
     pub(crate) fragment_timeout: Option<Duration>,
@@ -864,6 +865,7 @@ impl WebSocket<HttpStream> {
                     .as_ref()
                     .map(|compression| compression.level),
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+                max_payload_write: options.max_payload_write,
                 max_read_buffer,
                 utf8: options.check_utf8,
                 fragment_timeout: options.fragment_timeout,
@@ -981,7 +983,7 @@ where
     /// during the HTTP upgrade but weren't consumed (leftover data after the HTTP response).
     pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, opts: Negotiation) -> Self {
         let decoder = codec::Decoder::new(role, opts.max_payload_read);
-        let encoder = codec::Encoder::new(role);
+        let encoder = codec::Encoder::new(role, opts.max_payload_write);
         let codec = Codec::from((decoder, encoder));
 
         let mut parts = FramedParts::new(stream, codec);
@@ -1223,6 +1225,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         extensions,
         compression_level,
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+        max_payload_write: options.max_payload_write,
         max_read_buffer,
         utf8: options.check_utf8,
         fragment_timeout: options.fragment_timeout,
@@ -1274,6 +1277,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         extensions,
         compression_level,
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+        max_payload_write: options.max_payload_write,
         max_read_buffer,
         utf8: options.check_utf8,
         fragment_timeout: options.fragment_timeout,
@@ -1383,6 +1387,7 @@ mod tests {
             extensions: None,
             compression_level: None,
             max_payload_read: MAX_PAYLOAD_READ,
+            max_payload_write: None,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
             fragment_timeout: None,

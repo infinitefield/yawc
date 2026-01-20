@@ -41,7 +41,7 @@
 //! [`ReadHalf`](crate::native::split::ReadHalf) layer, and decompression happens at the
 //! [`WebSocket`](crate::WebSocket) layer.
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec;
 
 use crate::{
@@ -310,15 +310,45 @@ impl codec::Decoder for Decoder {
 /// it for transmission over the network. The encoder is responsible for serializing
 /// headers and appending payloads in the correct format.
 ///
+/// If a fragmentation threshold is set, it will automatically fragment frames into chunks of
+/// the appropiate size
+///
 /// # Errors
 /// Returns `WebSocketError` if any issues arise during encoding.
 pub struct Encoder {
     role: Role,
+    fragmentation_threshold: Option<usize>,
 }
 
 impl Encoder {
-    pub fn new(role: Role) -> Self {
-        Self { role }
+    pub fn new(role: Role, fragmentation_threshold: Option<usize>) -> Self {
+        Self {
+            role,
+            fragmentation_threshold,
+        }
+    }
+
+    fn serialize_frame(&self, mut frame: Frame, dst: &mut BytesMut) {
+        if self.role == Role::Client {
+            // ensure the mask is set
+            frame.set_random_mask_if_not_set();
+        }
+        frame.write_head(dst);
+
+        let index = dst.len();
+        dst.extend_from_slice(&frame.payload);
+
+        if let Some(mask) = frame.mask {
+            crate::mask::apply_mask(&mut dst[index..], mask);
+        }
+    }
+
+    fn should_fragment_frame(&self, frame: &Frame) -> bool {
+        !(self.fragmentation_threshold.is_none()
+            || frame.opcode.is_control()
+            || frame.payload.is_empty()
+            || !frame.is_fin()
+            || frame.opcode == OpCode::Continuation)
     }
 }
 
@@ -329,6 +359,9 @@ impl codec::Encoder<Frame> for Encoder {
     ///
     /// This method formats the frame's header and appends the payload to the destination buffer.
     ///
+    /// If a fragmentation threshold is set, it will automatically fragment frames into chunks of
+    /// the appropiate size
+    ///
     /// # Parameters
     /// - `frame`: The `Frame` to be encoded.
     /// - `dst`: A mutable reference to a `BytesMut` buffer where the encoded frame will be written.
@@ -336,26 +369,78 @@ impl codec::Encoder<Frame> for Encoder {
     /// # Returns
     /// - `Ok(())` if encoding is successful.
     /// - `Err(WebSocketError)` if encoding fails.
-    #[inline(always)]
-    fn encode(&mut self, mut frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        if self.role == Role::Client {
-            // ensure the mask is set
-            frame.set_random_mask_if_not_set();
-        }
-
-        // Calculate exact header size for optimal reservation
+    fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let payload_len = frame.payload.len();
-        dst.reserve(MAX_HEAD_SIZE + payload_len);
+        if self.should_fragment_frame(&frame) {
+            let fragments = Fragments::new(
+                frame.payload,
+                // we check before if it's `None`, so we can't panic
+                self.fragmentation_threshold.unwrap(),
+                frame.opcode,
+                frame.is_compressed,
+            );
+            dst.reserve(MAX_HEAD_SIZE * fragments.len() + payload_len);
 
-        frame.write_head(dst);
+            for frame in fragments {
+                self.serialize_frame(frame, dst);
+            }
+        } else {
+            dst.reserve(MAX_HEAD_SIZE + payload_len);
+            self.serialize_frame(frame, dst);
+        }
+        Ok(())
+    }
+}
 
-        let index = dst.len();
-        dst.extend_from_slice(&frame.payload);
+struct Fragments {
+    payload: Bytes,
+    max_payload: usize,
+    opcode: OpCode,
+    compressed: bool,
+}
 
-        if let Some(mask) = frame.mask {
-            crate::mask::apply_mask(&mut dst[index..], mask);
+impl Fragments {
+    fn new(payload: Bytes, max_payload: usize, opcode: OpCode, compressed: bool) -> Self {
+        debug_assert!(!payload.is_empty());
+        Self {
+            payload,
+            max_payload,
+            opcode,
+            compressed,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.payload.len().div_ceil(self.max_payload)
+    }
+}
+
+impl Iterator for Fragments {
+    type Item = Frame;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.payload.is_empty() {
+            return None;
         }
 
-        Ok(())
+        let chunk = if self.payload.len() > self.max_payload {
+            self.payload.split_to(self.max_payload)
+        } else {
+            self.payload.split_off(0)
+        };
+
+        let fin = self.payload.is_empty();
+
+        let mut frame = Frame::new(fin, self.opcode, None, chunk);
+        frame.is_compressed = self.compressed;
+
+        // Modify state for subsequent calls to next. The rest of the frames need to be
+        // continuation frames, and the compressed flag needs to be false (only the first frame in
+        // a compressed fragmented message needs to have the compressed flag set). This way we
+        // also avoid branches and extra state to see if this is the first frame being produced
+        self.opcode = OpCode::Continuation;
+        self.compressed = false;
+
+        Some(frame)
     }
 }
