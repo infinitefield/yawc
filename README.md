@@ -33,7 +33,7 @@ By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide back
 
 ## Upgrading or Migrating?
 
-- **Upgrading from yawc 0.1.x to 0.2.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for step-by-step migration instructions.
+- **Upgrading from yawc 0.2.x to 0.3.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for step-by-step migration instructions.
 - **Migrating from tokio-tungstenite?** See the [Migration Guide](MIGRATION.md) for a comprehensive comparison and migration steps.
 
 ## Which crate should I use?
