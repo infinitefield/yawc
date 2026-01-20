@@ -1,13 +1,3 @@
-/// Example WebSocket echo server using the smol runtime
-///
-/// This example demonstrates how to use yawc with the smol async runtime by implementing
-/// a simple adapter that bridges futures::AsyncRead/AsyncWrite to tokio::io traits.
-///
-/// The server listens on ws://127.0.0.1:8080 and echoes back any text or binary messages
-/// it receives from clients.
-///
-/// Run with: cargo run --example echo_server_smol
-/// Test with: wscat -c ws://127.0.0.1:8080
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
