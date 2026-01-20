@@ -31,9 +31,10 @@ let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwr
 The `zlib` feature is NOT mandatory to enable compression. `zlib` is configured as a feature for the [window](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) parameters.
 By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend. An implementation of miniz using Rust.
 
-## Migrating from tokio-tungstenite?
+## Upgrading or Migrating?
 
-See our comprehensive [Migration Guide](MIGRATION.md) for step-by-step instructions on migrating from tokio-tungstenite to yawc.
+- **Upgrading from yawc 0.1.x to 0.2.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for step-by-step migration instructions.
+- **Migrating from tokio-tungstenite?** See the [Migration Guide](MIGRATION.md) for a comprehensive comparison and migration steps.
 
 ## Which crate should I use?
 
@@ -133,12 +134,12 @@ async fn main() {
 
 ```toml
 [dependencies]
-yawc = {version = "0.2", features = ["reqwest"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
-tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
-hyper = { version = "1.5.0", features = ["http1", "server"] }
-http-body-util = "0.1.2"
-bytes = "1.8.0"
+yawc = "0.2"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+hyper = { version = "1", features = ["http1", "server"] }
+http-body-util = "0.1"
+bytes = "1"
 ```
 
 The [`examples`](https://github.com/infinitefield/yawc/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
@@ -167,19 +168,20 @@ use axum::{
     routing::get,
     Router,
 };
-use yawc::{IncomingUpgrade, Options};
+use futures::StreamExt;
+use yawc::{IncomingUpgrade, Options, CompressionLevel};
 
 async fn websocket_handler(ws: IncomingUpgrade) -> axum::response::Response {
     let options = Options::default()
         .with_compression_level(CompressionLevel::default())
         .with_utf8();
 
-    let (response, ws) = ws.upgrade(options).unwrap();
+    let (response, ws_future) = ws.upgrade(options).unwrap();
 
     // Handle the WebSocket connection in a separate task
     tokio::spawn(async move {
-        if let Ok(mut ws) = ws.await {
-            while let Ok(frame) = ws.next_frame().await {
+        if let Ok(mut ws) = ws_future.await {
+            while let Some(frame) = ws.next().await {
                 // Echo the received frames back to the client
                 let _ = ws.send(frame).await;
             }
@@ -205,6 +207,8 @@ To use the Axum integration, add this to your `Cargo.toml`:
 [dependencies]
 yawc = { version = "0.2", features = ["axum"] }
 axum = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
 ```
 
 ## Advanced Features
@@ -214,12 +218,16 @@ axum = "0.7"
 Fine-tune compression settings for optimal performance:
 
 ```rust
-use yawc::{Options, DeflateOptions, CompressionLevel};
+use yawc::{WebSocket, Options, CompressionLevel};
 
-let options = Options::default()
-    .with_compression_level(CompressionLevel::default())
-    .server_no_context_takeover()  // Optimize memory usage
-    .with_client_max_window_bits(11);  // Control compression window (requires zlib feature)
+let ws = WebSocket::connect("wss://example.com".parse()?)
+    .with_options(
+        Options::default()
+            .with_compression_level(CompressionLevel::default())
+            .server_no_context_takeover()  // Optimize memory usage
+            .with_client_max_window_bits(11)  // Control compression window (requires zlib feature)
+    )
+    .await?;
 ```
 
 ### Split Streams
@@ -227,12 +235,21 @@ let options = Options::default()
 Split the WebSocket for independent reading and writing:
 
 ```rust
+use futures::{StreamExt, SinkExt};
+use yawc::frame::Frame;
+
 let (mut write, mut read) = ws.split();
 
 // Read and write concurrently
 tokio::join!(
-    async move { while let Some(frame) = read.next().await { /* ... */ } },
-    async move { write.send(FrameView::text("Hello")).await? }
+    async move {
+        while let Some(frame) = read.next().await {
+            // Process incoming frames
+        }
+    },
+    async move {
+        write.send(Frame::text("Hello")).await.unwrap();
+    }
 );
 ```
 
@@ -241,7 +258,7 @@ tokio::join!(
 Process frames manually when needed:
 
 ```rust
-match frame.opcode {
+match frame.opcode() {
     OpCode::Ping => {
         // Automatic pong responses
         println!("Received ping");

@@ -30,12 +30,24 @@
 //!     while let Some(frame) = ws.next().await {
 //!         match frame.opcode() {
 //!             OpCode::Text | OpCode::Binary => ws.send(frame).await?,
+//!             OpCode::Ping => {
+//!                 // Pong is sent automatically, but ping is still returned
+//!                 // so you can observe it if needed
+//!             }
 //!             _ => {}
 //!         }
 //!     }
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Protocol Handling
+//!
+//! yawc automatically handles WebSocket control frames:
+//!
+//! - **Ping frames**: Automatically responded to with pongs, but still returned to your application
+//! - **Pong frames**: Passed through without special handling
+//! - **Close frames**: Automatically acknowledged, then returned before closing the connection
 //!
 //! # Server Example
 //! ```rust

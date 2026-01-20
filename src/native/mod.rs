@@ -407,6 +407,20 @@ impl AsyncWrite for HttpStream {
 /// A [`WebSocket`] instance can be created via high-level functions like [`WebSocket::connect`],
 /// or through a custom stream setup with [`WebSocket::handshake`].
 ///
+/// # Automatic Protocol Handling
+///
+/// The WebSocket automatically handles protocol control frames:
+///
+/// - **Ping frames**: When a ping frame is received, a pong response is automatically queued for
+///   sending. The ping frame is **still returned to the application** via `next()` or the `Stream`
+///   trait, allowing you to observe incoming pings if needed.
+///
+/// - **Pong frames**: Pong frames are passed through to the application without special handling.
+///
+/// - **Close frames**: When a close frame is received, a close response is automatically sent
+///   (if not already closing). The close frame is returned to the application, and subsequent
+///   reads will fail with [`WebSocketError::ConnectionClosed`].
+///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
 /// ```no_run

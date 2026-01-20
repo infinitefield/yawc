@@ -173,7 +173,10 @@ match frame.opcode() {
     OpCode::Binary => {
         let data = frame.payload(); // Bytes reference
     }
-    OpCode::Ping => { /* auto-responded */ }
+    OpCode::Ping => {
+        // Pong automatically sent, but ping frame is still returned
+        // so you can observe/log it if needed
+    }
     OpCode::Pong => { /* ... */ }
     OpCode::Close => {
         let code = frame.close_code();
@@ -408,6 +411,38 @@ yawc = { version = "0.2", features = [
 - yawc has framework integrations (axum, reqwest)
 - yawc has JSON helpers
 - Crypto provider selection for rustls
+
+## Automatic Protocol Handling
+
+Both libraries automatically handle ping/pong, but with a key difference:
+
+### tokio-tungstenite
+
+Ping frames trigger automatic pong responses and are **not** returned via the stream iterator.
+
+### yawc
+
+Ping frames trigger automatic pong responses **and are still returned** to your application, allowing you to observe them:
+
+```rust
+use yawc::frame::OpCode;
+
+while let Some(frame) = ws.next().await {
+    match frame.opcode() {
+        OpCode::Ping => {
+            // Pong is sent automatically
+            // But you can still see the ping
+            log::debug!("Received ping from server");
+        }
+        OpCode::Text | OpCode::Binary => {
+            // Handle data frames
+        }
+        _ => {}
+    }
+}
+```
+
+This design gives you visibility into connection health checks while still handling the protocol automatically.
 
 ## Common Patterns
 
