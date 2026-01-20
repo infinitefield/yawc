@@ -49,7 +49,7 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
 
 #[tokio::main]
 async fn main() -> yawc::Result<()> {
-    console_subscriber::init();
+    // console_subscriber::init();
 
     let listener = TcpListener::bind("0.0.0.0:9002").await?;
     log::debug!("Listening on {}", listener.local_addr().unwrap());
