@@ -39,6 +39,7 @@ reqwest = ["dep:reqwest"]
 axum = ["axum-core", "http"]
 rustls-ring = ["tokio-rustls/ring"]
 rustls-aws-lc-rs = ["tokio-rustls/aws-lc-rs"]
+smol = ["dep:smol"]
 
 # Examples configuration
 [[example]]
@@ -142,7 +143,7 @@ log = "0.4"
 # Optional dependencies
 simdutf8 = { version = "0.1", optional = true }
 serde = { version = "1", optional = true }
-serde_json = { version = "1", optional = true }
+smol = { version = "2.0.2", optional = true }
 
 # Compression
 flate2 = "1"
@@ -173,3 +174,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 webpki-roots = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 rand = "0.8"
+rustls = { version = "0.23", features = ["ring"] }
+futures-rustls = "0.26"
+rustls-native-certs = "0.8"
+rustls-pki-types = "1.0"
+smol = "2.0.2"

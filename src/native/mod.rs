@@ -645,11 +645,20 @@ where
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
 
+        #[cfg(not(feature = "smol"))]
         tokio::spawn(async move {
             if let Err(err) = conn.with_upgrades().await {
                 log::error!("upgrading connection: {:?}", err);
             }
         });
+
+        #[cfg(feature = "smol")]
+        smol::spawn(async move {
+            if let Err(err) = conn.with_upgrades().await {
+                log::error!("upgrading connection: {:?}", err);
+            }
+        })
+        .detach();
 
         let mut response = sender.send_request(req).await?;
         let negotiated = verify(&response, options)?;

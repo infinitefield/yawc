@@ -49,6 +49,12 @@ Key features include built-in compression support, zero-copy operations where po
 Beyond passing comprehensive test suites including Autobahn,
 yawc has proven its reliability in production environments powering 24/7 market trading systems.
 
+## Runtime Support
+
+yawc is built on tokio's I/O traits but can work with other async runtimes through simple adapters. While the library uses tokio internally for its codec and I/O operations, you can integrate it with runtimes like `smol`, `async-std`, or others by implementing trait bridges.
+
+See the [`client_smol.rs`](https://github.com/infinitefield/yawc/tree/master/examples/client_smol.rs) example for a complete demonstration of using yawc with the smol runtime via a simple adapter pattern.
+
 ## Usage
 
 Add this to your `Cargo.toml`:
