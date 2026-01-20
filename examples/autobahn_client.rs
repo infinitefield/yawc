@@ -1,8 +1,10 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
-use yawc::{close::CloseCode, frame::OpCode, CompressionLevel, FrameView, Options, WebSocket};
+use yawc::{
+    close::CloseCode, frame::OpCode, CompressionLevel, Frame, Options, TcpWebSocket, WebSocket,
+};
 
-async fn connect(path: &str) -> Result<WebSocket> {
+async fn connect(path: &str) -> Result<TcpWebSocket> {
     let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
         .with_options(
             Options::default()
@@ -20,8 +22,8 @@ async fn connect(path: &str) -> Result<WebSocket> {
 async fn get_case_count() -> Result<u32> {
     let mut ws = connect("getCaseCount").await?;
     let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
-    ws.send(FrameView::close(CloseCode::Normal, [])).await?;
-    Ok(std::str::from_utf8(&msg.payload)?.parse()?)
+    ws.send(Frame::close(CloseCode::Normal, [])).await?;
+    Ok(std::str::from_utf8(msg.payload())?.parse()?)
 }
 
 #[tokio::main]
@@ -38,7 +40,7 @@ async fn main() -> Result<()> {
 
         if case % 10 == 0 {
             let mut ws = connect("updateReports?agent=websocket").await?;
-            ws.send(FrameView::close(CloseCode::Normal, [])).await?;
+            ws.send(Frame::close(CloseCode::Normal, [])).await?;
             ws.close().await?;
         }
 
@@ -49,9 +51,10 @@ async fn main() -> Result<()> {
                 None => break,
             };
 
-            match msg.opcode {
+            let (opcode, _is_fin, body) = msg.into_parts();
+            match opcode {
                 OpCode::Text | OpCode::Binary => {
-                    ws.send(FrameView::from((msg.opcode, msg.payload))).await?;
+                    ws.send(Frame::from((opcode, body))).await?;
                 }
                 _ => {}
             }

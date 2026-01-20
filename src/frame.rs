@@ -8,8 +8,7 @@
 //!
 //! WebSocket messages are transmitted as a sequence of frames. The module provides two main frame implementations:
 //!
-//! - [`Frame`]: Full mutable frame with all protocol metadata and masking capabilities
-//! - [`FrameView`]: Lightweight immutable view optimized for efficient frame handling
+//! - [`Frame`]: Full frame with all protocol metadata and masking capabilities
 //!
 //! ### Frame Binary Format
 //!
@@ -53,27 +52,29 @@
 //! - `payload`: Frame data as `BytesMut`
 //! - `is_compressed`: Per-message compression flag (1 bit, RSV1)
 //!
-//! While [`FrameView`] provides an optimized immutable view with:
-//!
-//! - `opcode`: Frame type identifier
-//! - `payload`: Immutable frame data as `Bytes`
-//!
 //! ### Frame Construction
 //!
-//! The module provides ergonomic constructors via [`FrameView`] for common frame types:
+//! The module provides ergonomic constructors for common frame types:
 //!
 //! ```rust
-//! use yawc::frame::FrameView;
+//! use yawc::frame::Frame;
 //! use bytes::Bytes;
 //! use yawc::close::CloseCode;
 //!
 //! // Text frame with UTF-8 payload
-//! let text_frame = FrameView::text("Hello, WebSocket!");
+//! let text_frame = Frame::text("Hello, WebSocket!");
+//!
+//! // Binary frame
+//! let binary_frame = Frame::binary(vec![1, 2, 3, 4]);
 //!
 //! // Control frames
-//! let ping = FrameView::ping("Ping payload"); // Ping with optional payload
-//! let pong = FrameView::pong("Pong response"); // Pong response to ping
-//! let close = FrameView::close(CloseCode::Normal, b"Normal closure"); // Status code + reason
+//! let ping = Frame::ping("Ping payload");
+//! let pong = Frame::pong("Pong response");
+//! let close = Frame::close(CloseCode::Normal, b"Normal closure");
+//!
+//! // Fragmented message
+//! let first = Frame::text("Hello, ").with_fin(false);
+//! let continuation = Frame::continuation("World!");
 //! ```
 //!
 //! ## Frame Processing
@@ -90,7 +91,7 @@
 //! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://datatracker.ietf.org/doc/html/rfc6455#section-5).
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))] // Silence dead code warning for WASM
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use crate::{close::CloseCode, WebSocketError};
 
@@ -175,174 +176,41 @@ impl From<OpCode> for u8 {
     }
 }
 
-/// A lightweight view of a WebSocket frame, containing just the opcode and payload.
-/// This struct provides a more efficient, immutable representation of frame data
-/// compared to the full `Frame` struct.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameView {
-    /// The operation code indicating the type of frame (Text, Binary, Close, etc.)
-    pub opcode: OpCode,
-    /// The frame's payload data as immutable bytes, already unmasked if it was originally masked
-    pub payload: Bytes,
-}
-
-impl FrameView {
-    /// Extracts the close code from a Close frame's payload.
-    ///
-    /// For a valid Close frame, the first two bytes of the payload contain
-    /// a status code indicating why the connection was closed.
-    ///
-    /// # Returns
-    /// - `Some(CloseCode)` if the payload contains a valid close code
-    /// - `None` if the payload is empty or too short to contain a close code
-    pub fn close_code(&self) -> Option<CloseCode> {
-        let code = CloseCode::from(u16::from_be_bytes(self.payload.get(0..2)?.try_into().ok()?));
-        Some(code)
-    }
-
-    /// Extracts the close reason from a Close frame's payload.
-    ///
-    /// For a valid Close frame, bytes after the first two bytes may contain
-    /// a UTF-8 encoded reason string explaining why the connection was closed.
-    ///
-    /// # Returns
-    /// - `Ok(Some(&str))` containing the reason string if present and valid UTF-8. Could be the
-    ///   empty string
-    /// - `Ok(None)` if no close reason was given
-    /// - `Err(WebSocketError::InvalidUTF8)` if the reason is not valid UTF-8 or did not have the
-    ///   required 2 bytes
-    pub fn close_reason(&self) -> Result<Option<&str>, WebSocketError> {
-        if self.payload.is_empty() {
-            return Ok(None);
-        }
-
-        let reason = self.payload.get(2..).ok_or(WebSocketError::InvalidUTF8)?;
-
-        std::str::from_utf8(reason)
-            .map(Some)
-            .map_err(|_| WebSocketError::InvalidUTF8)
-    }
-
-    /// Converts the frame payload to a string slice, expecting valid UTF-8.
-    ///
-    /// # Returns
-    /// A string slice (`&str`) of the frame's payload.
-    ///
-    /// # Panics
-    /// Panics if the payload is not valid UTF-8. Use this method only when
-    /// you are certain the payload contains valid UTF-8 text, such as with
-    /// frames that have `OpCode::Text`.
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.payload).expect("utf8")
-    }
-
-    /// Creates a new immutable text frame view with the given payload.
-    /// The payload is converted to immutable `Bytes`.
-    pub fn text(payload: impl Into<Bytes>) -> Self {
-        Self {
-            opcode: OpCode::Text,
-            payload: payload.into(),
-        }
-    }
-
-    /// Creates a new immutable binary frame view with the given payload.
-    /// The payload is converted to immutable `Bytes`.
-    pub fn binary(payload: impl Into<Bytes>) -> Self {
-        Self {
-            opcode: OpCode::Binary,
-            payload: payload.into(),
-        }
-    }
-
-    /// Creates a new immutable close frame view with a close code and reason.
-    /// Constructs the close frame payload by combining the code and reason bytes.
-    pub fn close(code: CloseCode, reason: impl AsRef<[u8]>) -> Self {
-        let code16 = u16::from(code);
-        let reason: &[u8] = reason.as_ref();
-        let mut payload = Vec::with_capacity(2 + reason.len());
-        payload.extend_from_slice(&code16.to_be_bytes());
-        payload.extend_from_slice(reason);
-
-        Self {
-            opcode: OpCode::Close,
-            payload: payload.into(),
-        }
-    }
-
-    /// Creates a new immutable ping frame view with the given payload.
-    /// Used to create ping messages to check connection liveness.
-    pub fn ping(payload: impl Into<Bytes>) -> Self {
-        Self {
-            opcode: OpCode::Ping,
-            payload: payload.into(),
-        }
-    }
-
-    /// Creates a new immutable pong frame view with the given payload.
-    /// Used to respond to ping messages.
-    pub fn pong(payload: impl Into<Bytes>) -> Self {
-        Self {
-            opcode: OpCode::Pong,
-            payload: payload.into(),
-        }
-    }
-
-    /// Creates a new immutable close frame view with a raw payload.
-    /// Allows creating close frames without enforcing code/reason structure.
-    pub fn close_raw(payload: impl Into<Bytes>) -> Self {
-        Self {
-            opcode: OpCode::Close,
-            payload: payload.into(),
-        }
-    }
-}
-
-/// Converts a `FrameView` into a tuple of `(OpCode, Bytes)`.
+/// Converts a `Frame` into a tuple of `(OpCode, Bytes)`.
 ///
-/// This allows destructuring a frame view into its component parts while
+/// This allows destructuring a frame into its component parts while
 /// maintaining ownership of both the opcode and payload.
-impl From<FrameView> for (OpCode, Bytes) {
-    fn from(val: FrameView) -> Self {
+impl From<Frame> for (OpCode, Bytes) {
+    fn from(val: Frame) -> Self {
         (val.opcode, val.payload)
     }
 }
 
-/// Converts a tuple of `(OpCode, Bytes)` to a `FrameView`.
+/// Converts a tuple of `(OpCode, Bytes)` to a `Frame`.
 ///
-/// This allows constructing a `FrameView` from an opcode and immutable bytes payload.
-impl From<(OpCode, Bytes)> for FrameView {
-    fn from((opcode, payload): (OpCode, Bytes)) -> Self {
-        Self { opcode, payload }
-    }
-}
-
-/// Converts a tuple of `(OpCode, BytesMut)` to a `FrameView`.
-///
-/// This allows constructing a `FrameView` from an opcode and mutable bytes payload,
-/// automatically freezing the bytes into an immutable form.
-impl From<(OpCode, BytesMut)> for FrameView {
-    fn from((opcode, payload): (OpCode, BytesMut)) -> Self {
+/// This allows constructing a `Frame` from an opcode and immutable bytes payload.
+/// The frame will have `fin` set to `true` by default.
+impl<T> From<(OpCode, T)> for Frame
+where
+    T: Into<Bytes>,
+{
+    fn from((opcode, payload): (OpCode, T)) -> Self {
         Self {
+            fin: true,
             opcode,
-            payload: payload.freeze(),
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
         }
-    }
-}
-
-/// Converts a full `Frame` into a `FrameView` by extracting just the opcode and
-/// freezing the payload into immutable bytes.
-impl From<Frame> for FrameView {
-    fn from(value: Frame) -> Self {
-        Self::from((value.opcode, value.payload))
     }
 }
 
 /// Represents a WebSocket frame, encapsulating the data and metadata for message transmission.
 ///
-/// **Note: This low-level struct should rarely be used directly.** Most users should interact with the
-/// higher-level WebSocket message APIs instead. Direct frame manipulation should only be needed in
-/// specialized cases where fine-grained control over the WebSocket protocol is required.
+/// **This is the primary type for creating and working with WebSocket frames.**
+///
+/// A WebSocket frame carries both the payload data and essential metadata. Use the builder
+/// methods to create frames and accessor methods to inspect them safely
 ///
 /// A WebSocket frame is the fundamental unit of communication in the WebSocket protocol, carrying both
 /// the payload data and essential metadata. Frames can be categorized into two types:
@@ -361,13 +229,13 @@ impl From<Frame> for FrameView {
 ///
 /// While frames can be constructed directly, it's recommended to use the provided factory methods:
 /// ```rust
-/// use yawc::frame::FrameView;
+/// use yawc::frame::Frame;
 /// use yawc::close::CloseCode;
 ///
-/// let text_frame = FrameView::text("Hello");
-/// let binary_frame = FrameView::binary(vec![1, 2, 3]);
-/// let ping_frame = FrameView::ping(vec![]);
-/// let close_frame = FrameView::close(CloseCode::Normal, b"Goodbye");
+/// let text_frame = Frame::text("Hello");
+/// let binary_frame = Frame::binary(vec![1, 2, 3]);
+/// let ping_frame = Frame::ping(vec![]);
+/// let close_frame = Frame::close(CloseCode::Normal, b"Goodbye");
 /// ```
 ///
 /// # Fields
@@ -375,36 +243,181 @@ impl From<Frame> for FrameView {
 /// - `opcode`: Defines the frame type and interpretation (text, binary, control, etc).
 /// - `mask`: Optional 32-bit XOR masking key required for client-to-server messages.
 /// - `payload`: Frame payload data stored as dynamically sized bytes.
+#[derive(Clone)]
 pub struct Frame {
     /// Indicates if this is the final frame in a message.
-    pub fin: bool,
+    pub(crate) fin: bool,
     /// The opcode of the frame, defining its type.
-    pub opcode: OpCode,
+    pub(crate) opcode: OpCode,
     /// Flag indicating whether the payload is compressed.
     pub(super) is_compressed: bool,
     /// The masking key for the frame, if any, used for security in client-to-server frames.
     pub(super) mask: Option<[u8; 4]>,
     /// The payload of the frame, containing the actual data.
-    pub payload: Bytes,
-}
-
-/// Converts a `FrameView` into a `Frame`.
-///
-/// The resulting `Frame` will have:
-/// - `fin` set to `true` (final frame)
-/// - The same opcode as the `FrameView`
-/// - No masking key
-/// - The same payload as the `FrameView`
-impl From<FrameView> for Frame {
-    fn from(value: FrameView) -> Self {
-        Frame::new(true, value.opcode, None, value.payload)
-    }
+    pub(crate) payload: Bytes,
 }
 
 pub(crate) const MAX_HEAD_SIZE: usize = 16;
 
 impl Frame {
-    /// Creates a new WebSocket `Frame`.
+    /// Creates a text frame with the given payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello, WebSocket!");
+    /// ```
+    pub fn text(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Text,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a binary frame with the given payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::binary(vec![1, 2, 3, 4]);
+    /// ```
+    pub fn binary(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Binary,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a ping frame with the given payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::ping("optional payload");
+    /// ```
+    pub fn ping(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Ping,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a pong frame with the given payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::pong("");
+    /// ```
+    pub fn pong(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Pong,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a continuation frame with the given payload.
+    ///
+    /// Continuation frames are used for message fragmentation. The first fragment
+    /// should be a Text or Binary frame with `fin` set to false, followed by
+    /// zero or more Continuation frames, with the final frame having `fin` set to true.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// // First fragment (non-final text frame)
+    /// let first = Frame::text("Hello, ").with_fin(false);
+    ///
+    /// // Middle fragment (continuation)
+    /// let middle = Frame::continuation("World").with_fin(false);
+    ///
+    /// // Final fragment
+    /// let last = Frame::continuation("!");
+    /// ```
+    pub fn continuation(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Continuation,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Sets the fin flag and returns self for method chaining.
+    ///
+    /// Use this to create fragmented messages. Set `fin` to `false` for
+    /// non-final fragments.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let fragment = Frame::text("partial data").with_fin(false);
+    /// assert!(!fragment.is_fin());
+    /// ```
+    pub fn with_fin(mut self, fin: bool) -> Self {
+        self.fin = fin;
+        self
+    }
+
+    /// Creates a close frame with a close code and reason.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    /// use yawc::close::CloseCode;
+    ///
+    /// let frame = Frame::close(CloseCode::Normal, b"Goodbye");
+    /// ```
+    pub fn close(code: CloseCode, reason: impl AsRef<[u8]>) -> Self {
+        let code16 = u16::from(code);
+        let reason: &[u8] = reason.as_ref();
+        let mut payload = Vec::with_capacity(2 + reason.len());
+        payload.extend_from_slice(&code16.to_be_bytes());
+        payload.extend_from_slice(reason);
+
+        Self {
+            fin: true,
+            opcode: OpCode::Close,
+            mask: None,
+            payload: payload.into(),
+            is_compressed: false,
+        }
+    }
+
+    /// Creates a close frame with a raw payload (for internal use).
+    pub(crate) fn close_raw<T: Into<Bytes>>(payload: T) -> Self {
+        Self {
+            fin: true,
+            opcode: OpCode::Close,
+            mask: None,
+            is_compressed: false,
+            payload: payload.into(),
+        }
+    }
+
+    /// Low-level constructor for creating frames with full control.
+    ///
+    /// Most users should use the helper methods like `Frame::text()`, `Frame::binary()`, etc.
+    /// This constructor is for advanced use cases requiring precise control over frame flags.
     ///
     /// # Parameters
     /// - `fin`: Indicates if this frame is the final fragment in a message.
@@ -414,7 +427,7 @@ impl Frame {
     ///
     /// # Returns
     /// A new instance of `Frame` with the specified parameters.
-    pub fn new(
+    pub(super) fn new(
         fin: bool,
         opcode: OpCode,
         mask: Option<[u8; 4]>,
@@ -429,7 +442,7 @@ impl Frame {
         }
     }
 
-    /// Creates a new frame with compression enabled.
+    /// Creates a new frame with compression enabled (internal use).
     ///
     /// Similar to `new`, but sets the compression flag to indicate the payload
     /// has been compressed using the permessage-deflate extension.
@@ -439,32 +452,269 @@ impl Frame {
     /// - `opcode`: The operation code of the frame, defining its type.
     /// - `mask`: Optional 4-byte masking key for client-to-server frames.
     /// - `payload`: The compressed frame payload data.
-    pub fn compress(
-        fin: bool,
-        opcode: OpCode,
-        mask: Option<[u8; 4]>,
-        payload: impl Into<Bytes>,
-    ) -> Self {
+    pub(crate) fn into_compressed(self, payload: impl Into<Bytes>) -> Self {
         Self {
-            fin,
-            opcode,
-            mask,
             payload: payload.into(),
             is_compressed: true,
+            ..self
         }
     }
 
-    /// Creates a new WebSocket close frame with a raw payload.
+    /// Returns the frame's opcode.
     ///
-    /// This method does not validate if `payload` is a valid close frame payload.
-    pub fn close_raw<T: Into<Bytes>>(payload: T) -> Self {
-        Self {
-            fin: true,
-            opcode: OpCode::Close,
-            mask: None,
-            is_compressed: false,
-            payload: payload.into(),
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::{Frame, OpCode};
+    ///
+    /// let frame = Frame::text("Hello");
+    /// assert_eq!(frame.opcode(), OpCode::Text);
+    /// ```
+    #[inline(always)]
+    pub fn opcode(&self) -> OpCode {
+        self.opcode
+    }
+
+    /// Returns a reference to the frame's payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::binary(vec![1, 2, 3]);
+    /// assert_eq!(frame.payload().as_ref(), &[1, 2, 3]);
+    /// ```
+    #[inline(always)]
+    pub fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+
+    /// Returns a mutable reference to the frame's payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    /// use bytes::BufMut;
+    ///
+    /// let mut frame = Frame::binary(vec![1, 2]);
+    /// // Modify payload if needed
+    /// ```
+    #[inline(always)]
+    pub fn payload_mut(&mut self) -> &mut Bytes {
+        &mut self.payload
+    }
+
+    /// Consumes the frame and returns its payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello");
+    /// let payload = frame.into_payload();
+    /// ```
+    #[inline(always)]
+    pub fn into_payload(self) -> Bytes {
+        self.payload
+    }
+
+    /// Consumes the frame and returns its opcode, whether it is final or not and payload.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::{Frame, OpCode};
+    ///
+    /// let frame = Frame::text("Hello");
+    /// let (opcode, is_fin, payload) = frame.into_parts();
+    /// assert_eq!(opcode, OpCode::Text);
+    /// ```
+    #[inline(always)]
+    pub fn into_parts(self) -> (OpCode, bool, Bytes) {
+        (self.opcode, self.fin, self.payload)
+    }
+
+    /// Returns the opcode and payload as a string slice.
+    ///
+    /// # Errors
+    /// Returns `Utf8Error` if the payload is not valid UTF-8.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::{Frame, OpCode};
+    ///
+    /// let frame = Frame::text("Hello");
+    /// let (opcode, text) = frame.into_parts_str().unwrap();
+    /// assert_eq!(opcode, OpCode::Text);
+    /// assert_eq!(text, "Hello");
+    /// ```
+    #[inline]
+    pub fn into_parts_str(&self) -> Result<(OpCode, &str), std::str::Utf8Error> {
+        let text = std::str::from_utf8(&self.payload)?;
+        Ok((self.opcode, text))
+    }
+
+    /// Returns whether this is the final frame in a message.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Complete message");
+    /// assert!(frame.is_fin());
+    /// ```
+    #[inline(always)]
+    pub fn is_fin(&self) -> bool {
+        self.fin
+    }
+
+    /// Sets whether this is the final frame in a message.
+    ///
+    /// This is used for message fragmentation. Most users should not need this.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let mut frame = Frame::text("Fragment");
+    /// frame.set_fin(false); // Mark as non-final for fragmentation
+    /// ```
+    #[inline(always)]
+    pub fn set_fin(&mut self, fin: bool) {
+        self.fin = fin;
+    }
+
+    /// Sets a custom masking key for this frame.
+    ///
+    /// According to RFC 6455, all frames sent from a client to a server must be masked.
+    /// Normally, the library generates a random mask automatically. This method allows
+    /// you to specify your own mask for testing or special use cases.
+    ///
+    /// # Parameters
+    /// - `mask`: A 4-byte masking key, or `None` to disable masking
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let mut frame = Frame::text("Hello");
+    /// frame.set_mask(Some([0x12, 0x34, 0x56, 0x78]));
+    /// ```
+    #[inline(always)]
+    pub fn set_mask(&mut self, mask: Option<[u8; 4]>) {
+        self.mask = mask;
+    }
+
+    /// Sets a custom masking key for this frame (builder pattern).
+    ///
+    /// This is the builder-style version of [`set_mask`](Self::set_mask).
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello")
+    ///     .with_mask([0x12, 0x34, 0x56, 0x78]);
+    /// ```
+    #[inline(always)]
+    pub fn with_mask(mut self, mask: [u8; 4]) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Sets a randomly generated masking key for this frame.
+    ///
+    /// This is useful when you want to ensure a frame is masked but don't need
+    /// to specify the exact mask value.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let mut frame = Frame::text("Hello");
+    /// frame.set_random_mask();
+    /// ```
+    #[inline(always)]
+    pub fn set_random_mask(&mut self) {
+        self.mask = Some(rand::random());
+    }
+
+    /// Sets a randomly generated masking key for this frame (builder pattern).
+    ///
+    /// This is the builder-style version of [`set_random_mask`](Self::set_random_mask).
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello").with_random_mask();
+    /// ```
+    #[inline(always)]
+    pub fn with_random_mask(mut self) -> Self {
+        self.mask = Some(rand::random());
+        self
+    }
+
+    /// Returns the payload as a string slice, expecting valid UTF-8.
+    ///
+    /// # Panics
+    /// Panics if the payload is not valid UTF-8. Use `is_utf8()` to check first,
+    /// or use this only with frames you know contain text.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    ///
+    /// let frame = Frame::text("Hello");
+    /// assert_eq!(frame.as_str(), "Hello");
+    /// ```
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.payload).expect("frame payload is not valid UTF-8")
+    }
+
+    /// Extracts the close code from a Close frame's payload.
+    ///
+    /// # Returns
+    /// - `Some(CloseCode)` if the payload contains a valid close code
+    /// - `None` if the payload is empty or too short to contain a close code
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    /// use yawc::close::CloseCode;
+    ///
+    /// let frame = Frame::close(CloseCode::Normal, b"Goodbye");
+    /// assert_eq!(frame.close_code(), Some(CloseCode::Normal));
+    /// ```
+    pub fn close_code(&self) -> Option<CloseCode> {
+        let code = CloseCode::from(u16::from_be_bytes(self.payload.get(0..2)?.try_into().ok()?));
+        Some(code)
+    }
+
+    /// Extracts the close reason from a Close frame's payload.
+    ///
+    /// # Returns
+    /// - `Ok(Some(&str))` containing the reason string if present and valid UTF-8
+    /// - `Ok(None)` if no close reason was given
+    /// - `Err(WebSocketError::InvalidUTF8)` if the reason is not valid UTF-8
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::frame::Frame;
+    /// use yawc::close::CloseCode;
+    ///
+    /// let frame = Frame::close(CloseCode::Normal, b"Goodbye");
+    /// assert_eq!(frame.close_reason().unwrap(), Some("Goodbye"));
+    /// ```
+    pub fn close_reason(&self) -> Result<Option<&str>, WebSocketError> {
+        if self.payload.is_empty() {
+            return Ok(None);
         }
+
+        let reason = self.payload.get(2..).ok_or(WebSocketError::InvalidUTF8)?;
+
+        std::str::from_utf8(reason)
+            .map(Some)
+            .map_err(|_| WebSocketError::InvalidUTF8)
     }
 
     /// Checks if the frame payload is valid UTF-8.
@@ -477,48 +727,41 @@ impl Frame {
         std::str::from_utf8(&self.payload).is_ok()
     }
 
-    /// Set the mask.
-    pub(super) fn set_mask(&mut self) {
+    /// Generates and sets a random mask if none is already set.
+    #[inline]
+    pub(super) fn set_random_mask_if_not_set(&mut self) {
         if self.mask.is_none() {
             let mask: [u8; 4] = rand::random();
             self.mask = Some(mask);
         }
     }
 
-    /// Formats the frame header into the provided `head` buffer and returns the size of the length field.
-    ///
-    /// # Parameters
-    /// - `head`: The buffer to hold the formatted frame header.
-    ///
-    /// # Returns
-    /// - The size of the length field (0, 2, 4, or 10 bytes).
-    ///
-    /// # Panics
-    /// Panics if `head` is not large enough to hold the formatted header.
-    pub(super) fn fmt_head(&self, head: &mut [u8]) -> usize {
+    /// Write frame header directly into BytesMut without intermediate buffer.
+    /// This is faster than fmt_head as it eliminates an extra copy.
+    #[inline]
+    pub(super) fn write_head(&self, dst: &mut bytes::BytesMut) {
+        use bytes::BufMut;
+
         let compression = u8::from(self.is_compressed);
-        head[0] = (self.fin as u8) << 7 | compression << 6 | u8::from(self.opcode);
+        let first_byte = (self.fin as u8) << 7 | compression << 6 | u8::from(self.opcode);
 
         let len = self.payload.len();
-        let size = if len < 126 {
-            head[1] = len as u8;
-            2
+
+        if len < 126 {
+            dst.put_u8(first_byte);
+            dst.put_u8(len as u8 | if self.mask.is_some() { 0x80 } else { 0 });
         } else if len < 65536 {
-            head[1] = 126;
-            head[2..4].copy_from_slice(&(len as u16).to_be_bytes());
-            4
+            dst.put_u8(first_byte);
+            dst.put_u8(126 | if self.mask.is_some() { 0x80 } else { 0 });
+            dst.put_u16(len as u16);
         } else {
-            head[1] = 127;
-            head[2..10].copy_from_slice(&(len as u64).to_be_bytes());
-            10
-        };
+            dst.put_u8(first_byte);
+            dst.put_u8(127 | if self.mask.is_some() { 0x80 } else { 0 });
+            dst.put_u64(len as u64);
+        }
 
         if let Some(mask) = self.mask {
-            head[1] |= 0x80;
-            head[size..size + 4].copy_from_slice(&mask);
-            size + 4
-        } else {
-            size
+            dst.put_slice(&mask);
         }
     }
 }
@@ -581,54 +824,59 @@ mod tests {
         }
     }
 
-    /// Tests for the `FrameView` struct.
-    mod frameview_tests {
+    /// Tests for the `Frame` struct.
+    mod frame_tests {
         use super::*;
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_text_frameview() {
+        fn test_frame_text() {
             let text = "Hello, WebSocket!";
-            let frame = FrameView::text(text);
+            let frame = Frame::text(text);
 
-            assert_eq!(frame.opcode, OpCode::Text);
-            assert_eq!(frame.payload, Bytes::from(text));
+            assert_eq!(frame.opcode(), OpCode::Text);
+            assert_eq!(frame.payload().as_ref(), text.as_bytes());
+            assert!(frame.is_fin());
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_binary_frameview() {
+        fn test_frame_binary() {
             let data = vec![0x01, 0x02, 0x03];
-            let frame = FrameView::binary(data.clone());
+            let frame = Frame::binary(data.clone());
 
-            assert_eq!(frame.opcode, OpCode::Binary);
-            assert_eq!(frame.payload, Bytes::from(data));
+            assert_eq!(frame.opcode(), OpCode::Binary);
+            assert_eq!(frame.payload().as_ref(), &data[..]);
+            assert!(frame.is_fin());
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_close_frameview() {
+        fn test_frame_close() {
             let reason = "Normal closure";
-            let frame = FrameView::close(CloseCode::Normal, reason);
+            let frame = Frame::close(CloseCode::Normal, reason);
 
-            assert_eq!(frame.opcode, OpCode::Close);
+            assert_eq!(frame.opcode(), OpCode::Close);
+            assert!(frame.is_fin());
 
             // The payload should contain the close code (1000) and the reason
             let mut expected_payload = Vec::new();
             expected_payload.extend_from_slice(&1000u16.to_be_bytes());
             expected_payload.extend_from_slice(reason.as_bytes());
 
-            assert_eq!(frame.payload, Bytes::from(expected_payload));
+            assert_eq!(frame.payload().as_ref(), &expected_payload[..]);
+            assert_eq!(frame.close_code(), Some(CloseCode::Normal));
+            assert_eq!(frame.close_reason().unwrap(), Some(reason));
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_close_raw_frameview() {
+        fn test_frame_close_raw() {
             let payload = vec![0x03, 0xE8]; // Close code 1000 without reason
-            let frame = FrameView::close_raw(payload.clone());
+            let frame = Frame::close_raw(payload.clone());
 
-            assert_eq!(frame.opcode, OpCode::Close);
-            assert_eq!(frame.payload, Bytes::from(payload));
+            assert_eq!(frame.opcode(), OpCode::Close);
+            assert_eq!(frame.payload().as_ref(), &payload[..]);
             assert!(frame
                 .close_reason()
                 .is_ok_and(|reason| reason.is_some_and(|reason| reason.is_empty())));
@@ -636,39 +884,77 @@ mod tests {
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_empty_close_frameview() {
-            let frame = FrameView::close_raw(vec![]);
+        fn test_frame_empty_close() {
+            let frame = Frame::close_raw(vec![]);
 
-            assert_eq!(frame.opcode, OpCode::Close);
-            assert!(frame.payload.is_empty());
+            assert_eq!(frame.opcode(), OpCode::Close);
+            assert!(frame.payload().is_empty());
             assert!(frame.close_code().is_none());
             assert!(frame.close_reason().is_ok_and(|reason| reason.is_none()));
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_ping_frameview() {
+        fn test_frame_ping() {
             let payload = b"Ping payload";
-            let frame = FrameView::ping(&payload[..]);
+            let frame = Frame::ping(&payload[..]);
 
-            assert_eq!(frame.opcode, OpCode::Ping);
-            assert_eq!(frame.payload, Bytes::from(&payload[..]));
+            assert_eq!(frame.opcode(), OpCode::Ping);
+            assert_eq!(frame.payload().as_ref(), &payload[..]);
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_pong_frameview() {
+        fn test_frame_pong() {
             let payload = b"Pong payload";
-            let frame = FrameView::pong(&payload[..]);
+            let frame = Frame::pong(&payload[..]);
 
-            assert_eq!(frame.opcode, OpCode::Pong);
-            assert_eq!(frame.payload, Bytes::from(&payload[..]));
+            assert_eq!(frame.opcode(), OpCode::Pong);
+            assert_eq!(frame.payload().as_ref(), &payload[..]);
         }
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_from_frameview_to_tuple() {
-            let frame = FrameView::text("Test");
+        fn test_frame_continuation() {
+            let payload = b"continuation data";
+            let frame = Frame::continuation(&payload[..]);
+
+            assert_eq!(frame.opcode(), OpCode::Continuation);
+            assert_eq!(frame.payload().as_ref(), &payload[..]);
+            assert!(frame.is_fin());
+        }
+
+        #[test]
+        #[wasm_bindgen_test]
+        fn test_frame_with_fin() {
+            let frame = Frame::text("fragment").with_fin(false);
+
+            assert!(!frame.is_fin());
+            assert_eq!(frame.opcode(), OpCode::Text);
+        }
+
+        #[test]
+        #[wasm_bindgen_test]
+        fn test_frame_fragmentation() {
+            // Test creating a fragmented message
+            let first = Frame::text("Hello, ").with_fin(false);
+            let middle = Frame::continuation("World").with_fin(false);
+            let last = Frame::continuation("!");
+
+            assert!(!first.is_fin());
+            assert_eq!(first.opcode(), OpCode::Text);
+
+            assert!(!middle.is_fin());
+            assert_eq!(middle.opcode(), OpCode::Continuation);
+
+            assert!(last.is_fin());
+            assert_eq!(last.opcode(), OpCode::Continuation);
+        }
+
+        #[test]
+        #[wasm_bindgen_test]
+        fn test_frame_from_tuple() {
+            let frame = Frame::from((OpCode::Text, Bytes::from("Test")));
             let (opcode, payload): (OpCode, Bytes) = frame.into();
 
             assert_eq!(opcode, OpCode::Text);
@@ -677,30 +963,15 @@ mod tests {
 
         #[test]
         #[wasm_bindgen_test]
-        fn test_from_tuple_to_frameview() {
+        fn test_frame_from_tuple_bytes() {
             let opcode = OpCode::Binary;
             let payload = Bytes::from_static(b"\xDE\xAD\xBE\xEF");
 
-            let frame = FrameView::from((opcode, payload.clone()));
+            let frame = Frame::from((opcode, payload.clone()));
 
-            assert_eq!(frame.opcode, OpCode::Binary);
-            assert_eq!(frame.payload, payload);
+            assert_eq!(frame.opcode(), OpCode::Binary);
+            assert_eq!(frame.payload().as_ref(), payload.as_ref());
         }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frameview_from_frame() {
-            let frame = Frame::new(true, OpCode::Text, None, BytesMut::from("Hello"));
-            let frame_view = FrameView::from(frame);
-
-            assert_eq!(frame_view.opcode, OpCode::Text);
-            assert_eq!(frame_view.payload, Bytes::from("Hello"));
-        }
-    }
-
-    /// Tests for the `Frame` struct.
-    mod frame_tests {
-        use super::*;
 
         #[test]
         #[wasm_bindgen_test]
@@ -708,101 +979,26 @@ mod tests {
             let payload = BytesMut::from("Test payload");
             let frame = Frame::new(true, OpCode::Text, None, payload.clone());
 
-            assert!(frame.fin);
-            assert_eq!(frame.opcode, OpCode::Text);
-            assert_eq!(frame.mask, None);
-            assert_eq!(frame.payload, payload);
-            assert!(!frame.is_compressed);
+            assert!(frame.is_fin());
+            assert_eq!(frame.opcode(), OpCode::Text);
+            assert_eq!(frame.payload().as_ref(), payload.as_ref());
         }
 
-        /// Tests the creation and configuration of a compressed WebSocket frame.
-        ///
-        /// This test case demonstrates:
-        /// - Creating a compressed frame with a payload
-        /// - Setting frame to be non-final (fragmented)
-        /// - Using binary opcode format
-        /// - Applying a masking key
-        /// - Verifying the compression flag is set
-        ///
-        /// # The test verifies:
-        /// - fin flag is false (fragmented frame)
-        /// - opcode is Binary
-        /// - masking key is correctly set to [0xAA, 0xBB, 0xCC, 0xDD]
-        /// - payload matches input data
-        /// - compression flag is enabled
         #[test]
         #[wasm_bindgen_test]
-        fn test_frame_compress() {
-            let payload = BytesMut::from("Compressed payload");
-            let frame = Frame::compress(
-                false,
-                OpCode::Binary,
-                Some([0xAA, 0xBB, 0xCC, 0xDD]),
-                payload.clone(),
-            );
-
-            assert!(!frame.fin);
-            assert_eq!(frame.opcode, OpCode::Binary);
-            assert_eq!(frame.mask, Some([0xAA, 0xBB, 0xCC, 0xDD]));
-            assert_eq!(frame.payload, payload);
-            assert!(frame.is_compressed);
+        fn test_frame_as_str() {
+            let frame = Frame::text("Hello, World!");
+            assert_eq!(frame.as_str(), "Hello, World!");
         }
 
         #[test]
         #[wasm_bindgen_test]
         fn test_frame_is_utf8() {
-            let valid_utf8 = BytesMut::from("Hello, 世界");
-            let frame = Frame::new(true, OpCode::Text, None, valid_utf8);
-            assert!(frame.is_utf8());
+            let valid_utf8 = Frame::text("Hello, 世界");
+            assert!(valid_utf8.is_utf8());
 
-            let invalid_utf8 = BytesMut::from(&[0xFF, 0xFE, 0xFD][..]);
-            let frame = Frame::new(true, OpCode::Text, None, invalid_utf8);
-            assert!(!frame.is_utf8());
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_fmt_head() {
-            let payload = BytesMut::from("Header test");
-            let mask_key = [0xAA, 0xBB, 0xCC, 0xDD];
-            let frame = Frame::new(true, OpCode::Text, Some(mask_key), payload);
-
-            let mut head = [0u8; MAX_HEAD_SIZE];
-            let head_size = frame.fmt_head(&mut head);
-
-            // Verify the head size is correct
-            assert_eq!(head_size, 2 + 4); // Small payload (<126), so 2 bytes header + 4 bytes mask
-
-            // Verify the FIN bit, RSV bits, and opcode
-            assert_eq!(head[0], 0x81); // FIN=1, RSV1-3=0, OpCode=0x1 (Text)
-
-            // Verify the MASK bit and payload length
-            assert_eq!(head[1], 0x80 | 11); // MASK=1, Payload Len=11
-
-            // Verify the masking key
-            assert_eq!(&head[2..6], &mask_key);
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_close_raw() {
-            let payload = b"\x03\xE8Goodbye"; // Close code 1000 with reason "Goodbye"
-            let frame = Frame::close_raw(payload.to_vec());
-
-            assert!(frame.fin);
-            assert_eq!(frame.opcode, OpCode::Close);
-            assert_eq!(frame.payload, BytesMut::from(&payload[..]));
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_from_frameview() {
-            let frame_view = FrameView::binary("Data");
-            let frame = Frame::from(frame_view.clone());
-
-            assert!(frame.fin);
-            assert_eq!(frame.opcode, frame_view.opcode);
-            assert_eq!(frame.payload, frame_view.payload);
+            let invalid_utf8 = Frame::binary(vec![0xFF, 0xFE, 0xFD]);
+            assert!(!invalid_utf8.is_utf8());
         }
     }
 }

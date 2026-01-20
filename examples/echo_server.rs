@@ -10,17 +10,14 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, Options, WebSocket};
+use yawc::{CompressionLevel, OpCode, Options, WebSocket};
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
     let mut ws = fut.await?;
 
-    // Read frames until the user closes the connection.
-    //
-    // By doing this we also close the connection gracefully.
     while let Some(frame) = ws.next().await {
-        match frame.opcode {
+        match frame.opcode() {
             OpCode::Text | OpCode::Binary => {
                 ws.send(frame).await?;
             }
@@ -28,12 +25,9 @@ async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
         }
     }
 
-    log::debug!("Client disconnected");
-
     Ok(())
 }
 
-/// Upgrades an HTTP connection to a WebSocket connection with specific options.
 async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Empty<Bytes>>> {
     let (response, fut) = WebSocket::upgrade_with_options(
         &mut req,
@@ -53,18 +47,16 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
     Ok(response)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> yawc::Result<()> {
-    // Initialize logging
-    simple_logger::init_with_level(log::Level::Debug).expect("log");
+    // console_subscriber::init();
 
     let listener = TcpListener::bind("0.0.0.0:9002").await?;
-
     log::debug!("Listening on {}", listener.local_addr().unwrap());
 
     loop {
         let (stream, _) = listener.accept().await?;
-        log::info!("Client connected");
+        let _ = stream.set_nodelay(true);
 
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);

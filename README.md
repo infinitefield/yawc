@@ -15,7 +15,7 @@ Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket imp
 - **Zero-Copy Design**: Efficient frame processing with minimal allocations
 - **Automatic Frame Management**: Handles control frames and fragmentation
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
-- **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications
+- **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications (both text and binary modes supported)
 
 ## About compression
 
@@ -31,6 +31,11 @@ let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwr
 The `zlib` feature is NOT mandatory to enable compression. `zlib` is configured as a feature for the [window](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) parameters.
 By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend. An implementation of miniz using Rust.
 
+## Upgrading or Migrating?
+
+- **Upgrading from yawc 0.1.x to 0.2.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for step-by-step migration instructions.
+- **Migrating from tokio-tungstenite?** See the [Migration Guide](MIGRATION.md) for a comprehensive comparison and migration steps.
+
 ## Which crate should I use?
 
 When choosing a WebSocket implementation, many developers default to [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite).
@@ -44,6 +49,12 @@ and [futures::Sink](https://docs.rs/futures/latest/futures/prelude/trait.Sink.ht
 Key features include built-in compression support, zero-copy operations where possible, and first-class WebAssembly support for UI development.
 Beyond passing comprehensive test suites including Autobahn,
 yawc has proven its reliability in production environments powering 24/7 market trading systems.
+
+## Runtime Support
+
+yawc is built on tokio's I/O traits but can work with other async runtimes through simple adapters. While the library uses tokio internally for its codec and I/O operations, you can integrate it with runtimes like `smol`, `async-std`, or others by implementing trait bridges.
+
+See the [`client_smol.rs`](https://github.com/infinitefield/yawc/tree/master/examples/client_smol.rs) example for a complete demonstration of using yawc with the smol runtime via a simple adapter pattern.
 
 ## Usage
 
@@ -59,7 +70,7 @@ yawc = "0.2"
 ```rust
 use futures::SinkExt;
 use futures::StreamExt;
-use yawc::{frame::FrameView, frame::OpCode, Options, Result, WebSocket};
+use yawc::{frame::Frame, frame::OpCode, Options, Result, WebSocket};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,12 +78,12 @@ async fn main() -> Result<()> {
     let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
 
     // Send and receive messages
-    ws.send(FrameView::text("Hello WebSocket!")).await?;
+    ws.send(Frame::text("Hello WebSocket!")).await?;
 
     while let Some(frame) = ws.next().await {
-        match frame.opcode {
-            OpCode::Text => println!("Received: {}", std::str::from_utf8(&frame.payload).unwrap()),
-            OpCode::Binary => println!("Received binary: {} bytes", frame.payload.len()),
+        match frame.opcode() {
+            OpCode::Text => println!("Received: {}", frame.as_str()),
+            OpCode::Binary => println!("Received binary: {} bytes", frame.payload().len()),
             _ => {} // Handle control frames automatically
         }
     }
@@ -123,12 +134,12 @@ async fn main() {
 
 ```toml
 [dependencies]
-yawc = {version = "0.2", features = ["reqwest"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
-tokio = { version = "1.41.1", features = ["rt", "rt-multi-thread", "macros"] }
-hyper = { version = "1.5.0", features = ["http1", "server"] }
-http-body-util = "0.1.2"
-bytes = "1.8.0"
+yawc = "0.2"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+hyper = { version = "1", features = ["http1", "server"] }
+http-body-util = "0.1"
+bytes = "1"
 ```
 
 The [`examples`](https://github.com/infinitefield/yawc/tree/master/examples) directory contains several documented and runnable examples showcasing advanced WebSocket functionality.
@@ -157,19 +168,20 @@ use axum::{
     routing::get,
     Router,
 };
-use yawc::{IncomingUpgrade, Options};
+use futures::StreamExt;
+use yawc::{IncomingUpgrade, Options, CompressionLevel};
 
 async fn websocket_handler(ws: IncomingUpgrade) -> axum::response::Response {
     let options = Options::default()
         .with_compression_level(CompressionLevel::default())
         .with_utf8();
 
-    let (response, ws) = ws.upgrade(options).unwrap();
+    let (response, ws_future) = ws.upgrade(options).unwrap();
 
     // Handle the WebSocket connection in a separate task
     tokio::spawn(async move {
-        if let Ok(mut ws) = ws.await {
-            while let Ok(frame) = ws.next_frame().await {
+        if let Ok(mut ws) = ws_future.await {
+            while let Some(frame) = ws.next().await {
                 // Echo the received frames back to the client
                 let _ = ws.send(frame).await;
             }
@@ -195,6 +207,8 @@ To use the Axum integration, add this to your `Cargo.toml`:
 [dependencies]
 yawc = { version = "0.2", features = ["axum"] }
 axum = "0.7"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
 ```
 
 ## Advanced Features
@@ -204,12 +218,16 @@ axum = "0.7"
 Fine-tune compression settings for optimal performance:
 
 ```rust
-use yawc::{Options, DeflateOptions, CompressionLevel};
+use yawc::{WebSocket, Options, CompressionLevel};
 
-let options = Options::default()
-    .with_compression_level(CompressionLevel::default())
-    .server_no_context_takeover()  // Optimize memory usage
-    .with_client_max_window_bits(11);  // Control compression window (requires zlib feature)
+let ws = WebSocket::connect("wss://example.com".parse()?)
+    .with_options(
+        Options::default()
+            .with_compression_level(CompressionLevel::default())
+            .server_no_context_takeover()  // Optimize memory usage
+            .with_client_max_window_bits(11)  // Control compression window (requires zlib feature)
+    )
+    .await?;
 ```
 
 ### Split Streams
@@ -217,12 +235,21 @@ let options = Options::default()
 Split the WebSocket for independent reading and writing:
 
 ```rust
+use futures::{StreamExt, SinkExt};
+use yawc::frame::Frame;
+
 let (mut write, mut read) = ws.split();
 
 // Read and write concurrently
 tokio::join!(
-    async move { while let Some(frame) = read.next().await { /* ... */ } },
-    async move { write.send(FrameView::text("Hello")).await? }
+    async move {
+        while let Some(frame) = read.next().await {
+            // Process incoming frames
+        }
+    },
+    async move {
+        write.send(Frame::text("Hello")).await.unwrap();
+    }
 );
 ```
 
@@ -231,7 +258,7 @@ tokio::join!(
 Process frames manually when needed:
 
 ```rust
-match frame.opcode {
+match frame.opcode() {
     OpCode::Ping => {
         // Automatic pong responses
         println!("Received ping");
@@ -244,6 +271,71 @@ match frame.opcode {
     _ => { /* Handle data frames */ }
 }
 ```
+
+## Architecture
+
+yawc implements a clean layered architecture for WebSocket message processing:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Application Layer                       │
+│                  (Your WebSocket Application)                │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      WebSocket Layer                         │
+│          • Decompression (permessage-deflate RFC 7692)      │
+│          • UTF-8 validation for text frames                  │
+│          • Protocol control (Ping/Pong, Close)               │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       ReadHalf Layer                         │
+│          • Fragment assembly (RFC 6455 fragmentation)        │
+│          • Fragment timeout management                        │
+│          • Maximum message size enforcement                   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Tokio Codec Layer                       │
+│          • Frame decoding from raw bytes                     │
+│          • Frame encoding to raw bytes                        │
+│          • Masking/unmasking                                  │
+│          • Header parsing (FIN, RSV, OpCode)                 │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+                    Network (TCP/TLS)
+```
+
+### Data Flow for Compressed Fragmented Messages
+
+When receiving a compressed fragmented message (e.g., 8KB payload split into 256-byte fragments):
+
+1. **Codec Layer**: Decodes each frame from bytes
+   - Frame 1: `OpCode::Text, RSV1=1 (compressed), FIN=0` → Returns individual frame
+   - Frame 2: `OpCode::Continuation, RSV1=0, FIN=0` → Returns individual frame
+   - Frame 3: `OpCode::Continuation, RSV1=0, FIN=1` → Returns individual frame
+
+2. **ReadHalf Layer**: Assembles fragments into complete message
+   - Accumulates fragments, tracking `is_compressed` flag from first frame
+   - On final fragment (`FIN=1`), concatenates all payloads
+   - Returns complete frame with assembled compressed payload
+
+3. **WebSocket Layer**: Decompresses and validates
+   - Decompresses the complete assembled payload (RFC 7692)
+   - Validates UTF-8 for text frames
+   - Returns final frame to application
+
+This architecture ensures:
+
+- **RFC 6455 compliance**: Proper fragmentation handling
+- **RFC 7692 compliance**: Correct permessage-deflate decompression
+- **Clean separation**: Each layer has a single, well-defined responsibility
+- **Efficiency**: Zero-copy operations where possible
 
 ## Performance Considerations
 

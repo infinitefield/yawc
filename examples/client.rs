@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use tokio::time::interval;
-use yawc::{CompressionLevel, FrameView, OpCode, Options, WebSocket};
+use yawc::{Frame, OpCode, Options, WebSocket};
 
 #[tokio::main]
 async fn main() {
@@ -12,7 +12,7 @@ async fn main() {
 
     // Connect to the WebSocket server with fast compression enabled
     let mut client = WebSocket::connect("wss://stream.bybit.com/v5/public/linear".parse().unwrap())
-        .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
+        .with_options(Options::default().with_high_compression())
         .await
         .expect("connection");
 
@@ -26,7 +26,7 @@ async fn main() {
     }"#;
 
     // Send subscription request
-    let _ = client.send(FrameView::text(text)).await;
+    let _ = client.send(Frame::text(text)).await;
 
     // Set up an interval to send pings every 3 seconds
     let mut ival = interval(Duration::from_secs(3));
@@ -36,7 +36,7 @@ async fn main() {
             // Send a ping on each tick
             _ = ival.tick() => {
                 log::debug!("Tick");
-                let _ = client.send(FrameView::ping("idk")).await;
+                let _ = client.send(Frame::ping("idk")).await;
             }
             // Handle incoming frames
             frame = client.next() => {
@@ -46,7 +46,7 @@ async fn main() {
                 }
 
                 let frame = frame.unwrap();
-                let (opcode, body) = (frame.opcode, frame.payload);
+                let (opcode, _is_fin, body) = frame.into_parts();
                 match opcode {
                     OpCode::Text => {
                         let text = std::str::from_utf8(&body).expect("utf8");
@@ -56,9 +56,6 @@ async fn main() {
                     OpCode::Pong => {
                         let data = std::str::from_utf8(&body).unwrap();
                         log::debug!("Pong: {data}");
-                    }
-                    OpCode::Close => {
-                        break;
                     }
                     _ => {}
                 }
