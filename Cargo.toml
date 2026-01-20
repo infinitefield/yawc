@@ -61,7 +61,7 @@ test = false
 
 [[example]]
 name = "echo_server_smol"
-path = "examples/echo_sever_smol.rs"
+path = "examples/echo_server_smol.rs"
 required-features = ["smol"]
 test = false
 
@@ -79,10 +79,6 @@ test = false
 
 [[example]]
 name = "echo_server"
-test = false
-
-[[example]]
-name = "echo_server_smol"
 test = false
 
 [[example]]

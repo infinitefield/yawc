@@ -47,7 +47,7 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
     Ok(response)
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> yawc::Result<()> {
     // console_subscriber::init();
 
