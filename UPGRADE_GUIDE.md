@@ -1,6 +1,6 @@
-# Upgrade Guide: yawc 0.3 to 0.3
+# Upgrade Guide: yawc 0.2 to 0.3
 
-This guide will help you upgrade your code from yawc 0.3.x to 0.3.0. The 0.3 release includes several breaking changes focused on API simplification and improved architecture.
+This guide will help you upgrade your code from yawc 0.2.x to 0.3.0. The 0.3 release includes several breaking changes focused on API simplification and improved architecture.
 
 ## Table of Contents
 
@@ -278,7 +278,7 @@ Update your `Cargo.toml`:
 ```toml
 [dependencies]
 # Before
-# yawc = { version = "0.1", features = ["logging", "json", "reqwest"] }
+# yawc = { version = "0.2", features = ["logging", "json", "reqwest"] }
 
 # After
 yawc = { version = "0.3", features = ["reqwest"] }
@@ -574,7 +574,7 @@ let (opcode, is_fin, payload) = frame.into_parts();
 
 ```toml
 # Before
-yawc = { version = "0.3", features = ["logging"] }
+yawc = { version = "0.2", features = ["logging"] }
 
 # After
 yawc = "0.3"
@@ -588,7 +588,7 @@ yawc = "0.3"
 
 ```toml
 # Before
-yawc = { version = "0.3", features = ["json"] }
+yawc = { version = "0.2", features = ["json"] }
 
 # After
 yawc = "0.3"
