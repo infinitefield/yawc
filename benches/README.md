@@ -2,6 +2,8 @@
 
 This directory contains benchmark tools for comparing yawc performance against other WebSocket implementations.
 
+Benchmarks are very undeterministic given that most of the overhead happens in tokio and system calls.
+
 ## Prerequisites
 
 ### Install OpenSSL (macOS)
@@ -46,7 +48,7 @@ The benchmark suite tests all libraries across different scenarios:
 
 **Libraries tested:**
 
-- **yawc** (this library)
+- **yawc** (this crate)
 - **fastwebsockets** (Rust)
 - **uWebSockets** (C++)
 - **tokio-tungstenite** (Rust)
