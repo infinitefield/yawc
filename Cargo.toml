@@ -18,6 +18,9 @@ categories = [
 readme = "README.md"
 rust-version = "1.82.0"
 
+[profile.release]
+debug = true
+
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
 include = ["/src/**/*", "/Cargo.toml", "/README.md", "/LICENSE"]
@@ -78,6 +81,7 @@ bytes = "1"
 futures = "0.3"
 thiserror = "2"
 rand = "0.8"
+tokio = { version = "1", default-features = false }
 
 # ==============================================================================
 # WebAssembly target-specific dependencies
@@ -147,7 +151,9 @@ flate2 = "1"
 # ==============================================================================
 [dev-dependencies]
 anyhow = "1"
+console-subscriber = "0.5.0"
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "tracing"] }
 wasm-bindgen-test = "0.3"
 
 # ==============================================================================
