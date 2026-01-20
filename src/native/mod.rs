@@ -1,4 +1,65 @@
 //! Native WebSocket implementation for Tokio runtime.
+//!
+//! # Architecture Layer: Protocol & Application
+//!
+//! This module implements the **top layer** of the WebSocket processing stack,
+//! providing the main [`WebSocket`] type that applications interact with.
+//!
+//! ## WebSocket Layer Responsibilities
+//!
+//! The [`WebSocket`] type handles:
+//!
+//! - **Decompression**: Applies permessage-deflate decompression (RFC 7692) to complete messages
+//! - **UTF-8 validation**: Validates text frames contain valid UTF-8
+//! - **Protocol control**: Handles Ping/Pong and Close frames automatically
+//! - **Connection management**: Manages WebSocket connection lifecycle
+//! - **Futures integration**: Implements `Stream` and `Sink` traits
+//!
+//! ## Layered Processing
+//!
+//! Messages flow through three distinct layers:
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────┐
+//! │  WebSocket Layer (this module)                 │
+//! │  • Decompresses complete assembled messages    │
+//! │  • Validates UTF-8 for text frames             │
+//! │  • Handles Ping/Pong/Close protocol            │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  ReadHalf Layer (split module)                 │
+//! │  • Assembles fragmented messages               │
+//! │  • Tracks fragment state and timeouts          │
+//! │  • Enforces message size limits                │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  Codec Layer (codec module)                    │
+//! │  • Decodes individual frames from bytes        │
+//! │  • Handles masking/unmasking                   │
+//! │  • Parses frame headers (FIN, RSV, OpCode)     │
+//! └────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Example: Compressed Fragmented Message
+//!
+//! When receiving a compressed message split across 3 fragments:
+//!
+//! 1. **Codec**: Decodes 3 individual frames
+//!    - `Frame(Text, RSV1=1, FIN=0, payload1)`
+//!    - `Frame(Continuation, RSV1=0, FIN=0, payload2)`
+//!    - `Frame(Continuation, RSV1=0, FIN=1, payload3)`
+//!
+//! 2. **ReadHalf**: Assembles complete compressed message
+//!    - Returns `Frame(Text, RSV1=1, FIN=1, payload1+payload2+payload3)`
+//!
+//! 3. **WebSocket**: Decompresses and validates
+//!    - Decompresses the concatenated payload
+//!    - Validates UTF-8 if it's a text frame
+//!    - Returns final frame to application
+//!
+//! This ensures RFC 6455 fragmentation and RFC 7692 compression are both handled correctly.
 
 mod builder;
 mod options;
@@ -8,7 +69,7 @@ mod upgrade;
 use crate::{close, codec, compression, frame, Result, WebSocketError};
 
 use {
-    bytes::{Bytes, BytesMut},
+    bytes::Bytes,
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
@@ -26,7 +87,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     task::{ready, Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -367,18 +428,8 @@ pub struct WebSocket<S> {
     wake_proxy: Arc<WakeProxy>,
     obligated_sends: VecDeque<Frame>,
     flush_sends: bool,
+    inflate: Option<Decompressor>,
     check_utf8: bool,
-    // Fragment handling
-    fragment: Option<Fragment>,
-    accumulated: BytesMut,
-    max_read_buffer: usize,
-    fragment_timeout: Option<Duration>,
-}
-
-/// Fragmented message header.
-struct Fragment {
-    started: Instant,
-    opcode: OpCode,
 }
 
 impl WebSocket<MaybeTlsStream<TcpStream>> {
@@ -783,14 +834,14 @@ where
         loop {
             let res = wake_proxy.with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx));
             match res {
-                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
-                    ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
-                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
-                }
                 Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
                     Some(frame) => return Poll::Ready(Ok(frame)),
                     None => continue,
                 },
+                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
+                    ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
+                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
+                }
                 Poll::Ready(Err(err)) => {
                     let code = match err {
                         WebSocketError::FrameTooLarge => CloseCode::Size,
@@ -876,120 +927,67 @@ where
 
         Self {
             stream: Framed::from_parts(parts),
-            read_half: ReadHalf::new(role, &opts),
+            read_half: ReadHalf::new(&opts),
             write_half: WriteHalf::new(role, &opts),
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
+            inflate: opts.decompressor(role),
             check_utf8: opts.utf8,
-            fragment: None,
-            accumulated: BytesMut::with_capacity(1024),
-            max_read_buffer: opts.max_read_buffer,
-            fragment_timeout: opts.fragment_timeout,
         }
     }
 
     fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        // Decompression is already handled in ReadHalf::on_frame
+        // Fragmentation is handled in ReadHalf::on_frame
+        // This method handles decompression, UTF-8 validation, and protocol concerns
+
+        // Handle protocol frames first
         match frame.opcode {
-            OpCode::Text | OpCode::Binary => {
-                // Check for invalid fragmentation
-                if self.fragment.is_some() {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                // Handle fragmented messages
-                if !frame.fin {
-                    self.fragment = Some(Fragment {
-                        started: Instant::now(),
-                        opcode: frame.opcode,
-                    });
-
-                    self.accumulated.extend_from_slice(&frame.payload);
-                    return Ok(None);
-                }
-
-                // UTF-8 validation for text frames
-                if frame.opcode == OpCode::Text && self.check_utf8 {
-                    #[cfg(not(feature = "simd"))]
-                    if std::str::from_utf8(&frame.payload).is_err() {
-                        return Err(WebSocketError::InvalidUTF8);
-                    }
-                    #[cfg(feature = "simd")]
-                    if simdutf8::basic::from_utf8(&frame.payload).is_err() {
-                        return Err(WebSocketError::InvalidUTF8);
-                    }
-                }
-
-                Ok(Some(frame))
-            }
-            OpCode::Continuation => {
-                // Check buffer size
-                if self.accumulated.len() + frame.payload.len() >= self.max_read_buffer {
-                    return Err(WebSocketError::FrameTooLarge);
-                }
-
-                self.accumulated.extend_from_slice(&frame.payload);
-
-                let fragment = self
-                    .fragment
-                    .as_ref()
-                    .ok_or(WebSocketError::InvalidFragment)?;
-
-                if frame.fin {
-                    // Gather all accumulated buffer and replace it with a new one
-                    let payload =
-                        std::mem::replace(&mut self.accumulated, BytesMut::with_capacity(1024));
-
-                    frame.opcode = fragment.opcode;
-                    frame.payload = payload.freeze();
-                    self.fragment = None;
-
-                    // UTF-8 validation for text frames
-                    if frame.opcode == OpCode::Text && self.check_utf8 {
-                        #[cfg(not(feature = "simd"))]
-                        if std::str::from_utf8(&frame.payload).is_err() {
-                            return Err(WebSocketError::InvalidUTF8);
-                        }
-                        #[cfg(feature = "simd")]
-                        if simdutf8::basic::from_utf8(&frame.payload).is_err() {
-                            return Err(WebSocketError::InvalidUTF8);
-                        }
-                    }
-
-                    Ok(Some(frame))
-                } else if self
-                    .fragment_timeout
-                    .is_some_and(|timeout| fragment.started.elapsed() > timeout)
-                {
-                    Err(WebSocketError::FragmentTimeout)
-                } else {
-                    Ok(None)
-                }
-            }
-            OpCode::Pong => Ok(Some(frame)),
             OpCode::Ping => {
-                self.on_ping(frame);
-                Ok(None)
+                self.on_ping(&frame);
+                return Ok(Some(frame));
             }
             OpCode::Close => {
-                // Control frames cannot be fragmented
-                if !frame.fin {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                self.read_half.is_closed = true;
-
-                match self.on_close(&frame) {
+                return match self.on_close(&frame) {
                     Ok(_) => Ok(Some(frame)),
                     Err(err) => Err(err),
+                };
+            }
+            OpCode::Pong => return Ok(Some(frame)),
+            _ => {}
+        }
+
+        // Handle decompression for data frames (after fragmentation assembly)
+        if frame.is_compressed {
+            if let Some(ref mut inflate) = self.inflate {
+                let decompressed = inflate.decompress(&frame.payload, true)?;
+                if let Some(payload) = decompressed {
+                    frame.is_compressed = false;
+                    frame.payload = payload;
                 }
+            } else {
+                return Err(WebSocketError::CompressionNotSupported);
             }
         }
+
+        // UTF-8 validation for text frames
+        if frame.opcode == OpCode::Text && self.check_utf8 {
+            #[cfg(not(feature = "simd"))]
+            if std::str::from_utf8(&frame.payload).is_err() {
+                return Err(WebSocketError::InvalidUTF8);
+            }
+            #[cfg(feature = "simd")]
+            if simdutf8::basic::from_utf8(&frame.payload).is_err() {
+                return Err(WebSocketError::InvalidUTF8);
+            }
+        }
+
+        Ok(Some(frame))
     }
 
-    fn on_ping(&mut self, frame: Frame) {
-        self.obligated_sends.push_back(Frame::pong(frame.payload));
+    fn on_ping(&mut self, frame: &Frame) {
+        self.obligated_sends
+            .push_back(Frame::pong(frame.payload.clone()));
     }
 
     fn on_close(&mut self, frame: &Frame) -> Result<()> {

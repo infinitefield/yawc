@@ -2,21 +2,44 @@
 //!
 //! WebSocket codec implementation for frame encoding and decoding.
 //!
-//! This module provides the functionality to encode and decode WebSocket frames according to
-//! the WebSocket protocol specification (RFC 6455). It includes implementations for handling
-//! various frame types, masking, fragmentation, control frames, and payload processing.
+//! This module provides the **lowest layer** of the WebSocket processing stack, handling
+//! the raw byte-level encoding and decoding of WebSocket frames according to RFC 6455.
 //!
-//! The main components of this module are:
-//! - `Codec`: A combined encoder/decoder for bidirectional WebSocket communication
-//! - `Decoder`: Parses raw bytes into structured WebSocket frames
-//! - `Encoder`: Serializes WebSocket frames into raw bytes for transmission
+//! ## Architecture Layer: Tokio Codec
 //!
-//! The implementation handles state transitions during partial frame reception and enforces
-//! protocol constraints like maximum payload sizes and control frame requirements.
+//! The codec layer is responsible for:
+//! - **Frame decoding**: Parsing raw bytes from the network into structured [`Frame`] objects
+//! - **Frame encoding**: Serializing [`Frame`] objects into raw bytes for network transmission
+//! - **Header parsing**: Extracting FIN, RSV1-3, OpCode, and mask bits
+//! - **Masking/unmasking**: Applying and removing XOR masks as per RFC 6455
+//! - **Payload length handling**: Supporting 7-bit, 16-bit, and 64-bit payload lengths
 //!
-//! This codec can be used as a foundation for building custom WebSocket implementations.
-//! Users can leverage these components to create their own WebSocket clients, servers,
-//! or protocol extensions by integrating this codec with their networking code.
+//! ## What the Codec Does NOT Handle
+//!
+//! The codec operates at the frame level only. It does **not** handle:
+//! - Fragment assembly (handled by [`ReadHalf`](crate::native::split::ReadHalf))
+//! - Decompression (handled by [`WebSocket`](crate::WebSocket))
+//! - UTF-8 validation (handled by [`WebSocket`](crate::WebSocket))
+//! - Protocol control (Ping/Pong/Close handling)
+//!
+//! ## Components
+//!
+//! - [`Codec`]: Combined encoder/decoder for bidirectional WebSocket communication
+//! - [`Decoder`]: Parses raw bytes into individual WebSocket frames
+//! - [`Encoder`]: Serializes WebSocket frames into raw bytes for transmission
+//!
+//! ## Example Data Flow
+//!
+//! **Receiving a fragmented compressed message:**
+//! ```text
+//! Network bytes → Decoder → Frame(OpCode::Text, RSV1=1, FIN=0)
+//! Network bytes → Decoder → Frame(OpCode::Continuation, RSV1=0, FIN=0)
+//! Network bytes → Decoder → Frame(OpCode::Continuation, RSV1=0, FIN=1)
+//! ```
+//!
+//! The decoder simply returns individual frames. Fragment assembly happens at the
+//! [`ReadHalf`](crate::native::split::ReadHalf) layer, and decompression happens at the
+//! [`WebSocket`](crate::WebSocket) layer.
 
 use bytes::{Buf, BytesMut};
 use tokio_util::codec;

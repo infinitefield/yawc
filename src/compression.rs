@@ -1,6 +1,6 @@
 use std::io;
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use flate2::{CompressError, DecompressError, FlushCompress, Status};
 
 use nom::{
@@ -285,7 +285,7 @@ impl Compressor {
     ///
     /// # Returns
     /// A `BytesMut` containing the compressed data, or an `io::Error` if compression fails.
-    pub fn compress(&mut self, input: &[u8]) -> io::Result<BytesMut> {
+    pub fn compress(&mut self, input: &[u8]) -> io::Result<Bytes> {
         match &mut self.compressor_type {
             CompressorType::Contextual(compressor) => compressor.compress(input),
             CompressorType::NoContextTakeover(compressor) => compressor.compress_no_context(input),
@@ -306,12 +306,6 @@ struct Deflate {
 
 impl Deflate {
     /// Creates a new `Deflate` compressor with the specified compression level.
-    ///
-    /// # Parameters
-    /// - `level`: The level of compression to apply, using the [`CompressionLevel`] type.
-    ///
-    /// # Returns
-    /// A new `Deflate` instance with the specified compression level.
     fn new(level: CompressionLevel) -> Self {
         Self {
             output: BytesMut::with_capacity(1024),
@@ -320,16 +314,6 @@ impl Deflate {
     }
 
     /// Creates a new `Deflate` compressor with a specific compression level and window size for LZ77.
-    ///
-    /// Available only when compiled with the `zlib` feature, this allows finer control over compression by specifying the
-    /// `window_bits` for the LZ77 sliding window.
-    ///
-    /// # Parameters
-    /// - `level`: The level of compression to apply.
-    /// - `window_bits`: The window size for LZ77, in bits.
-    ///
-    /// # Returns
-    /// A `Deflate` instance configured with the specified window size.
     #[cfg(feature = "zlib")]
     fn new_with_window_bits(level: CompressionLevel, window_bits: u8) -> Self {
         Self {
@@ -339,25 +323,13 @@ impl Deflate {
     }
 
     /// Compresses input data with no context takeover, resetting the compression dictionary before each compression.
-    ///
-    /// # Parameters
-    /// - `input`: The data slice to compress.
-    ///
-    /// # Returns
-    /// A `BytesMut` containing the compressed data, or an `io::Error` if compression fails.
-    fn compress_no_context(&mut self, input: &[u8]) -> io::Result<BytesMut> {
+    fn compress_no_context(&mut self, input: &[u8]) -> io::Result<Bytes> {
         self.compress.reset(); // Reset dictionary for no-context takeover
         self.compress(input)
     }
 
     /// Compresses input data while maintaining compression context across frames.
-    ///
-    /// # Parameters
-    /// - `input`: The data slice to compress.
-    ///
-    /// # Returns
-    /// A `BytesMut` containing the compressed data, or an `io::Error` if compression fails.
-    fn compress(&mut self, mut input: &[u8]) -> io::Result<BytesMut> {
+    fn compress(&mut self, mut input: &[u8]) -> io::Result<Bytes> {
         while !input.is_empty() {
             let consumed = self.write(input)?;
             input = &input[consumed..];
@@ -366,12 +338,6 @@ impl Deflate {
     }
 
     /// Writes a chunk of data to the output buffer during compression.
-    ///
-    /// # Parameters
-    /// - `input`: The data slice to write to the compressor.
-    ///
-    /// # Returns
-    /// The number of bytes consumed from `input`, or an `io::Error` if the compression fails.
     fn write(&mut self, input: &[u8]) -> io::Result<usize> {
         let output = &mut self.output;
         let compressor = &mut self.compress;
@@ -398,7 +364,7 @@ impl Deflate {
     }
 
     /// Flushes the compressor, syncing any pending data and returning the accumulated output buffer.
-    fn flush(&mut self) -> io::Result<BytesMut> {
+    fn flush(&mut self) -> io::Result<Bytes> {
         let mut flush_compress = |flag: FlushCompress| -> io::Result<usize> {
             let output = &mut self.output;
             let compressor = &mut self.compress;
@@ -429,7 +395,7 @@ impl Deflate {
             self.output.truncate(self.output.len() - 4);
         }
 
-        Ok(self.output.split())
+        Ok(self.output.split().freeze())
     }
 }
 
@@ -575,7 +541,7 @@ impl Decompressor {
     /// * `Ok(None)` - More input needed to complete decompression
     /// * `Err(io::Error)` - Decompression failed due to invalid/corrupt data
     ///
-    pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<BytesMut>> {
+    pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<Bytes>> {
         match &mut self.decompressor_type {
             DecompressorType::Contextual(decompressor) => {
                 decompressor.decompress(input, stream_end)
@@ -627,33 +593,17 @@ impl Inflate {
     }
 
     /// Decompresses input data in no-context-takeover mode, resetting the decompression context before each call.
-    ///
-    /// # Parameters
-    /// - `input`: The compressed data to decompress.
-    /// - `stream_end`: Indicates whether this is the final frame, signaling the end of the decompression stream.
-    ///
-    /// # Returns
-    /// - `Ok(Some(BytesMut))`: The decompressed data, or `None` if more input is needed.
-    /// - `Err(io::Error)`: If decompression fails.
     fn decompress_no_context(
         &mut self,
         input: &[u8],
         stream_end: bool,
-    ) -> io::Result<Option<BytesMut>> {
+    ) -> io::Result<Option<Bytes>> {
         self.decompress.reset(false); // Reset the context for no-context takeover
         self.decompress(input, stream_end)
     }
 
     /// Decompresses input data while maintaining decompression context across frames.
-    ///
-    /// # Parameters
-    /// - `input`: The compressed data to decompress.
-    /// - `stream_end`: Indicates whether this is the final frame in a message, signaling the end of the decompression stream.
-    ///
-    /// # Returns
-    /// - `Ok(Some(BytesMut))`: The decompressed data if available, or `None` if more input is needed.
-    /// - `Err(io::Error)`: If decompression fails.
-    fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<BytesMut>> {
+    fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<Bytes>> {
         self.write(input)?;
 
         if stream_end {
@@ -666,13 +616,6 @@ impl Inflate {
     }
 
     /// Writes compressed input data to the output buffer during decompression.
-    ///
-    /// # Parameters
-    /// - `input`: The compressed data slice to write to the decompressor.
-    ///
-    /// # Returns
-    /// - `Ok(())` if successful.
-    /// - `Err(io::Error)` if an error occurs during decompression.
     fn write(&mut self, mut input: &[u8]) -> io::Result<()> {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
@@ -707,13 +650,7 @@ impl Inflate {
     }
 
     /// Flushes the decompressed data to the output buffer.
-    ///
-    /// This method ensures all data is written to the output buffer and strips any unnecessary suffix bytes.
-    ///
-    /// # Returns
-    /// - `Ok(BytesMut)`: The flushed output data.
-    /// - `Err(io::Error)`: If an error occurs during flushing.
-    fn flush(&mut self) -> io::Result<BytesMut> {
+    fn flush(&mut self) -> io::Result<Bytes> {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
 
@@ -736,7 +673,7 @@ impl Inflate {
                 .map_err(inflate_error)?;
 
             if before_out == decompressor.total_out() {
-                break Ok(output.split());
+                break Ok(output.split().freeze());
             }
 
             let written = (decompressor.total_out() - before_out) as usize;

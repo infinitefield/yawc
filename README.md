@@ -249,6 +249,71 @@ match frame.opcode {
 }
 ```
 
+## Architecture
+
+yawc implements a clean layered architecture for WebSocket message processing:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Application Layer                       │
+│                  (Your WebSocket Application)                │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      WebSocket Layer                         │
+│          • Decompression (permessage-deflate RFC 7692)      │
+│          • UTF-8 validation for text frames                  │
+│          • Protocol control (Ping/Pong, Close)               │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       ReadHalf Layer                         │
+│          • Fragment assembly (RFC 6455 fragmentation)        │
+│          • Fragment timeout management                        │
+│          • Maximum message size enforcement                   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Tokio Codec Layer                       │
+│          • Frame decoding from raw bytes                     │
+│          • Frame encoding to raw bytes                        │
+│          • Masking/unmasking                                  │
+│          • Header parsing (FIN, RSV, OpCode)                 │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+                    Network (TCP/TLS)
+```
+
+### Data Flow for Compressed Fragmented Messages
+
+When receiving a compressed fragmented message (e.g., 8KB payload split into 256-byte fragments):
+
+1. **Codec Layer**: Decodes each frame from bytes
+   - Frame 1: `OpCode::Text, RSV1=1 (compressed), FIN=0` → Returns individual frame
+   - Frame 2: `OpCode::Continuation, RSV1=0, FIN=0` → Returns individual frame
+   - Frame 3: `OpCode::Continuation, RSV1=0, FIN=1` → Returns individual frame
+
+2. **ReadHalf Layer**: Assembles fragments into complete message
+   - Accumulates fragments, tracking `is_compressed` flag from first frame
+   - On final fragment (`FIN=1`), concatenates all payloads
+   - Returns complete frame with assembled compressed payload
+
+3. **WebSocket Layer**: Decompresses and validates
+   - Decompresses the complete assembled payload (RFC 7692)
+   - Validates UTF-8 for text frames
+   - Returns final frame to application
+
+This architecture ensures:
+
+- **RFC 6455 compliance**: Proper fragmentation handling
+- **RFC 7692 compliance**: Correct permessage-deflate decompression
+- **Clean separation**: Each layer has a single, well-defined responsibility
+- **Efficiency**: Zero-copy operations where possible
+
 ## Performance Considerations
 
 - Uses zero-copy frame processing where possible

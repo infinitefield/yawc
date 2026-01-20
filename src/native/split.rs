@@ -1,49 +1,63 @@
 //! Split read/write halves for WebSocket connections.
 //!
+//! # Architecture Layer: Fragment Assembly
+//!
+//! This module implements the **middle layer** of the WebSocket processing stack,
+//! sitting between the codec layer and the WebSocket layer. Its primary responsibility
+//! is **fragment assembly** according to RFC 6455.
+//!
+//! ## ReadHalf Responsibilities
+//!
+//! [`ReadHalf`] handles fragmented message assembly:
+//!
+//! - **Fragment accumulation**: Collects continuation frames into complete messages
+//! - **State tracking**: Maintains fragment state (opcode, compression flag, accumulated data)
+//! - **Fragment timeout**: Enforces timeouts on incomplete fragmented messages
+//! - **Size limits**: Enforces maximum message size after assembly
+//! - **Masking removal**: Removes frame masks to prevent accidental echo
+//!
+//! ## What ReadHalf Does NOT Handle
+//!
+//! - **Frame decoding**: Handled by [`Codec`](crate::codec::Codec)
+//! - **Decompression**: Handled by [`WebSocket`](crate::WebSocket)
+//! - **UTF-8 validation**: Handled by [`WebSocket`](crate::WebSocket)
+//!
+//! ## Data Flow Example
+//!
+//! **Receiving a fragmented message:**
+//!
+//! ```text
+//! Codec → ReadHalf:
+//!   Frame(OpCode::Text, FIN=0, "Hello")
+//!     → ReadHalf: Start accumulating, return None
+//!
+//!   Frame(OpCode::Continuation, FIN=0, " Wor")
+//!     → ReadHalf: Continue accumulating, return None
+//!
+//!   Frame(OpCode::Continuation, FIN=1, "ld!")
+//!     → ReadHalf: Assemble complete message
+//!     → Returns Frame(OpCode::Text, FIN=1, "Hello World!")
+//! ```
+//!
+//! ## WriteHalf Responsibilities
+//!
+//! [`WriteHalf`] handles frame transmission with compression support:
+//!
+//! - **Compression**: Compresses frames when permessage-deflate is enabled
+//! - **Masking**: Applies masks to client frames (required by RFC 6455)
+//! - **Connection closure**: Manages graceful WebSocket closure protocol
+//!
 //! # Sans-IO Design
 //!
 //! This module implements a **sans-io** (I/O-free) design pattern where the protocol logic
-//! is completely separated from the I/O operations. This design provides several benefits:
+//! is completely separated from the I/O operations.
 //!
-//! ## Why Sans-IO?
+//! ## Benefits
 //!
-//! 1. **Testability**: Protocol logic can be tested without actual network I/O, making tests
-//!    faster, more reliable, and deterministic.
-//!
-//! 2. **Transport Agnostic**: The same protocol implementation works with any transport layer:
-//!    - TCP sockets
-//!    - Unix domain sockets
-//!    - In-memory buffers (for testing)
-//!    - Custom transports (QUIC, etc.)
-//!
-//! 3. **Flexibility**: Users can implement custom flow control, buffering strategies, and
-//!    error handling without being constrained by the protocol implementation.
-//!
-//! 4. **Performance**: Avoid unnecessary abstractions and allow for zero-copy optimizations
-//!    in user code.
-//!
-//! ## How It Works
-//!
-//! Instead of performing I/O directly, [`ReadHalf`] and [`WriteHalf`] operate on streams
-//! of frames:
-//!
-//! ```text
-//! ┌─────────────┐         ┌──────────────┐         ┌─────────────┐
-//! │   Network   │  Frames │  ReadHalf/   │  Frames │ Application │
-//! │   Socket    │────────>│  WriteHalf   │────────>│    Logic    │
-//! │   (I/O)     │<────────│  (Protocol)  │<────────│             │
-//! └─────────────┘         └──────────────┘         └─────────────┘
-//! ```
-//!
-//! The user provides frames to `ReadHalf`/`WriteHalf`, which handle:
-//! - Message fragmentation/reassembly
-//! - Compression/decompression
-//! - Protocol validation
-//!
-//! But NOT:
-//! - Reading from sockets
-//! - Writing to sockets
-//! - Connection management
+//! 1. **Testability**: Protocol logic can be tested without actual network I/O
+//! 2. **Transport Agnostic**: Works with TCP, Unix sockets, in-memory buffers, or custom transports
+//! 3. **Flexibility**: Users can implement custom flow control and buffering strategies
+//! 4. **Performance**: Enables zero-copy optimizations in user code
 //!
 //! # Thread Safety Through `split()`
 //!
@@ -116,20 +130,31 @@
 //! Prefer `futures::StreamExt::split()` unless you have specific low-level requirements.
 
 use std::{
+    collections::VecDeque,
     future::poll_fn,
     task::{ready, Context, Poll},
+    time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use futures::SinkExt;
 
 use crate::{
     close::CloseCode,
-    compression::{Compressor, Decompressor},
+    compression::Compressor,
     frame::{Frame, OpCode},
     Result, WebSocketError,
 };
 
 use super::{Negotiation, Role};
+
+struct Fragmentation {
+    started: Instant,
+    opcode: OpCode,
+    is_compressed: bool,
+    bytes_read: usize,
+    parts: VecDeque<Bytes>,
+}
 
 // ================ ReadHalf ====================
 
@@ -178,18 +203,23 @@ use super::{Negotiation, Role};
 /// }
 /// ```
 pub struct ReadHalf {
-    /// Optional decompressor used to decompress incoming payloads.
-    pub(super) inflate: Option<Decompressor>,
     /// Indicates if the connection has been closed.
     pub(super) is_closed: bool,
+    /// Fragment accumulation state
+    fragment: Option<Fragmentation>,
+    /// Maximum read buffer size for fragmented messages
+    max_read_buffer: usize,
+    /// Optional timeout for fragment assembly
+    fragment_timeout: Option<Duration>,
 }
 
 impl ReadHalf {
-    pub(super) fn new(role: Role, opts: &Negotiation) -> Self {
-        let inflate = opts.decompressor(role);
+    pub(super) fn new(opts: &Negotiation) -> Self {
         Self {
-            inflate,
             is_closed: false,
+            fragment: None,
+            max_read_buffer: opts.max_read_buffer,
+            fragment_timeout: opts.fragment_timeout,
         }
     }
 
@@ -221,28 +251,90 @@ impl ReadHalf {
     /// - `Ok(None)` if the frame is part of a fragmented message and not yet complete.
     /// - `Err(WebSocketError)` if an error occurs, such as invalid fragment or unsupported compression.
     fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        // Check compression support
-        if frame.is_compressed && self.inflate.is_none() {
-            return Err(WebSocketError::CompressionNotSupported);
-        }
+        use bytes::BufMut;
 
-        // Handle decompression if needed
-        if frame.is_compressed {
-            let inflate = self.inflate.as_mut().unwrap();
-            let payload = inflate.decompress(&frame.payload, frame.fin)?;
-            if let Some(payload) = payload {
-                frame.is_compressed = false;
-                frame.payload = payload.freeze();
-            } else {
-                return Err(WebSocketError::InvalidFragment);
-            }
-        }
-
-        // Remove mask and mark if closed
+        // Remove mask immediately
         frame.mask = None;
-        self.is_closed = frame.opcode == OpCode::Close;
 
-        Ok(Some(frame))
+        // Mark if connection is closing
+        if frame.opcode == OpCode::Close {
+            self.is_closed = true;
+            return Ok(Some(frame));
+        }
+
+        // Control frames (Ping, Pong) are never fragmented - return immediately
+        if frame.opcode.is_control() {
+            return Ok(Some(frame));
+        }
+
+        // Handle fragmentation and assembly
+        match frame.opcode {
+            OpCode::Text | OpCode::Binary => {
+                // Check for invalid fragmentation state
+                if self.fragment.is_some() {
+                    return Err(WebSocketError::InvalidFragment);
+                }
+
+                // Handle fragmented messages
+                if !frame.fin {
+                    self.fragment = Some(Fragmentation {
+                        started: Instant::now(),
+                        opcode: frame.opcode,
+                        is_compressed: frame.is_compressed,
+                        bytes_read: frame.payload.len(),
+                        parts: VecDeque::from([frame.payload]),
+                    });
+                    return Ok(None);
+                }
+
+                // Non-fragmented message - return as-is
+                Ok(Some(frame))
+            }
+            OpCode::Continuation => {
+                let mut fragment = self
+                    .fragment
+                    .take()
+                    .ok_or(WebSocketError::InvalidFragment)?;
+
+                fragment.bytes_read += frame.payload.len();
+
+                // Check buffer size
+                if fragment.bytes_read >= self.max_read_buffer {
+                    return Err(WebSocketError::FrameTooLarge);
+                }
+
+                fragment.parts.push_back(frame.payload);
+
+                if frame.fin {
+                    // Assemble complete message
+                    frame.opcode = fragment.opcode;
+                    frame.is_compressed = fragment.is_compressed;
+                    frame.payload = fragment
+                        .parts
+                        .into_iter()
+                        .fold(
+                            bytes::BytesMut::with_capacity(fragment.bytes_read),
+                            |mut acc, b| {
+                                acc.put(b);
+                                acc
+                            },
+                        )
+                        .freeze();
+
+                    // Return assembled frame as-is (decompression and validation happen in WebSocket layer)
+                    Ok(Some(frame))
+                } else if self
+                    .fragment_timeout
+                    .is_some_and(|timeout| fragment.started.elapsed() > timeout)
+                {
+                    Err(WebSocketError::FragmentTimeout)
+                } else {
+                    self.fragment = Some(fragment);
+                    Ok(None)
+                }
+            }
+            _ => Ok(Some(frame)),
+        }
     }
 
     /// Polls the WebSocket stream for the next frame, managing frame processing and protocol compliance.
