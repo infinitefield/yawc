@@ -18,8 +18,8 @@ categories = [
 readme = "README.md"
 rust-version = "1.82.0"
 
-[profile.release]
-debug = true
+# [profile.release]
+# debug = true
 
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
