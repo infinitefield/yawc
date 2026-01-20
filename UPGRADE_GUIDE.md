@@ -1,6 +1,6 @@
-# Upgrade Guide: yawc 0.1 to 0.2
+# Upgrade Guide: yawc 0.3 to 0.3
 
-This guide will help you upgrade your code from yawc 0.1.x to 0.2.0. The 0.2 release includes several breaking changes focused on API simplification and improved architecture.
+This guide will help you upgrade your code from yawc 0.3.x to 0.3.0. The 0.3 release includes several breaking changes focused on API simplification and improved architecture.
 
 ## Table of Contents
 
@@ -46,7 +46,7 @@ while let Some(frame) = ws.next().await {
 }
 ```
 
-#### After (0.2.x)
+#### After (0.3.x)
 
 ```rust
 use yawc::frame::Frame;
@@ -73,7 +73,7 @@ Direct field access on `Frame` is no longer possible. Use accessor methods inste
 
 #### Field Access Migration
 
-| 0.1.x (Old)     | 0.2.x (New)             | Notes                                            |
+| 0.3.x (Old)     | 0.3.x (New)             | Notes                                            |
 | --------------- | ----------------------- | ------------------------------------------------ |
 | `frame.opcode`  | `frame.opcode()`        | Returns `OpCode`                                 |
 | `frame.payload` | `frame.payload()`       | Returns `&Bytes`                                 |
@@ -98,7 +98,7 @@ match frame.opcode {
 }
 ```
 
-#### After (0.2.x)
+#### After (0.3.x)
 
 ```rust
 let opcode = frame.opcode();
@@ -140,11 +140,11 @@ The `logging` feature flag has been removed. Logging is now always available thr
 yawc = { version = "0.1", features = ["logging"] }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```toml
 [dependencies]
-yawc = "0.2"
+yawc = "0.3"
 # logging is now always available via the log crate
 ```
 
@@ -159,11 +159,11 @@ The `json` feature flag has been removed. If you need JSON serialization, add `s
 yawc = { version = "0.1", features = ["json"] }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```toml
 [dependencies]
-yawc = "0.2"
+yawc = "0.3"
 serde_json = "1.0"  # Add directly if needed
 serde = { version = "1.0", features = ["derive"] }
 ```
@@ -186,11 +186,11 @@ yawc = { version = "0.1", features = ["reqwest"] }
 reqwest = "0.12"
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```toml
 [dependencies]
-yawc = { version = "0.2", features = ["reqwest"] }
+yawc = { version = "0.3", features = ["reqwest"] }
 reqwest = "0.13"
 ```
 
@@ -198,7 +198,7 @@ reqwest = "0.13"
 
 ## New Features
 
-While migrating, you may want to take advantage of new features in 0.2:
+While migrating, you may want to take advantage of new features in 0.3:
 
 ### Fragment Timeout
 
@@ -251,7 +251,7 @@ let (opcode, is_fin, payload) = frame.into_parts();
 
 ### Multi-Runtime Support
 
-yawc 0.2 can work with async runtimes other than tokio:
+yawc 0.3 can work with async runtimes other than tokio:
 
 ```rust
 // See examples/client_smol.rs for a complete example
@@ -281,7 +281,7 @@ Update your `Cargo.toml`:
 # yawc = { version = "0.1", features = ["logging", "json", "reqwest"] }
 
 # After
-yawc = { version = "0.2", features = ["reqwest"] }
+yawc = { version = "0.3", features = ["reqwest"] }
 serde_json = "1.0"  # Only if you were using the json feature
 reqwest = "0.13"    # Only if you were using the reqwest feature
 ```
@@ -391,7 +391,7 @@ while let Some(frame) = ws.next().await {
 }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```rust
 use yawc::{WebSocket, frame::Frame};
@@ -420,7 +420,7 @@ while let Some(frame) = ws.next().await {
 }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```rust
 while let Some(frame) = ws.next().await {
@@ -447,7 +447,7 @@ for frame in frames {
 }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```rust
 let frames = vec![
@@ -476,7 +476,7 @@ if frame.opcode == OpCode::Close {
 }
 ```
 
-**After (0.2.x):**
+**After (0.3.x):**
 
 ```rust
 if frame.opcode() == OpCode::Close {
@@ -491,14 +491,14 @@ if frame.opcode() == OpCode::Close {
 
 ### Pattern 5: Destructuring Frames
 
-**New in 0.2.x** - Use `into_parts()` when you need owned data:
+**New in 0.3.x** - Use `into_parts()` when you need owned data:
 
 ```rust
 // Before (0.1.x) - had to clone
 let opcode = frame.opcode;
 let payload = frame.payload.clone();
 
-// After (0.2.x) - can get ownership without cloning
+// After (0.3.x) - can get ownership without cloning
 let (opcode, is_fin, payload) = frame.into_parts();
 // payload is now owned Bytes, no clone needed
 ```
@@ -574,10 +574,10 @@ let (opcode, is_fin, payload) = frame.into_parts();
 
 ```toml
 # Before
-yawc = { version = "0.2", features = ["logging"] }
+yawc = { version = "0.3", features = ["logging"] }
 
 # After
-yawc = "0.2"
+yawc = "0.3"
 ```
 
 ### Feature `json` not found
@@ -588,16 +588,16 @@ yawc = "0.2"
 
 ```toml
 # Before
-yawc = { version = "0.2", features = ["json"] }
+yawc = { version = "0.3", features = ["json"] }
 
 # After
-yawc = "0.2"
+yawc = "0.3"
 serde_json = "1.0"
 ```
 
 ## Performance Considerations
 
-The 0.2 release includes several performance improvements:
+The 0.3 release includes several performance improvements:
 
 - **SIMD optimizations** for frame masking/unmasking (automatic when available)
 - **Improved fragment handling** with better memory management

@@ -394,7 +394,7 @@ tokio-tungstenite = { version = "0.20", features = [
 
 ```toml
 [dependencies]
-yawc = { version = "0.2", features = [
+yawc = { version = "0.3", features = [
     "axum",         # Axum integration
     "reqwest",      # reqwest client support
     "logging",      # Debug logging
