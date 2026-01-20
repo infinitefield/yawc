@@ -1,8 +1,10 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
-use yawc::{close::CloseCode, frame::OpCode, CompressionLevel, Frame, Options, WebSocket};
+use yawc::{
+    close::CloseCode, frame::OpCode, CompressionLevel, Frame, Options, TcpWebSocket, WebSocket,
+};
 
-async fn connect(path: &str) -> Result<WebSocket> {
+async fn connect(path: &str) -> Result<TcpWebSocket> {
     let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
         .with_options(
             Options::default()
@@ -49,7 +51,7 @@ async fn main() -> Result<()> {
                 None => break,
             };
 
-            let (opcode, body) = msg.into_parts();
+            let (opcode, _is_fin, body) = msg.into_parts();
             match opcode {
                 OpCode::Text | OpCode::Binary => {
                     ws.send(Frame::from((opcode, body))).await?;

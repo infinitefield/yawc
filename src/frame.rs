@@ -91,7 +91,7 @@
 //! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://datatracker.ietf.org/doc/html/rfc6455#section-5).
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))] // Silence dead code warning for WASM
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use crate::{close::CloseCode, WebSocketError};
 
@@ -190,30 +190,16 @@ impl From<Frame> for (OpCode, Bytes) {
 ///
 /// This allows constructing a `Frame` from an opcode and immutable bytes payload.
 /// The frame will have `fin` set to `true` by default.
-impl From<(OpCode, Bytes)> for Frame {
-    fn from((opcode, payload): (OpCode, Bytes)) -> Self {
+impl<T> From<(OpCode, T)> for Frame
+where
+    T: Into<Bytes>,
+{
+    fn from((opcode, payload): (OpCode, T)) -> Self {
         Self {
             fin: true,
             opcode,
             mask: None,
-            payload,
-            is_compressed: false,
-        }
-    }
-}
-
-/// Converts a tuple of `(OpCode, BytesMut)` to a `Frame`.
-///
-/// This allows constructing a `Frame` from an opcode and mutable bytes payload,
-/// automatically freezing the bytes into an immutable form.
-/// The frame will have `fin` set to `true` by default.
-impl From<(OpCode, BytesMut)> for Frame {
-    fn from((opcode, payload): (OpCode, BytesMut)) -> Self {
-        Self {
-            fin: true,
-            opcode,
-            mask: None,
-            payload: payload.freeze(),
+            payload: payload.into(),
             is_compressed: false,
         }
     }
@@ -466,18 +452,11 @@ impl Frame {
     /// - `opcode`: The operation code of the frame, defining its type.
     /// - `mask`: Optional 4-byte masking key for client-to-server frames.
     /// - `payload`: The compressed frame payload data.
-    pub(crate) fn compress(
-        fin: bool,
-        opcode: OpCode,
-        mask: Option<[u8; 4]>,
-        payload: impl Into<Bytes>,
-    ) -> Self {
+    pub(crate) fn into_compressed(self, payload: impl Into<Bytes>) -> Self {
         Self {
-            fin,
-            opcode,
-            mask,
             payload: payload.into(),
             is_compressed: true,
+            ..self
         }
     }
 
@@ -538,19 +517,19 @@ impl Frame {
         self.payload
     }
 
-    /// Consumes the frame and returns its opcode and payload.
+    /// Consumes the frame and returns its opcode, whether it is final or not and payload.
     ///
     /// # Example
     /// ```rust
     /// use yawc::frame::{Frame, OpCode};
     ///
     /// let frame = Frame::text("Hello");
-    /// let (opcode, payload) = frame.into_parts();
+    /// let (opcode, is_fin, payload) = frame.into_parts();
     /// assert_eq!(opcode, OpCode::Text);
     /// ```
     #[inline(always)]
-    pub fn into_parts(self) -> (OpCode, Bytes) {
-        (self.opcode, self.payload)
+    pub fn into_parts(self) -> (OpCode, bool, Bytes) {
+        (self.opcode, self.fin, self.payload)
     }
 
     /// Returns the opcode and payload as a string slice.
@@ -757,40 +736,32 @@ impl Frame {
         }
     }
 
-    /// Formats the frame header into the provided `head` buffer and returns the size of the length field.
-    ///
-    /// # Parameters
-    /// - `head`: The buffer to hold the formatted frame header.
-    ///
-    /// # Returns
-    /// - The size of the length field (0, 2, 4, or 10 bytes).
-    ///
-    /// # Panics
-    /// Panics if `head` is not large enough to hold the formatted header.
-    pub(super) fn fmt_head(&self, head: &mut [u8]) -> usize {
+    /// Write frame header directly into BytesMut without intermediate buffer.
+    /// This is faster than fmt_head as it eliminates an extra copy.
+    #[inline]
+    pub(super) fn write_head(&self, dst: &mut bytes::BytesMut) {
+        use bytes::BufMut;
+
         let compression = u8::from(self.is_compressed);
-        head[0] = (self.fin as u8) << 7 | compression << 6 | u8::from(self.opcode);
+        let first_byte = (self.fin as u8) << 7 | compression << 6 | u8::from(self.opcode);
 
         let len = self.payload.len();
-        let size = if len < 126 {
-            head[1] = len as u8;
-            2
+
+        if len < 126 {
+            dst.put_u8(first_byte);
+            dst.put_u8(len as u8 | if self.mask.is_some() { 0x80 } else { 0 });
         } else if len < 65536 {
-            head[1] = 126;
-            head[2..4].copy_from_slice(&(len as u16).to_be_bytes());
-            4
+            dst.put_u8(first_byte);
+            dst.put_u8(126 | if self.mask.is_some() { 0x80 } else { 0 });
+            dst.put_u16(len as u16);
         } else {
-            head[1] = 127;
-            head[2..10].copy_from_slice(&(len as u64).to_be_bytes());
-            10
-        };
+            dst.put_u8(first_byte);
+            dst.put_u8(127 | if self.mask.is_some() { 0x80 } else { 0 });
+            dst.put_u64(len as u64);
+        }
 
         if let Some(mask) = self.mask {
-            head[1] |= 0x80;
-            head[size..size + 4].copy_from_slice(&mask);
-            size + 4
-        } else {
-            size
+            dst.put_slice(&mask);
         }
     }
 }
@@ -1028,29 +999,6 @@ mod tests {
 
             let invalid_utf8 = Frame::binary(vec![0xFF, 0xFE, 0xFD]);
             assert!(!invalid_utf8.is_utf8());
-        }
-
-        #[test]
-        #[wasm_bindgen_test]
-        fn test_frame_fmt_head() {
-            let payload = BytesMut::from("Header test");
-            let mask_key = [0xAA, 0xBB, 0xCC, 0xDD];
-            let frame = Frame::new(true, OpCode::Text, Some(mask_key), payload);
-
-            let mut head = [0u8; MAX_HEAD_SIZE];
-            let head_size = frame.fmt_head(&mut head);
-
-            // Verify the head size is correct
-            assert_eq!(head_size, 2 + 4); // Small payload (<126), so 2 bytes header + 4 bytes mask
-
-            // Verify the FIN bit, RSV bits, and opcode
-            assert_eq!(head[0], 0x81); // FIN=1, RSV1-3=0, OpCode=0x1 (Text)
-
-            // Verify the MASK bit and payload length
-            assert_eq!(head[1], 0x80 | 11); // MASK=1, Payload Len=11
-
-            // Verify the masking key
-            assert_eq!(&head[2..6], &mask_key);
         }
     }
 }

@@ -26,11 +26,11 @@ use hyper::{
     {Request, Response},
 };
 use tokio::net::TcpListener;
-use yawc::{CompressionLevel, Frame, OpCode, WebSocket};
+use yawc::{CompressionLevel, Frame, HttpWebSocket, OpCode, WebSocket};
 
 // Type alias for storing connected clients
 // Uses BTreeMap for ordered storage of client IDs -> WebSocket sinks
-type Clients = Mutex<BTreeMap<u64, SplitSink<WebSocket, Frame>>>;
+type Clients = Mutex<BTreeMap<u64, SplitSink<HttpWebSocket, Frame>>>;
 
 // Atomic counter for generating unique client IDs
 static CLIENT_ID: AtomicU64 = AtomicU64::new(0);
@@ -38,7 +38,7 @@ static CLIENT_ID: AtomicU64 = AtomicU64::new(0);
 // =============== server functions ================
 
 // Handles an individual WebSocket client connection
-async fn handle_client(clients: Arc<Clients>, ws: WebSocket) -> yawc::Result<()> {
+async fn handle_client(clients: Arc<Clients>, ws: HttpWebSocket) -> yawc::Result<()> {
     // Split WebSocket into sink (for sending) and stream (for receiving)
     let (sink, mut stream) = ws.split();
 
@@ -158,14 +158,11 @@ async fn client(clients: Arc<Clients>) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> yawc::Result<()> {
-    // Initialize logging
     simple_logger::init_with_level(log::Level::Debug).expect("log");
 
-    // Create shared clients state
     let clients = Arc::new(Mutex::new(BTreeMap::default()));
-
-    // Spawn client task and run server
     tokio::spawn(client(Arc::clone(&clients)));
+
     let _ = server(clients).await;
 
     Ok(())

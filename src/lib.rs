@@ -9,6 +9,16 @@
 //! - `zlib`: Advanced compression with window size control
 //! - `json`: JSON serialization support
 //!
+//! # Runtime Support
+//!
+//! yawc is built on tokio's I/O traits but can work with other async runtimes through simple adapters.
+//! While the library uses tokio internally for its codec and I/O operations, you can integrate it with
+//! runtimes like `smol`, `async-std`, or others by implementing trait bridges between their I/O traits
+//! and tokio's `AsyncRead`/`AsyncWrite`.
+//!
+//! See the [client_smol.rs example](https://github.com/infinitefield/yawc/tree/master/examples/client_smol.rs)
+//! for a complete demonstration of using yawc with the smol runtime.
+//!
 //! # Client Example
 //! ```rust
 //! use futures::{SinkExt, StreamExt};
@@ -66,7 +76,8 @@ pub mod close;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod codec;
 pub mod frame;
-mod mask;
+#[doc(hidden)]
+pub mod mask;
 #[cfg(not(target_arch = "wasm32"))]
 mod stream;
 

@@ -1,23 +1,84 @@
 //! Native WebSocket implementation for Tokio runtime.
+//!
+//! # Architecture Layer: Protocol & Application
+//!
+//! This module implements the **top layer** of the WebSocket processing stack,
+//! providing the main [`WebSocket`] type that applications interact with.
+//!
+//! ## WebSocket Layer Responsibilities
+//!
+//! The [`WebSocket`] type handles:
+//!
+//! - **Decompression**: Applies permessage-deflate decompression (RFC 7692) to complete messages
+//! - **UTF-8 validation**: Validates text frames contain valid UTF-8
+//! - **Protocol control**: Handles Ping/Pong and Close frames automatically
+//! - **Connection management**: Manages WebSocket connection lifecycle
+//! - **Futures integration**: Implements `Stream` and `Sink` traits
+//!
+//! ## Layered Processing
+//!
+//! Messages flow through three distinct layers:
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────┐
+//! │  WebSocket Layer (this module)                 │
+//! │  • Decompresses complete assembled messages    │
+//! │  • Validates UTF-8 for text frames             │
+//! │  • Handles Ping/Pong/Close protocol            │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  ReadHalf Layer (split module)                 │
+//! │  • Assembles fragmented messages               │
+//! │  • Tracks fragment state and timeouts          │
+//! │  • Enforces message size limits                │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  Codec Layer (codec module)                    │
+//! │  • Decodes individual frames from bytes        │
+//! │  • Handles masking/unmasking                   │
+//! │  • Parses frame headers (FIN, RSV, OpCode)     │
+//! └────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Example: Compressed Fragmented Message
+//!
+//! When receiving a compressed message split across 3 fragments:
+//!
+//! 1. **Codec**: Decodes 3 individual frames
+//!    - `Frame(Text, RSV1=1, FIN=0, payload1)`
+//!    - `Frame(Continuation, RSV1=0, FIN=0, payload2)`
+//!    - `Frame(Continuation, RSV1=0, FIN=1, payload3)`
+//!
+//! 2. **ReadHalf**: Assembles complete compressed message
+//!    - Returns `Frame(Text, RSV1=1, FIN=1, payload1+payload2+payload3)`
+//!
+//! 3. **WebSocket**: Decompresses and validates
+//!    - Decompresses the concatenated payload
+//!    - Validates UTF-8 if it's a text frame
+//!    - Returns final frame to application
+//!
+//! This ensures RFC 6455 fragmentation and RFC 7692 compression are both handled correctly.
 
 mod builder;
 mod options;
 mod split;
 mod upgrade;
 
-use crate::{close, codec, compression, frame, stream, Result, WebSocketError};
+use crate::{close, codec, compression, frame, Result, WebSocketError};
 
 use {
     bytes::Bytes,
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
-    stream::MaybeTlsStream,
     tokio::net::TcpStream,
     tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
 };
 
 use std::{
+    borrow::BorrowMut,
     collections::VecDeque,
     future::poll_fn,
     io,
@@ -35,15 +96,28 @@ use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
 use futures::task::AtomicWaker;
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, FramedParts};
 use url::Url;
 
 // Re-exports
+pub use crate::stream::MaybeTlsStream;
 pub use builder::{HttpRequest, HttpRequestBuilder, WebSocketBuilder};
 pub use frame::{Frame, OpCode};
 pub use options::{CompressionLevel, DeflateOptions, Options};
 pub use split::{ReadHalf, WriteHalf};
 pub use upgrade::UpgradeFut;
+
+/// Type alias for WebSocket connections established via `connect`.
+///
+/// This is the default WebSocket type returned by [`WebSocket::connect`],
+/// which handles both plain TCP and TLS connections over TCP streams.
+pub type TcpWebSocket = WebSocket<MaybeTlsStream<TcpStream>>;
+
+/// Type alias for server-side WebSocket connections from HTTP upgrades or when using reqwest.
+///
+/// This is the WebSocket type returned by [`WebSocket::upgrade`] and [`UpgradeFut`],
+/// which wraps hyper's upgraded HTTP connections.
+pub type HttpWebSocket = WebSocket<HttpStream>;
 
 #[cfg(feature = "axum")]
 pub use upgrade::IncomingUpgrade;
@@ -347,19 +421,18 @@ impl AsyncWrite for HttpStream {
 ///     Ok(())
 /// }
 /// ```
-pub struct WebSocket {
-    stream: Framed<HttpStream, Codec>,
+pub struct WebSocket<S> {
+    stream: Framed<S, Codec>,
     read_half: ReadHalf,
     write_half: WriteHalf,
     wake_proxy: Arc<WakeProxy>,
     obligated_sends: VecDeque<Frame>,
     flush_sends: bool,
+    inflate: Option<Decompressor>,
     check_utf8: bool,
 }
 
-impl WebSocket {
-    // ================== Client ====================
-
+impl WebSocket<MaybeTlsStream<TcpStream>> {
     /// Establishes a WebSocket connection to the specified `url`.
     ///
     /// This asynchronous function supports both `ws://` (non-secure) and `wss://` (secure) schemes.
@@ -390,7 +463,7 @@ impl WebSocket {
         connector: Option<TlsConnector>,
         options: Options,
         builder: HttpRequestBuilder,
-    ) -> Result<WebSocket> {
+    ) -> Result<TcpWebSocket> {
         let host = url.host().expect("hostname").to_string();
 
         let tcp_stream = if let Some(tcp_address) = tcp_address {
@@ -414,27 +487,125 @@ impl WebSocket {
             _ => return Err(WebSocketError::InvalidHttpScheme),
         };
 
-        Self::handshake_with_request(url, stream, options, builder).await
+        WebSocket::handshake_with_request(url, stream, options, builder).await
     }
+}
 
+impl<S> WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
     /// Performs a WebSocket handshake over an existing connection.
-    pub async fn handshake<S>(url: Url, io: S, options: Options) -> Result<WebSocket>
-    where
-        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
-    {
+    ///
+    /// This is a lower-level API that allows you to perform a WebSocket handshake
+    /// on an already established I/O stream (such as a TcpStream or TLS stream).
+    /// For most use cases, prefer using [`WebSocket::connect`] which handles both
+    /// connection establishment and handshake automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Perform the WebSocket handshake over the existing stream
+    ///     let ws = WebSocket::handshake(url, stream, Options::default()).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Use a custom connection method (e.g., SOCKS proxy, custom DNS resolution)
+    /// - Reuse an existing stream or connection
+    /// - Implement custom connection logic before the WebSocket handshake
+    ///
+    /// For adding custom headers to the handshake request, use
+    /// [`WebSocket::handshake_with_request`] instead.
+    pub async fn handshake(url: Url, io: S, options: Options) -> Result<WebSocket<S>> {
         Self::handshake_with_request(url, io, options, HttpRequest::builder()).await
     }
 
     /// Performs a WebSocket handshake with a customizable HTTP request.
-    pub async fn handshake_with_request<S>(
+    ///
+    /// This is similar to [`WebSocket::handshake`] but allows you to customize
+    /// the HTTP upgrade request by providing your own [`HttpRequestBuilder`].
+    /// This is useful when you need to add custom headers (e.g., authentication
+    /// tokens, API keys, or other metadata) to the handshake request.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The WebSocket URL (used for generating handshake headers)
+    /// * `io` - An existing I/O stream that implements AsyncRead + AsyncWrite
+    /// * `options` - WebSocket configuration options
+    /// * `builder` - An HTTP request builder for customizing the handshake request
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use tokio::net::TcpStream;
+    /// use yawc::{WebSocket, Options, HttpRequest};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> yawc::Result<()> {
+    ///     // Establish your own TCP connection
+    ///     let stream = TcpStream::connect("example.com:80").await?;
+    ///
+    ///     // Parse the WebSocket URL
+    ///     let url = "ws://example.com/socket".parse()?;
+    ///
+    ///     // Create a custom HTTP request with authentication headers
+    ///     let request = HttpRequest::builder()
+    ///         .header("Authorization", "Bearer my-secret-token")
+    ///         .header("X-Custom-Header", "custom-value");
+    ///
+    ///     // Perform the WebSocket handshake with custom headers
+    ///     let ws = WebSocket::handshake_with_request(
+    ///         url,
+    ///         stream,
+    ///         Options::default(),
+    ///         request
+    ///     ).await?;
+    ///
+    ///     // Now you can use the WebSocket connection
+    ///     // ws.send(...).await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// Use this function when you need to:
+    /// - Add authentication headers to the handshake request
+    /// - Include custom metadata or API keys
+    /// - Control the exact HTTP request sent during the WebSocket upgrade
+    /// - Combine custom connection logic with custom headers
+    pub async fn handshake_with_request(
         url: Url,
         io: S,
         options: Options,
         mut builder: HttpRequestBuilder,
-    ) -> Result<WebSocket>
-    where
-        S: AsyncWrite + AsyncRead + Send + Unpin + 'static,
-    {
+    ) -> Result<WebSocket<S>> {
         if !builder
             .headers_ref()
             .expect("header")
@@ -474,25 +645,36 @@ impl WebSocket {
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
 
+        #[cfg(not(feature = "smol"))]
         tokio::spawn(async move {
             if let Err(err) = conn.with_upgrades().await {
                 log::error!("upgrading connection: {:?}", err);
             }
         });
 
+        #[cfg(feature = "smol")]
+        smol::spawn(async move {
+            if let Err(err) = conn.with_upgrades().await {
+                log::error!("upgrading connection: {:?}", err);
+            }
+        })
+        .detach();
+
         let mut response = sender.send_request(req).await?;
         let negotiated = verify(&response, options)?;
 
         let upgraded = hyper::upgrade::on(&mut response).await?;
-        let stream = TokioIo::new(upgraded);
+        let parts = upgraded.downcast::<TokioIo<S>>().unwrap();
 
-        Ok(WebSocket::new(
-            Role::Client,
-            HttpStream::from(stream),
-            negotiated,
-        ))
+        // Extract the original stream and any leftover read buffer
+        let stream = parts.io.into_inner();
+        let read_buf = parts.read_buf;
+
+        Ok(WebSocket::new(Role::Client, stream, read_buf, negotiated))
     }
+}
 
+impl WebSocket<HttpStream> {
     /// Performs a WebSocket handshake when using the `reqwest` HTTP client.
     #[cfg(feature = "reqwest")]
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
@@ -500,7 +682,7 @@ impl WebSocket {
         mut url: Url,
         client: reqwest::Client,
         options: Options,
-    ) -> Result<WebSocket> {
+    ) -> Result<WebSocket<HttpStream>> {
         let host = url.host().expect("hostname").to_string();
 
         let host_header = if let Some(port) = url.port() {
@@ -545,6 +727,7 @@ impl WebSocket {
         Ok(WebSocket::new(
             Role::Client,
             HttpStream::from(upgraded),
+            Bytes::new(),
             negotiated,
         ))
     }
@@ -552,13 +735,13 @@ impl WebSocket {
     // ================== Server ====================
 
     /// Upgrades an HTTP connection to a WebSocket one.
-    pub fn upgrade<B>(request: impl std::borrow::BorrowMut<Request<B>>) -> UpgradeResult {
+    pub fn upgrade<B>(request: impl BorrowMut<Request<B>>) -> UpgradeResult {
         Self::upgrade_with_options(request, Options::default())
     }
 
     /// Attempts to upgrade an incoming `hyper::Request` to a WebSocket connection with customizable options.
     pub fn upgrade_with_options<B>(
-        mut request: impl std::borrow::BorrowMut<Request<B>>,
+        mut request: impl BorrowMut<Request<B>>,
         options: Options,
     ) -> UpgradeResult {
         let request = request.borrow_mut();
@@ -636,14 +819,19 @@ impl WebSocket {
 
         Ok((response, stream))
     }
+}
 
-    // ======== common websocket functions =============
+// ======== Generic WebSocket implementation =============
 
+impl<S> WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     /// Splits the [`WebSocket`] into its low-level components for advanced usage.
     ///
     /// # Safety
     /// This function is unsafe because it splits ownership of shared state.
-    pub unsafe fn split_stream(self) -> (Framed<HttpStream, Codec>, ReadHalf, WriteHalf) {
+    pub unsafe fn split_stream(self) -> (Framed<S, Codec>, ReadHalf, WriteHalf) {
         (self.stream, self.read_half, self.write_half)
     }
 
@@ -655,14 +843,14 @@ impl WebSocket {
         loop {
             let res = wake_proxy.with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx));
             match res {
-                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
-                    ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
-                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
-                }
                 Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
                     Some(frame) => return Poll::Ready(Ok(frame)),
                     None => continue,
                 },
+                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
+                    ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
+                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
+                }
                 Poll::Ready(Err(err)) => {
                     let code = match err {
                         WebSocketError::FrameTooLarge => CloseCode::Size,
@@ -734,53 +922,81 @@ impl WebSocket {
         Ok(())
     }
 
-    /// Creates a new connection after an HTTP upgrade.
-    pub(crate) fn new(role: Role, stream: HttpStream, opts: Negotiation) -> Self {
+    /// Creates a new WebSocket from an existing stream.
+    ///
+    /// The `read_buf` parameter should contain any bytes that were read from the stream
+    /// during the HTTP upgrade but weren't consumed (leftover data after the HTTP response).
+    pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, opts: Negotiation) -> Self {
         let decoder = codec::Decoder::new(role, opts.max_payload_read);
         let encoder = codec::Encoder::new(role);
         let codec = Codec::from((decoder, encoder));
 
+        let mut parts = FramedParts::new(stream, codec);
+        parts.read_buf = read_buf.into();
+
         Self {
-            stream: Framed::new(stream, codec),
-            read_half: ReadHalf::new(role, &opts),
+            stream: Framed::from_parts(parts),
+            read_half: ReadHalf::new(&opts),
             write_half: WriteHalf::new(role, &opts),
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
+            inflate: opts.decompressor(role),
             check_utf8: opts.utf8,
         }
     }
 
-    fn on_frame(&mut self, frame: Frame) -> Result<Option<Frame>> {
+    fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
+        // Fragmentation is handled in ReadHalf::on_frame
+        // This method handles decompression, UTF-8 validation, and protocol concerns
+
+        // Handle protocol frames first
         match frame.opcode {
-            OpCode::Text => {
-                if self.check_utf8 {
-                    #[cfg(not(feature = "simd"))]
-                    if std::str::from_utf8(&frame.payload).is_err() {
-                        return Err(WebSocketError::InvalidUTF8);
-                    }
-                    #[cfg(feature = "simd")]
-                    if simdutf8::basic::from_utf8(&frame.payload).is_err() {
-                        return Err(WebSocketError::InvalidUTF8);
-                    }
-                }
-                Ok(Some(frame))
-            }
-            OpCode::Binary | OpCode::Pong => Ok(Some(frame)),
             OpCode::Ping => {
-                self.on_ping(frame);
-                Ok(None)
+                self.on_ping(&frame);
+                return Ok(Some(frame));
             }
-            OpCode::Close => match self.on_close(&frame) {
-                Ok(_) => Ok(Some(frame)),
-                Err(err) => Err(err),
-            },
-            OpCode::Continuation => unreachable!(),
+            OpCode::Close => {
+                return match self.on_close(&frame) {
+                    Ok(_) => Ok(Some(frame)),
+                    Err(err) => Err(err),
+                };
+            }
+            OpCode::Pong => return Ok(Some(frame)),
+            _ => {}
         }
+
+        // Handle decompression for data frames (after fragmentation assembly)
+        if frame.is_compressed {
+            if let Some(ref mut inflate) = self.inflate {
+                let decompressed = inflate.decompress(&frame.payload, true)?;
+                if let Some(payload) = decompressed {
+                    frame.is_compressed = false;
+                    frame.payload = payload;
+                }
+            } else {
+                return Err(WebSocketError::CompressionNotSupported);
+            }
+        }
+
+        // UTF-8 validation for text frames
+        if frame.opcode == OpCode::Text && self.check_utf8 {
+            #[cfg(not(feature = "simd"))]
+            if std::str::from_utf8(&frame.payload).is_err() {
+                return Err(WebSocketError::InvalidUTF8);
+            }
+            #[cfg(feature = "simd")]
+            if simdutf8::basic::from_utf8(&frame.payload).is_err() {
+                return Err(WebSocketError::InvalidUTF8);
+            }
+        }
+
+        Ok(Some(frame))
     }
 
-    fn on_ping(&mut self, frame: Frame) {
-        self.obligated_sends.push_back(Frame::pong(frame.payload));
+    fn on_ping(&mut self, frame: &Frame) {
+        self.obligated_sends
+            .push_back(Frame::pong(frame.payload.clone()));
     }
 
     fn on_close(&mut self, frame: &Frame) -> Result<()> {
@@ -827,7 +1043,10 @@ impl WebSocket {
     }
 }
 
-impl futures::Stream for WebSocket {
+impl<S> futures::Stream for WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     type Item = Frame;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -839,7 +1058,10 @@ impl futures::Stream for WebSocket {
     }
 }
 
-impl futures::Sink<Frame> for WebSocket {
+impl<S> futures::Sink<Frame> for WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     type Error = WebSocketError;
 
     fn poll_ready(
@@ -1030,4 +1252,493 @@ Either:
     config.alpn_protocols = vec!["http/1.1".into()];
 
     TlsConnector::from(Arc::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::SinkExt;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+
+    /// A mock duplex stream that wraps tokio's DuplexStream for testing.
+    struct MockStream {
+        inner: DuplexStream,
+    }
+
+    impl MockStream {
+        /// Creates a pair of connected mock streams.
+        fn pair(buffer_size: usize) -> (Self, Self) {
+            let (a, b) = tokio::io::duplex(buffer_size);
+            (Self { inner: a }, Self { inner: b })
+        }
+    }
+
+    impl AsyncRead for MockStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for MockStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// Helper function to create a WebSocket pair for testing.
+    fn create_websocket_pair(buffer_size: usize) -> (WebSocket<MockStream>, WebSocket<MockStream>) {
+        let (client_stream, server_stream) = MockStream::pair(buffer_size);
+
+        let negotiation = Negotiation {
+            extensions: None,
+            compression_level: None,
+            max_payload_read: MAX_PAYLOAD_READ,
+            max_read_buffer: MAX_READ_BUFFER,
+            utf8: false,
+            fragment_timeout: None,
+        };
+
+        let client_ws = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            negotiation.clone(),
+        );
+
+        let server_ws = WebSocket::new(Role::Server, server_stream, Bytes::new(), negotiation);
+
+        (client_ws, server_ws)
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_text_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let text = "Hello, WebSocket!";
+        client
+            .send(Frame::text(text))
+            .await
+            .expect("Failed to send text frame");
+
+        let frame = server.next_frame().await.expect("Failed to receive frame");
+
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert_eq!(frame.payload(), text.as_bytes());
+        assert!(frame.is_fin());
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_binary_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let data = vec![1u8, 2, 3, 4, 5];
+        client
+            .send(Frame::binary(data.clone()))
+            .await
+            .expect("Failed to send binary frame");
+
+        let frame = server.next_frame().await.expect("Failed to receive frame");
+
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload(), &data[..]);
+        assert!(frame.is_fin());
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_communication() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        client
+            .send(Frame::text("Client message"))
+            .await
+            .expect("Failed to send from client");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive at server");
+        assert_eq!(frame.payload(), b"Client message" as &[u8]);
+
+        server
+            .send(Frame::text("Server response"))
+            .await
+            .expect("Failed to send from server");
+
+        let frame = client
+            .next_frame()
+            .await
+            .expect("Failed to receive at client");
+        assert_eq!(frame.payload(), b"Server response" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_ping_pong() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        // Ping frames are handled automatically by the WebSocket implementation
+        // The server will automatically respond with a pong, but we won't receive it via next_frame()
+        // Instead, test that we can send and receive pong frames explicitly
+
+        client
+            .send(Frame::pong("pong_data"))
+            .await
+            .expect("Failed to send pong");
+
+        let frame = server.next_frame().await.expect("Failed to receive pong");
+        assert_eq!(frame.opcode(), OpCode::Pong);
+        assert_eq!(frame.payload(), b"pong_data" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_close_frame() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::close(close::CloseCode::Normal, b"Goodbye"))
+            .await
+            .expect("Failed to send close frame");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive close frame");
+
+        assert_eq!(frame.opcode(), OpCode::Close);
+        assert_eq!(frame.close_code(), Some(close::CloseCode::Normal));
+        assert_eq!(
+            frame.close_reason().expect("Invalid close reason"),
+            Some("Goodbye")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_message() {
+        let (mut client, mut server) = create_websocket_pair(65536);
+
+        let large_data = vec![42u8; 10240];
+        client
+            .send(Frame::binary(large_data.clone()))
+            .await
+            .expect("Failed to send large message");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive large message");
+
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload().len(), 10240);
+        assert_eq!(frame.payload(), &large_data[..]);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_messages() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        for i in 0..10 {
+            let msg = format!("Message {}", i);
+            client
+                .send(Frame::text(msg.clone()))
+                .await
+                .expect("Failed to send message");
+
+            let frame = server
+                .next_frame()
+                .await
+                .expect("Failed to receive message");
+            assert_eq!(frame.payload(), msg.as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_payload() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::text(Bytes::new()))
+            .await
+            .expect("Failed to send empty frame");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive empty frame");
+
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert_eq!(frame.payload().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fragmented_message() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        let mut frame1 = Frame::text("Hello, ");
+        frame1.set_fin(false);
+        client
+            .send(frame1)
+            .await
+            .expect("Failed to send first fragment");
+
+        let frame2 = Frame::continuation("World!");
+        client
+            .send(frame2)
+            .await
+            .expect("Failed to send final fragment");
+
+        // WebSocket automatically reassembles fragments
+        // We receive one complete message with the concatenated payload
+        let received = server
+            .next_frame()
+            .await
+            .expect("Failed to receive message");
+        assert_eq!(received.opcode(), OpCode::Text);
+        assert!(received.is_fin());
+        assert_eq!(received.payload(), b"Hello, World!" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_send_receive() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        let client_task = tokio::spawn(async move {
+            for i in 0..5 {
+                client
+                    .send(Frame::text(format!("Client {}", i)))
+                    .await
+                    .expect("Failed to send from client");
+
+                let frame = client
+                    .next_frame()
+                    .await
+                    .expect("Failed to receive at client");
+                assert_eq!(frame.payload(), format!("Server {}", i).as_bytes());
+            }
+            client
+        });
+
+        let server_task = tokio::spawn(async move {
+            for i in 0..5 {
+                let frame = server
+                    .next_frame()
+                    .await
+                    .expect("Failed to receive at server");
+                assert_eq!(frame.payload(), format!("Client {}", i).as_bytes());
+
+                server
+                    .send(Frame::text(format!("Server {}", i)))
+                    .await
+                    .expect("Failed to send from server");
+            }
+            server
+        });
+
+        client_task.await.expect("Client task failed");
+        server_task.await.expect("Server task failed");
+    }
+
+    #[tokio::test]
+    async fn test_utf8_validation() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        let valid_utf8 = "Hello, 世界! 🌍";
+        client
+            .send(Frame::text(valid_utf8))
+            .await
+            .expect("Failed to send UTF-8 text");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive UTF-8 text");
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert!(frame.is_utf8());
+        assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), valid_utf8);
+    }
+
+    #[tokio::test]
+    async fn test_stream_trait_implementation() {
+        use futures::StreamExt;
+
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        tokio::spawn(async move {
+            for i in 0..3 {
+                client
+                    .send(Frame::text(format!("Message {}", i)))
+                    .await
+                    .expect("Failed to send message");
+            }
+        });
+
+        let mut count = 0;
+        while let Some(frame) = server.next().await {
+            assert_eq!(frame.opcode(), OpCode::Text);
+            count += 1;
+            if count == 3 {
+                break;
+            }
+        }
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_sink_trait_implementation() {
+        use futures::SinkExt;
+
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::text("Sink message"))
+            .await
+            .expect("Failed to send via Sink");
+
+        client.flush().await.expect("Failed to flush");
+
+        let frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive message");
+        assert_eq!(frame.payload(), b"Sink message" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_rapid_small_messages() {
+        let (mut client, mut server) = create_websocket_pair(8192);
+
+        let count = 100;
+
+        let sender = tokio::spawn(async move {
+            for i in 0..count {
+                client
+                    .send(Frame::text(format!("{}", i)))
+                    .await
+                    .expect("Failed to send");
+            }
+            client
+        });
+
+        for i in 0..count {
+            let frame = server.next_frame().await.expect("Failed to receive");
+            assert_eq!(frame.payload(), format!("{}", i).as_bytes());
+        }
+
+        sender.await.expect("Sender task failed");
+    }
+
+    #[tokio::test]
+    async fn test_interleaved_control_and_data_frames() {
+        let (mut client, mut server) = create_websocket_pair(2048);
+
+        client
+            .send(Frame::text("Data 1"))
+            .await
+            .expect("Failed to send");
+
+        // Ping frames are handled automatically and don't appear in next_frame()
+        // Use pong frames instead to test control frame interleaving
+        client
+            .send(Frame::pong("pong"))
+            .await
+            .expect("Failed to send pong");
+
+        client
+            .send(Frame::binary(vec![1, 2, 3]))
+            .await
+            .expect("Failed to send");
+
+        let f1 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f1.opcode(), OpCode::Text);
+        assert_eq!(f1.payload(), b"Data 1" as &[u8]);
+
+        let f2 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f2.opcode(), OpCode::Pong);
+
+        let f3 = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(f3.opcode(), OpCode::Binary);
+        assert_eq!(f3.payload(), &[1u8, 2, 3] as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_client_sends_masked_frames() {
+        let (mut client, mut _server) = create_websocket_pair(1024);
+
+        // Create a frame and send it through the client
+        let frame = Frame::text("test");
+        client.send(frame).await.expect("Failed to send");
+
+        // The frame should be automatically masked by the client encoder
+        // We can't directly verify this without inspecting the wire format,
+        // but the test verifies the codec path works correctly
+    }
+
+    #[tokio::test]
+    async fn test_server_sends_unmasked_frames() {
+        let (mut _client, mut server) = create_websocket_pair(1024);
+
+        // Server frames should not be masked
+        let frame = Frame::text("test");
+        server.send(frame).await.expect("Failed to send");
+
+        // Similar to above - verifies the codec path
+    }
+
+    #[tokio::test]
+    async fn test_close_code_variants() {
+        let (mut client, mut server) = create_websocket_pair(1024);
+
+        client
+            .send(Frame::close(close::CloseCode::Away, b""))
+            .await
+            .expect("Failed to send close");
+
+        let frame = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(frame.close_code(), Some(close::CloseCode::Away));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_fragments() {
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        // Send 5 fragments
+        for i in 0..5 {
+            let is_last = i == 4;
+            let opcode = if i == 0 {
+                OpCode::Text
+            } else {
+                OpCode::Continuation
+            };
+
+            let mut frame = Frame::from((opcode, format!("part{}", i)));
+            frame.set_fin(is_last);
+            client.send(frame).await.expect("Failed to send fragment");
+        }
+
+        // WebSocket automatically reassembles fragments
+        // We receive one complete message, not individual fragments
+        let frame = server.next_frame().await.expect("Failed to receive");
+        assert_eq!(frame.opcode(), OpCode::Text);
+        assert!(frame.is_fin());
+
+        // The payload should be the concatenation of all fragments
+        let expected = "part0part1part2part3part4";
+        assert_eq!(frame.payload(), expected.as_bytes());
+    }
 }

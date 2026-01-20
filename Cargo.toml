@@ -18,6 +18,9 @@ categories = [
 readme = "README.md"
 rust-version = "1.82.0"
 
+# [profile.release]
+# debug = true
+
 # Package build settings
 exclude = ["/.github/*", "/examples/*", "/tests/*", "/.gitignore"]
 include = ["/src/**/*", "/Cargo.toml", "/README.md", "/LICENSE"]
@@ -29,15 +32,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # Optional feature configurations
 [features]
-default = [
-    "rustls-ring",
-] # Enabled the ring crypto provider by default to not have any breaking changes
+default = ["rustls-ring"]
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 simd = ["simdutf8"]
 reqwest = ["dep:reqwest"]
 axum = ["axum-core", "http"]
 rustls-ring = ["tokio-rustls/ring"]
 rustls-aws-lc-rs = ["tokio-rustls/aws-lc-rs"]
+smol = ["dep:smol"]
 
 # Examples configuration
 [[example]]
@@ -49,6 +51,18 @@ test = false
 name = "axum_proxy"
 path = "examples/axum_proxy/main.rs"
 required-features = ["axum", "reqwest"]
+test = false
+
+[[example]]
+name = "client_smol"
+path = "examples/client_smol.rs"
+required-features = ["smol"]
+test = false
+
+[[example]]
+name = "echo_server_smol"
+path = "examples/echo_server_smol.rs"
+required-features = ["smol"]
 test = false
 
 [[example]]
@@ -96,6 +110,8 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.2", features = ["js"] }
+# Tokio without net features for WASM
+tokio = { version = "1", default-features = false }
 
 
 # ==============================================================================
@@ -139,7 +155,7 @@ log = "0.4"
 # Optional dependencies
 simdutf8 = { version = "0.1", optional = true }
 serde = { version = "1", optional = true }
-serde_json = { version = "1", optional = true }
+smol = { version = "2.0.2", optional = true }
 
 # Compression
 flate2 = "1"
@@ -148,6 +164,7 @@ flate2 = "1"
 # Development dependencies
 # ==============================================================================
 [dev-dependencies]
+anyhow = "1"
 serde_json = "1"
 wasm-bindgen-test = "0.3"
 
@@ -157,11 +174,20 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = "1"
 axum = "0.8"
+console-subscriber = "0.5.0"
 hyper = { version = "1.7", features = ["http1", "server", "client"] }
 log = "0.4"
 reqwest = { version = "0.13" }
 serde = { version = "1", features = ["derive"] }
 simple_logger = "5"
+# tokio = { version = "1", features = ["full", "tracing"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 webpki-roots = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+rand = "0.8"
+rustls = { version = "0.23", features = ["ring"] }
+futures-rustls = "0.26"
+rustls-native-certs = "0.8"
+rustls-pki-types = "1.0"
+smol = "2.0.2"

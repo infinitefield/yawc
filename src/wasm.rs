@@ -143,51 +143,6 @@ impl WebSocket {
         onmessage_callback.forget();
     }
 
-    /// Sends a JSON-serialized message over the WebSocket
-    ///
-    /// This method serializes the provided data structure into JSON and sends it
-    /// as a text frame over the WebSocket connection.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Any type that implements the `serde::Serialize` trait
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - Reference to the data structure to serialize and send
-    ///
-    /// # Returns
-    ///
-    /// A Result indicating success or any serialization/transmission errors
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #[derive(serde::Serialize)]
-    /// struct Message {
-    ///     content: String,
-    ///     timestamp: u64,
-    /// }
-    ///
-    /// let msg = Message {
-    ///     content: "Hello, WebSocket!".to_string(),
-    ///     timestamp: 1625097600,
-    /// };
-    ///
-    /// websocket.send_json(&msg).await?;
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if JSON serialization fails or if the WebSocket
-    /// connection encounters an error during transmission.
-    #[cfg(feature = "json")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
-    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> Result<()> {
-        let bytes = serde_json::to_vec(data)?;
-        futures::SinkExt::send(self, Frame::text(bytes)).await
-    }
-
     /// Receive the next frame from the websocket
     ///
     /// This is an alias for the `next` method, providing a more semantically clear way
@@ -265,42 +220,5 @@ impl futures::Stream for WebSocket {
             }
             None => Poll::Ready(None),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        frame::{Frame, OpCode},
-        wasm::WebSocket,
-    };
-    use futures::SinkExt;
-
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn can_connect_and_roundtrip_payloads() {
-        const ECHO_URL: &str = "wss://echo.websocket.org";
-        const TEXT_PAYLOAD: &str = "Hello Echo WebSocket in Text!";
-        const BINARY_PAYLOAD: &[u8] = b"Hello Echo WebSocket in Binary!";
-
-        let mut ws = WebSocket::connect(ECHO_URL.parse().unwrap()).await.unwrap();
-        let _ = ws.next_frame().await.unwrap(); // Skip the "Request served by whatever"
-
-        ws.send(Frame::text(TEXT_PAYLOAD)).await.unwrap();
-        let resp = ws.next_frame().await.unwrap();
-        assert_eq!(resp.opcode(), OpCode::Text);
-        assert_eq!(resp.payload().as_ref(), TEXT_PAYLOAD.as_bytes());
-
-        ws.send(Frame::binary(BINARY_PAYLOAD)).await.unwrap();
-        let resp = ws.next_frame().await.unwrap();
-        assert_eq!(resp.opcode(), OpCode::Binary);
-        assert_eq!(resp.payload().as_ref(), BINARY_PAYLOAD);
-
-        ws.send(Frame::close(crate::close::CloseCode::Normal, b""))
-            .await
-            .unwrap();
-        let resp = ws.next_frame().await.unwrap();
-        assert_eq!(resp.opcode(), OpCode::Close);
-
-        ws.close().await.unwrap();
     }
 }

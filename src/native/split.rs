@@ -1,21 +1,160 @@
 //! Split read/write halves for WebSocket connections.
+//!
+//! # Architecture Layer: Fragment Assembly
+//!
+//! This module implements the **middle layer** of the WebSocket processing stack,
+//! sitting between the codec layer and the WebSocket layer. Its primary responsibility
+//! is **fragment assembly** according to RFC 6455.
+//!
+//! ## ReadHalf Responsibilities
+//!
+//! [`ReadHalf`] handles fragmented message assembly:
+//!
+//! - **Fragment accumulation**: Collects continuation frames into complete messages
+//! - **State tracking**: Maintains fragment state (opcode, compression flag, accumulated data)
+//! - **Fragment timeout**: Enforces timeouts on incomplete fragmented messages
+//! - **Size limits**: Enforces maximum message size after assembly
+//! - **Masking removal**: Removes frame masks to prevent accidental echo
+//!
+//! ## What ReadHalf Does NOT Handle
+//!
+//! - **Frame decoding**: Handled by [`Codec`](crate::codec::Codec)
+//! - **Decompression**: Handled by [`WebSocket`](crate::WebSocket)
+//! - **UTF-8 validation**: Handled by [`WebSocket`](crate::WebSocket)
+//!
+//! ## Data Flow Example
+//!
+//! **Receiving a fragmented message:**
+//!
+//! ```text
+//! Codec → ReadHalf:
+//!   Frame(OpCode::Text, FIN=0, "Hello")
+//!     → ReadHalf: Start accumulating, return None
+//!
+//!   Frame(OpCode::Continuation, FIN=0, " Wor")
+//!     → ReadHalf: Continue accumulating, return None
+//!
+//!   Frame(OpCode::Continuation, FIN=1, "ld!")
+//!     → ReadHalf: Assemble complete message
+//!     → Returns Frame(OpCode::Text, FIN=1, "Hello World!")
+//! ```
+//!
+//! ## WriteHalf Responsibilities
+//!
+//! [`WriteHalf`] handles frame transmission with compression support:
+//!
+//! - **Compression**: Compresses frames when permessage-deflate is enabled
+//! - **Masking**: Applies masks to client frames (required by RFC 6455)
+//! - **Connection closure**: Manages graceful WebSocket closure protocol
+//!
+//! # Sans-IO Design
+//!
+//! This module implements a **sans-io** (I/O-free) design pattern where the protocol logic
+//! is completely separated from the I/O operations.
+//!
+//! ## Benefits
+//!
+//! 1. **Testability**: Protocol logic can be tested without actual network I/O
+//! 2. **Transport Agnostic**: Works with TCP, Unix sockets, in-memory buffers, or custom transports
+//! 3. **Flexibility**: Users can implement custom flow control and buffering strategies
+//! 4. **Performance**: Enables zero-copy optimizations in user code
+//!
+//! # Thread Safety Through `split()`
+//!
+//! WebSocket connections can be split into separate read and write halves for concurrent
+//! operation. This is achieved through the `split()` method on `WebSocket`:
+//!
+//! ## Using `futures::StreamExt::split()` (Recommended)
+//!
+//! ```no_run
+//! use futures::{StreamExt, SinkExt};
+//! use yawc::{WebSocket, Frame};
+//!
+//! # async fn example() -> yawc::Result<()> {
+//! let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+//!
+//! // Split into read and write halves
+//! let (mut write, mut read) = ws.split();
+//!
+//! // Spawn a task to read messages
+//! tokio::spawn(async move {
+//!     while let Some(frame) = read.next().await {
+//!         println!("Received: {:?}", frame.opcode());
+//!     }
+//! });
+//!
+//! // Write from the main task
+//! write.send(Frame::text("Hello!")).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Thread Safety Guarantees
+//!
+//! 1. **No Shared Mutable State**: Read and write halves operate independently with no
+//!    shared mutable state between them.
+//!
+//! 2. **Borrowing Rules**: Rust's ownership system ensures only one task can access each
+//!    half at a time, preventing data races at compile time.
+//!
+//! 3. **Send + Sync**: Both halves implement `Send`, allowing them to be moved across
+//!    thread boundaries safely.
+//!
+//! 4. **Protocol Correctness**: Each half maintains its own protocol state (fragmentation,
+//!    compression windows) ensuring WebSocket protocol correctness even with concurrent
+//!    read/write operations.
+//!
+//! ## Low-Level `split_stream()` (Advanced)
+//!
+//! For advanced use cases requiring direct access to the underlying stream and protocol
+//! handlers, use the unsafe `split_stream()` method:
+//!
+//! ```no_run
+//! # use yawc::WebSocket;
+//! # async fn example() -> yawc::Result<()> {
+//! let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+//!
+//! // SAFETY: User must ensure the stream is not used after splitting
+//! let (mut stream, mut read_half, mut write_half) = unsafe { ws.split_stream() };
+//!
+//! // Manual protocol handling required
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! **Warning**: This is unsafe because it requires manual protocol handling. Users must:
+//! - Correctly handle control frames (Ping, Pong, Close)
+//! - Maintain proper message ordering
+//! - Handle compression state correctly
+//!
+//! Prefer `futures::StreamExt::split()` unless you have specific low-level requirements.
 
 use std::{
+    collections::VecDeque,
+    future::poll_fn,
     task::{ready, Context, Poll},
     time::{Duration, Instant},
 };
 
-use bytes::BytesMut;
+use bytes::Bytes;
 use futures::SinkExt;
 
 use crate::{
     close::CloseCode,
-    compression::{Compressor, Decompressor},
+    compression::Compressor,
     frame::{Frame, OpCode},
     Result, WebSocketError,
 };
 
 use super::{Negotiation, Role};
+
+struct Fragmentation {
+    started: Instant,
+    opcode: OpCode,
+    is_compressed: bool,
+    bytes_read: usize,
+    parts: VecDeque<Bytes>,
+}
 
 // ================ ReadHalf ====================
 
@@ -64,41 +203,23 @@ use super::{Negotiation, Role};
 /// }
 /// ```
 pub struct ReadHalf {
-    /// Optional decompressor used to decompress incoming payloads.
-    inflate: Option<Decompressor>,
-    /// Structure for handling fragmented message frames.
-    fragment: Option<Fragment>,
-    /// Accumulated data from fragmented frames.
-    accumulated: BytesMut,
-    /// Maximum size of the read buffer
-    ///
-    /// When accumulating fragmented messages, once the read buffer exceeds this size
-    /// it will be reset back to its initial capacity of 1 KiB. This helps prevent
-    /// unbounded memory growth from receiving very large fragmented messages.
-    max_read_buffer: usize,
-    /// Maximum time allowed to receive all fragments of a fragmented message.
-    fragment_timeout: Option<Duration>,
     /// Indicates if the connection has been closed.
     pub(super) is_closed: bool,
-}
-
-/// Fragmented message header.
-struct Fragment {
-    started: Instant,
-    opcode: OpCode,
-    is_compressed: bool,
+    /// Fragment accumulation state
+    fragment: Option<Fragmentation>,
+    /// Maximum read buffer size for fragmented messages
+    max_read_buffer: usize,
+    /// Optional timeout for fragment assembly
+    fragment_timeout: Option<Duration>,
 }
 
 impl ReadHalf {
-    pub(super) fn new(role: Role, opts: &Negotiation) -> Self {
-        let inflate = opts.decompressor(role);
+    pub(super) fn new(opts: &Negotiation) -> Self {
         Self {
-            inflate,
+            is_closed: false,
+            fragment: None,
             max_read_buffer: opts.max_read_buffer,
             fragment_timeout: opts.fragment_timeout,
-            fragment: None,
-            accumulated: BytesMut::with_capacity(1024),
-            is_closed: false,
         }
     }
 
@@ -108,6 +229,8 @@ impl ReadHalf {
     /// For fragmented messages, it accumulates the fragments until the message is complete, handling
     /// decompression if needed. If an uncompressed frame is received but compression is required, an error
     /// is returned.
+    ///
+    /// This function also removes the mask from every message to avoid forwarding in case the user is echoing the frame.
     ///
     /// - For `OpCode::Text` and `OpCode::Binary` frames:
     ///     - If the frame is final (`fin` flag set), it processes the frame as a complete message.
@@ -128,97 +251,89 @@ impl ReadHalf {
     /// - `Ok(None)` if the frame is part of a fragmented message and not yet complete.
     /// - `Err(WebSocketError)` if an error occurs, such as invalid fragment or unsupported compression.
     fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        if frame.is_compressed && self.inflate.is_none() {
-            return Err(WebSocketError::CompressionNotSupported);
+        use bytes::BufMut;
+
+        // Remove mask immediately
+        frame.mask = None;
+
+        // Mark if connection is closing
+        if frame.opcode == OpCode::Close {
+            self.is_closed = true;
+            return Ok(Some(frame));
         }
 
+        // Control frames (Ping, Pong) are never fragmented - return immediately
+        if frame.opcode.is_control() {
+            return Ok(Some(frame));
+        }
+
+        // Handle fragmentation and assembly
         match frame.opcode {
             OpCode::Text | OpCode::Binary => {
+                // Check for invalid fragmentation state
                 if self.fragment.is_some() {
                     return Err(WebSocketError::InvalidFragment);
                 }
 
+                // Handle fragmented messages
                 if !frame.fin {
-                    self.fragment = Some(Fragment {
+                    self.fragment = Some(Fragmentation {
                         started: Instant::now(),
                         opcode: frame.opcode,
                         is_compressed: frame.is_compressed,
+                        bytes_read: frame.payload.len(),
+                        parts: VecDeque::from([frame.payload]),
                     });
-
-                    self.accumulated.extend_from_slice(&frame.payload);
-
-                    Ok(None)
-                } else if frame.is_compressed {
-                    let inflate = self.inflate.as_mut().unwrap();
-                    let payload = inflate.decompress(&frame.payload, frame.fin)?;
-                    if let Some(payload) = payload {
-                        frame.is_compressed = false;
-                        frame.payload = payload.freeze();
-                        Ok(Some(frame))
-                    } else {
-                        Err(WebSocketError::InvalidFragment)
-                    }
-                } else {
-                    Ok(Some(frame))
+                    return Ok(None);
                 }
+
+                // Non-fragmented message - return as-is
+                Ok(Some(frame))
             }
             OpCode::Continuation => {
-                if self.accumulated.len() + frame.payload.len() >= self.max_read_buffer {
+                let mut fragment = self
+                    .fragment
+                    .take()
+                    .ok_or(WebSocketError::InvalidFragment)?;
+
+                fragment.bytes_read += frame.payload.len();
+
+                // Check buffer size
+                if fragment.bytes_read >= self.max_read_buffer {
                     return Err(WebSocketError::FrameTooLarge);
                 }
 
-                self.accumulated.extend_from_slice(&frame.payload);
-
-                let fragment = self
-                    .fragment
-                    .as_ref()
-                    .ok_or(WebSocketError::InvalidFragment)?;
+                fragment.parts.push_back(frame.payload);
 
                 if frame.fin {
-                    // gather all accumulated buffer and replace it with a new one to avoid
-                    // too many allocations or a potential DoS.
-                    let payload =
-                        std::mem::replace(&mut self.accumulated, BytesMut::with_capacity(1024));
-                    if fragment.is_compressed {
-                        let inflate = self.inflate.as_mut().unwrap();
-                        let output = inflate
-                            .decompress(&payload, frame.fin)?
-                            .expect("decompress output");
+                    // Assemble complete message
+                    frame.opcode = fragment.opcode;
+                    frame.is_compressed = fragment.is_compressed;
+                    frame.payload = fragment
+                        .parts
+                        .into_iter()
+                        .fold(
+                            bytes::BytesMut::with_capacity(fragment.bytes_read),
+                            |mut acc, b| {
+                                acc.put(b);
+                                acc
+                            },
+                        )
+                        .freeze();
 
-                        frame.opcode = fragment.opcode;
-                        frame.is_compressed = false;
-                        frame.payload = output.freeze();
-
-                        self.fragment = None;
-
-                        Ok(Some(frame))
-                    } else {
-                        frame.opcode = fragment.opcode;
-                        frame.payload = payload.freeze();
-
-                        self.fragment = None;
-
-                        Ok(Some(frame))
-                    }
+                    // Return assembled frame as-is (decompression and validation happen in WebSocket layer)
+                    Ok(Some(frame))
                 } else if self
                     .fragment_timeout
                     .is_some_and(|timeout| fragment.started.elapsed() > timeout)
                 {
                     Err(WebSocketError::FragmentTimeout)
                 } else {
+                    self.fragment = Some(fragment);
                     Ok(None)
                 }
             }
-            _ => {
-                // Control frames cannot be fragmented
-                if !frame.fin {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                self.is_closed = frame.opcode == OpCode::Close;
-
-                Ok(Some(frame))
-            }
+            _ => Ok(Some(frame)),
         }
     }
 
@@ -283,6 +398,33 @@ impl ReadHalf {
         }
 
         Poll::Ready(Err(WebSocketError::ConnectionClosed))
+    }
+
+    /// Convenience method to read the next frame from the stream.
+    ///
+    /// This is a higher-level alternative to [`poll_frame`](Self::poll_frame) that handles
+    /// the polling loop for you.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::WebSocket;
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, mut read_half, _write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Read frames one by one
+    /// while let Ok(frame) = read_half.next_frame(&mut stream).await {
+    ///     println!("Received: {:?}", frame.opcode());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn next_frame<S>(&mut self, stream: &mut S) -> Result<Frame>
+    where
+        S: futures::Stream<Item = Result<Frame>> + Unpin,
+    {
+        poll_fn(|cx| self.poll_frame(stream, cx)).await
     }
 }
 
@@ -412,30 +554,27 @@ impl WriteHalf {
     /// - Non-control frames are compressed if compression is enabled
     /// - Client frames are masked per WebSocket protocol requirement
     /// - Close frames transition the connection to closing state
-    pub fn start_send<S>(&mut self, stream: &mut S, view: Frame) -> Result<()>
+    pub fn start_send<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
     where
         S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
     {
-        if view.opcode == OpCode::Close {
+        if frame.opcode == OpCode::Close {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        let maybe_frame = if !view.opcode.is_control() {
+        let final_frame = if !frame.opcode.is_control() {
             if let Some(deflate) = self.deflate.as_mut() {
                 // Compress the payload if compression is enabled
-                let output = deflate.compress(&view.payload)?;
-                Some(Frame::compress(true, view.opcode, None, output))
+                let output = deflate.compress(&frame.payload)?;
+                frame.into_compressed(output)
             } else {
-                None
+                frame
             }
         } else {
-            None
+            frame
         };
 
-        let frame =
-            maybe_frame.unwrap_or_else(|| Frame::new(true, view.opcode, None, view.payload));
-
-        stream.start_send_unpin(frame)
+        stream.start_send_unpin(final_frame)
     }
 
     /// Polls to flush all pending frames in the `WriteHalf`.
@@ -513,5 +652,64 @@ impl WriteHalf {
                 Some(CloseState::Done) => break Poll::Ready(Ok(())),
             }
         }
+    }
+
+    /// Convenience method to send a frame to the stream.
+    ///
+    /// This is a higher-level alternative to the poll-based methods that handles
+    /// the polling loop for you. It ensures the sink is ready, sends the frame,
+    /// and flushes it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::{WebSocket, Frame};
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, _read_half, mut write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Send a frame
+    /// write_half.send_frame(&mut stream, Frame::text("Hello")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_frame<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
+    where
+        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+    {
+        // Wait until ready
+        poll_fn(|cx| self.poll_ready(stream, cx)).await?;
+
+        // Send the frame
+        self.start_send(stream, frame)?;
+
+        // Flush to ensure it's sent
+        poll_fn(|cx| self.poll_flush(stream, cx)).await?;
+
+        Ok(())
+    }
+
+    /// Convenience method to close the connection.
+    ///
+    /// This sends a close frame and waits for the connection to close gracefully.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use yawc::WebSocket;
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+    /// let (mut stream, _read_half, mut write_half) = unsafe { ws.split_stream() };
+    ///
+    /// // Close the connection
+    /// write_half.close(&mut stream).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn close<S>(&mut self, stream: &mut S) -> Result<()>
+    where
+        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+    {
+        poll_fn(|cx| self.poll_close(stream, cx)).await
     }
 }
