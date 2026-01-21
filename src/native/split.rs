@@ -141,7 +141,6 @@ use futures::SinkExt;
 
 use crate::{
     close::CloseCode,
-    compression::Compressor,
     frame::{Frame, OpCode},
     Result, WebSocketError,
 };
@@ -475,7 +474,6 @@ impl ReadHalf {
 /// }
 /// ```
 pub struct WriteHalf {
-    deflate: Option<Compressor>,
     close_state: Option<CloseState>,
 }
 
@@ -499,12 +497,8 @@ enum CloseState {
 }
 
 impl WriteHalf {
-    pub(super) fn new(role: Role, opts: &Negotiation) -> Self {
-        let deflate = opts.compressor(role);
-        Self {
-            deflate,
-            close_state: None,
-        }
+    pub(super) fn new(_role: Role, _opts: &Negotiation) -> Self {
+        Self { close_state: None }
     }
 
     /// Polls the readiness of the `WriteHalf` to send a new frame.
@@ -562,19 +556,7 @@ impl WriteHalf {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        let final_frame = if !frame.opcode.is_control() {
-            if let Some(deflate) = self.deflate.as_mut() {
-                // Compress the payload if compression is enabled
-                let output = deflate.compress(&frame.payload)?;
-                frame.into_compressed(output)
-            } else {
-                frame
-            }
-        } else {
-            frame
-        };
-
-        stream.start_send_unpin(final_frame)
+        stream.start_send_unpin(frame)
     }
 
     /// Polls to flush all pending frames in the `WriteHalf`.

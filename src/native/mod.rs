@@ -421,6 +421,44 @@ impl AsyncWrite for HttpStream {
 ///   (if not already closing). The close frame is returned to the application, and subsequent
 ///   reads will fail with [`WebSocketError::ConnectionClosed`].
 ///
+/// # Compression Behavior
+///
+/// When compression is enabled (via [`Options::compression`]), the WebSocket automatically
+/// compresses and decompresses messages according to RFC 7692 (permessage-deflate):
+///
+/// - **Outgoing messages**: Only complete (FIN=1) Text or Binary frames are compressed.
+///   Fragmented frames (FIN=0 or Continuation frames) are **not** compressed.
+///
+/// - **Incoming messages**: Compressed messages are automatically decompressed after
+///   fragment assembly.
+///
+/// # Manual Fragmentation (Advanced)
+///
+/// For low-level use cases, you can manually fragment messages by sending frames with
+/// `FIN=0`. This is an advanced feature and requires careful handling:
+///
+/// ```no_run
+/// use yawc::{WebSocket, Frame};
+/// use futures::SinkExt;
+///
+/// # async fn example(mut ws: WebSocket<tokio::net::TcpStream>) -> yawc::Result<()> {
+/// // First fragment: Text frame with FIN=0 (not compressed)
+/// ws.send(Frame::text("Hello ").with_fin(false)).await?;
+///
+/// // Second fragment: Continuation frame with FIN=0 (not compressed)
+/// ws.send(Frame::continuation("World").with_fin(false)).await?;
+///
+/// // Final fragment: Continuation frame with FIN=1 (not compressed)
+/// ws.send(Frame::continuation("!")).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// **Important**: When manually fragmenting messages, compression is **disabled** for all
+/// fragments. Only complete, non-fragmented frames are eligible for compression. This is
+/// consistent with RFC 7692, which specifies that the RSV1 bit (compression flag) is only
+/// set on the first frame of a fragmented message.
+///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
 /// ```no_run
@@ -443,6 +481,7 @@ pub struct WebSocket<S> {
     obligated_sends: VecDeque<Frame>,
     flush_sends: bool,
     inflate: Option<Decompressor>,
+    deflate: Option<Compressor>,
     check_utf8: bool,
 }
 
@@ -956,6 +995,7 @@ where
             obligated_sends: VecDeque::new(),
             flush_sends: false,
             inflate: opts.decompressor(role),
+            deflate: opts.compressor(role),
             check_utf8: opts.utf8,
         }
     }
@@ -1093,7 +1133,25 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
-        this.write_half.start_send(&mut this.stream, item)
+
+        // Only compress complete (FIN=1) Text or Binary frames
+        // Fragmented messages (FIN=0 or Continuation frames) are not compressed
+        let should_compress =
+            item.is_fin() && (item.opcode == OpCode::Text || item.opcode == OpCode::Binary);
+
+        let final_frame = if should_compress {
+            if let Some(deflate) = this.deflate.as_mut() {
+                // Compress the payload if compression is enabled
+                let output = deflate.compress(&item.payload)?;
+                item.into_compressed(output)
+            } else {
+                item
+            }
+        } else {
+            item
+        };
+
+        this.write_half.start_send(&mut this.stream, final_frame)
     }
 
     fn poll_flush(
