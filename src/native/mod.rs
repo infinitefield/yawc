@@ -990,7 +990,7 @@ where
         Self {
             stream: Framed::from_parts(parts),
             read_half: ReadHalf::new(&opts),
-            write_half: WriteHalf::new(role, &opts),
+            write_half: WriteHalf::new(&opts),
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,

@@ -145,7 +145,7 @@ use crate::{
     Result, WebSocketError,
 };
 
-use super::{Negotiation, Role};
+use super::Negotiation;
 
 struct Fragmentation {
     started: Instant,
@@ -497,7 +497,7 @@ enum CloseState {
 }
 
 impl WriteHalf {
-    pub(super) fn new(_role: Role, _opts: &Negotiation) -> Self {
+    pub(super) fn new(_opts: &Negotiation) -> Self {
         Self { close_state: None }
     }
 
