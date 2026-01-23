@@ -31,12 +31,7 @@ fn get_server_options() -> Options {
 async fn handle_socket(mut ws: WebSocket<HttpStream>) {
     use futures::{SinkExt, StreamExt};
 
-    loop {
-        let msg = match ws.next().await {
-            Some(msg) => msg,
-            None => break,
-        };
-
+    while let Some(msg) = ws.next().await {
         let (opcode, _is_fin, body) = msg.into_parts();
 
         // Echo back the message
@@ -46,10 +41,6 @@ async fn handle_socket(mut ws: WebSocket<HttpStream>) {
                     log::error!("Error sending message: {}", e);
                     break;
                 }
-            }
-            OpCode::Close => {
-                log::debug!("Received close frame");
-                break;
             }
             _ => {}
         }

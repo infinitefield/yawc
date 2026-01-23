@@ -2,32 +2,57 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
-use yawc::{
-    close::CloseCode, frame::OpCode, CompressionLevel, Frame, Options, TcpWebSocket, WebSocket,
-};
+use yawc::{close::CloseCode, frame::OpCode, Frame, Options, TcpWebSocket, WebSocket};
 
-async fn get_case_info(case: u32) -> Result<String> {
-    let mut ws = WebSocket::connect(
-        format!("ws://localhost:9001/getCaseInfo?case={case}")
-            .parse()
-            .unwrap(),
-    )
-    .await?;
+async fn get_case_info(case: u32) -> String {
+    for attempt in 1..=3 {
+        match async {
+            let mut ws = WebSocket::connect(
+                format!("ws://localhost:9001/getCaseInfo?case={case}")
+                    .parse()
+                    .unwrap(),
+            )
+            .await?;
 
-    let msg = ws
-        .next()
+            let msg = ws
+                .next()
+                .await
+                .ok_or_else(|| anyhow::Error::msg("No response from getCaseInfo"))?;
+            let json: Value = serde_json::from_slice(msg.payload())?;
+            ws.send(Frame::close(CloseCode::Normal, [])).await?;
+
+            // Extract the "id" field from the JSON
+            let case_id = json["id"]
+                .as_str()
+                .ok_or_else(|| anyhow::Error::msg("Missing 'id' field in case info"))?
+                .to_string();
+
+            Ok::<String, anyhow::Error>(case_id)
+        }
         .await
-        .ok_or_else(|| anyhow::Error::msg("No response"))?;
-    let json: Value = serde_json::from_slice(msg.payload())?;
-    ws.send(Frame::close(CloseCode::Normal, [])).await?;
+        {
+            Ok(case_id) => return case_id,
+            Err(e) => {
+                if attempt < 3 {
+                    log::warn!(
+                        "Failed to get case info for case {} (attempt {}): {}",
+                        case,
+                        attempt,
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * attempt as u64))
+                        .await;
+                } else {
+                    panic!(
+                        "Failed to get case info for case {} after 3 attempts: {}",
+                        case, e
+                    );
+                }
+            }
+        }
+    }
 
-    // Extract the "id" field from the JSON
-    let case_id = json["id"]
-        .as_str()
-        .ok_or_else(|| anyhow::Error::msg("Missing 'id' field in case info"))?
-        .to_string();
-
-    Ok(case_id)
+    unreachable!()
 }
 
 fn get_options_for_case_id(case_id: &str) -> Options {
@@ -45,21 +70,22 @@ fn get_options_for_case_id(case_id: &str) -> Options {
                 return base_options.with_client_max_window_bits(15);
             } else if case_id.starts_with("13.5.") {
                 return base_options
-                    .client_no_context_takeover()
+                    // .server_no_context_takeover()
+                    // .client_no_context_takeover()
                     .with_client_max_window_bits(9);
             } else if case_id.starts_with("13.6.") {
                 return base_options
                     .client_no_context_takeover()
                     .with_client_max_window_bits(15);
             }
+
+            return base_options
+                .with_low_latency_compression()
+                .client_no_context_takeover()
+                .server_no_context_takeover();
         }
 
-        // All other compression tests (13.x)
-        return base_options
-            .with_low_latency_compression()
-            .with_compression_level(CompressionLevel::none())
-            .client_no_context_takeover()
-            .server_no_context_takeover();
+        return base_options.with_low_latency_compression();
     }
 
     // Non-compression tests
@@ -93,8 +119,8 @@ async fn main() -> Result<()> {
     // Load all case info in parallel
     let case_info_futures: Vec<_> = (1..=count)
         .map(|case| async move {
-            let result = get_case_info(case).await;
-            (case, result)
+            let case_id = get_case_info(case).await;
+            (case, case_id)
         })
         .collect();
 
@@ -102,16 +128,8 @@ async fn main() -> Result<()> {
 
     // Build a map of case number to case ID
     let mut case_id_map = HashMap::new();
-    for (case, result) in case_infos {
-        match result {
-            Ok(id) => {
-                case_id_map.insert(case, id);
-            }
-            Err(e) => {
-                // log::warn!("Failed to get case info for case {}: {}", case, e);
-                panic!("Failed to get case info for case {}: {}", case, e);
-            }
-        }
+    for (case, case_id) in case_infos {
+        case_id_map.insert(case, case_id);
     }
 
     log::debug!("Running {count} cases sequentially");
@@ -132,15 +150,11 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-        loop {
-            let msg = match ws.next().await {
-                Some(msg) => msg,
-                None => break,
-            };
-
+        while let Some(msg) = ws.next().await {
             let (opcode, _is_fin, body) = msg.into_parts();
             match opcode {
                 OpCode::Text | OpCode::Binary => {
+                    // println!("<< {}", std::str::from_utf8(&body).unwrap());
                     ws.send(Frame::from((opcode, body))).await?;
                 }
                 _ => {}

@@ -175,7 +175,7 @@ impl Negotiation {
             client_no_context_takeover={} server_no_context_takeover={} \
             server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.client_no_context_takeover,
+            config.server_no_context_takeover,
             config.server_max_window_bits,
             config.client_max_window_bits
         );
@@ -219,7 +219,7 @@ impl Negotiation {
             client_no_context_takeover={} server_no_context_takeover={} \
             server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.client_no_context_takeover,
+            config.server_no_context_takeover,
             config.server_max_window_bits,
             config.client_max_window_bits
         );
@@ -1250,6 +1250,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
     })
 }
 
+// called by the client
 fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation> {
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         return Err(WebSocketError::InvalidStatusCode(
@@ -1283,6 +1284,19 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         .and_then(|h| h.to_str().ok())
         .map(WebSocketExtensions::from_str)
         .and_then(std::result::Result::ok);
+
+    // #[cfg(feature = "zlib")]
+    // if let (Some(extensions), Some(mine)) = (&mut extensions, &options.compression) {
+    //     match (
+    //         extensions.client_max_window_bits,
+    //         mine.client_max_window_bits,
+    //     ) {
+    //         (Some(Some(offered)), Some(ours)) => {
+    //             extensions.client_max_window_bits = Some(Some(offered.min(ours)));
+    //         }
+    //         _ => {}
+    //     }
+    // }
 
     let max_read_buffer = options.max_read_buffer.unwrap_or(
         options
