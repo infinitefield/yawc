@@ -6,29 +6,27 @@ const AUTOBAHN_TESTSUITE_DOCKER =
 
 const pwd = new URL(".", import.meta.url).pathname;
 const CONTAINER_NAME = "fuzzingclient";
-const ECHO_SERVER_EXE = "target/release/examples/echo_server";
+const ECHO_SERVER_EXE = "target/release/examples/autobahn_server";
 
 const isMac = Deno.build.os === "darwin";
 const dockerHost = isMac ? "host.docker.internal" : "localhost";
 const networkArgs = isMac ? "" : "--net=host";
 
 async function containerExists(name) {
-  const r = await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
+  const r =
+    await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
   return r.stdout.trim().length > 0;
 }
 
 async function containerRunning(name) {
-  const r = await $`docker ps --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
+  const r =
+    await $`docker ps --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
   return r.stdout.trim().length > 0;
 }
 
 async function ensureEchoServerBuilt() {
-  try {
-    await Deno.stat(ECHO_SERVER_EXE);
-  } catch {
-    console.log("echo_server not found, building...");
-    await $`cargo build --release --example echo_server`;
-  }
+  console.log("echo_server not found, building...");
+  await $`cargo build --release --example autobahn_server --features axum`;
 }
 
 // Start
@@ -50,13 +48,19 @@ await sleep(5);
 
 if (await containerExists(CONTAINER_NAME)) {
   if (await containerRunning(CONTAINER_NAME)) {
-    console.log(`Autobahn ${CONTAINER_NAME} fuzzing client container already running: skipping.`);
+    console.log(
+      `Autobahn ${CONTAINER_NAME} fuzzing client container already running: skipping.`,
+    );
   } else {
-    console.log(`Autobahn ${CONTAINER_NAME} fuzzing client container exists, starting it.`);
+    console.log(
+      `Autobahn ${CONTAINER_NAME} fuzzing client container exists, starting it.`,
+    );
     await $`docker start ${CONTAINER_NAME}`;
   }
 } else {
-  console.log(`Starting Autobahn ${CONTAINER_NAME} fuzzing client container...`);
+  console.log(
+    `Starting Autobahn ${CONTAINER_NAME} fuzzing client container...`,
+  );
   const cmd = [
     "docker run",
     `--name ${CONTAINER_NAME}`,
@@ -85,9 +89,7 @@ function isFailure(behavior) {
   return !["OK", "INFORMATIONAL", "NON-STRICT"].includes(behavior);
 }
 
-const failedTests = testResults.filter((o) =>
-  isFailure(o.behavior)
-);
+const failedTests = testResults.filter((o) => isFailure(o.behavior));
 const passedTests = testResults.length - failedTests.length;
 
 console.log(

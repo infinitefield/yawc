@@ -10,31 +10,32 @@ const CONTAINER_NAME = "fuzzingserver";
 const CLIENT_EXE = "target/release/examples/autobahn_client";
 
 async function containerExists(name) {
-  const result = await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
+  const result =
+    await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
   return result.stdout.trim().length > 0;
 }
 
 async function containerRunning(name) {
-  const result = await $`docker ps --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
+  const result =
+    await $`docker ps --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
   return result.stdout.trim().length > 0;
 }
 
 async function ensureClientBuilt() {
-  try {
-    await Deno.stat(CLIENT_EXE);
-  } catch {
-    console.log("autobahn_client not found, building...");
-    await $`cargo build --release --example autobahn_client`;
-  }
+  console.log("autobahn_client not found, building...");
+  await $`cargo build --release --example autobahn_client --features zlib`;
 }
-
 
 // Start
 if (await containerExists(CONTAINER_NAME)) {
   if (await containerRunning(CONTAINER_NAME)) {
-    console.log(`Autobahn ${CONTAINER_NAME} docker container already running: skipping startup.`);
+    console.log(
+      `Autobahn ${CONTAINER_NAME} docker container already running: skipping startup.`,
+    );
   } else {
-    console.log(`Autobahn ${CONTAINER_NAME} docker container exists but is stopped. Starting it.`);
+    console.log(
+      `Autobahn ${CONTAINER_NAME} docker container exists but is stopped. Starting it.`,
+    );
     await $`docker start ${CONTAINER_NAME}`;
   }
 } else {
@@ -46,8 +47,8 @@ if (await containerExists(CONTAINER_NAME)) {
     --rm ${AUTOBAHN_TESTSUITE_DOCKER} \
     wstest -m fuzzingserver -s fuzzingserver.json`.spawn();
 
-   // sleep long because it might take a while to pull the files
-   await sleep(30);
+  // sleep long because it might take a while to pull the files
+  await sleep(30);
 }
 
 await ensureClientBuilt();
@@ -63,9 +64,7 @@ function failed(name) {
   return name !== "OK" && name !== "INFORMATIONAL" && name !== "NON-STRICT";
 }
 
-const failedtests = result.filter((outcome) =>
-  failed(outcome.behavior)
-);
+const failedtests = result.filter((outcome) => failed(outcome.behavior));
 
 console.log(
   `%c${result.length - failedtests.length} / ${result.length} tests OK`,

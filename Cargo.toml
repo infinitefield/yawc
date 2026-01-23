@@ -70,6 +70,11 @@ name = "autobahn_client"
 test = false
 
 [[example]]
+name = "autobahn_server"
+required-features = ["axum"]
+test = false
+
+[[example]]
 name = "client"
 test = false
 
@@ -79,6 +84,7 @@ test = false
 
 [[example]]
 name = "echo_server"
+required-features = ["axum"]
 test = false
 
 [[example]]

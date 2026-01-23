@@ -35,6 +35,7 @@ async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Emp
             .with_utf8()
             .with_max_payload_read(100 * 1024 * 1024)
             .with_max_read_buffer(200 * 1024 * 1024)
+            .with_low_latency_compression()
             .with_compression_level(CompressionLevel::none()),
     )?;
 

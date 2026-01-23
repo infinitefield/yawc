@@ -183,8 +183,8 @@ impl Negotiation {
                 Decompressor::no_context_takeover()
             } else {
                 #[cfg(feature = "zlib")]
-                if let Some(window_bits) = config.client_max_window_bits {
-                    Decompressor::new_with_window_bits(window_bits)
+                if let Some(Some(window_bits)) = config.client_max_window_bits {
+                    Decompressor::new_with_window_bits(window_bits.max(9))
                 } else {
                     Decompressor::new()
                 }
@@ -197,7 +197,7 @@ impl Negotiation {
                 Decompressor::no_context_takeover()
             } else {
                 #[cfg(feature = "zlib")]
-                if let Some(window_bits) = config.server_max_window_bits {
+                if let Some(Some(window_bits)) = config.server_max_window_bits {
                     Decompressor::new_with_window_bits(window_bits)
                 } else {
                     Decompressor::new()
@@ -226,7 +226,7 @@ impl Negotiation {
                 Compressor::no_context_takeover(level)
             } else {
                 #[cfg(feature = "zlib")]
-                if let Some(window_bits) = config.client_max_window_bits {
+                if let Some(Some(window_bits)) = config.client_max_window_bits {
                     Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     Compressor::new(level)
@@ -240,7 +240,7 @@ impl Negotiation {
                 Compressor::no_context_takeover(level)
             } else {
                 #[cfg(feature = "zlib")]
-                if let Some(window_bits) = config.server_max_window_bits {
+                if let Some(Some(window_bits)) = config.server_max_window_bits {
                     Compressor::new_with_window_bits(level, window_bits)
                 } else {
                     Compressor::new(level)
@@ -1001,8 +1001,10 @@ where
     }
 
     fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        // Fragmentation is handled in ReadHalf::on_frame
-        // This method handles decompression, UTF-8 validation, and protocol concerns
+        // control frames can't be fragmented.
+        // if !frame.is_fin() && frame.opcode().is_control() {
+        //     return Err(WebSocketError::InvalidFragment);
+        // }
 
         // Handle protocol frames first
         match frame.opcode {

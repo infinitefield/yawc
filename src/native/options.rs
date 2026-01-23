@@ -323,6 +323,29 @@ impl Options {
         }
     }
 
+    /// Configures the maximum window size for server-side compression.
+    ///
+    /// The window size determines how much historical data the compressor can reference
+    /// when encoding new data. Larger windows generally provide better compression but
+    /// require more memory.
+    ///
+    /// Available only with the `zlib` feature enabled.
+    ///
+    /// # Parameters
+    /// - `max_window_bits`: The maximum number of bits for the server compression window (9-15).
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified server max window size.
+    #[cfg(feature = "zlib")]
+    pub fn with_server_max_window_bits(self, max_window_bits: u8) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.server_max_window_bits = Some(max_window_bits);
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
     /// Disables context takeover for server-side compression.
     ///
     /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
@@ -464,7 +487,7 @@ impl DeflateOptions {
             #[cfg(feature = "zlib")]
             server_max_window_bits: Some(9), // Minimal window
             #[cfg(feature = "zlib")]
-            client_max_window_bits: Some(9),
+            client_max_window_bits: None,
             server_no_context_takeover: true,
             client_no_context_takeover: true,
         }
@@ -483,7 +506,7 @@ impl DeflateOptions {
             #[cfg(feature = "zlib")]
             server_max_window_bits: Some(15), // Maximum window
             #[cfg(feature = "zlib")]
-            client_max_window_bits: Some(15),
+            client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
         }
@@ -503,7 +526,7 @@ impl DeflateOptions {
             #[cfg(feature = "zlib")]
             server_max_window_bits: Some(12),
             #[cfg(feature = "zlib")]
-            client_max_window_bits: Some(12),
+            client_max_window_bits: None,
             server_no_context_takeover: true,
             client_no_context_takeover: true,
         }
@@ -522,23 +545,356 @@ impl DeflateOptions {
                 offered.client_max_window_bits,
                 self.client_max_window_bits,
             ) {
-                (Some(c), Some(s)) => Some(c.min(s)),
-                (Some(c), None) => Some(c),
-                (None, s) => s,
+                // Client offers specific value, server has preference: take minimum
+                (Some(Some(c)), Some(s)) => Some(Some(c.min(s))),
+                // Client offers specific value, server has no preference: use client's
+                (Some(Some(c)), None) => Some(Some(c)),
+                // Client offers parameter without value, server has preference: use server's
+                (Some(None), Some(s)) => Some(Some(s)),
+                // Client offers parameter without value, server has no preference: leave unspecified
+                (Some(None), None) => Some(None),
+                // Client doesn't offer, use server's preference (if any)
+                (None, s) => s.map(Some),
             },
             #[cfg(feature = "zlib")]
             server_max_window_bits: match (
                 offered.server_max_window_bits,
                 self.server_max_window_bits,
             ) {
-                (Some(c), Some(s)) => Some(c.min(s)),
-                (Some(c), None) => Some(c),
-                (None, s) => s,
+                // Client offers specific value, server has preference: take minimum
+                (Some(Some(c)), Some(s)) => Some(Some(c.min(s))),
+                // Client offers specific value, server has no preference: use client's
+                (Some(Some(c)), None) => Some(Some(c)),
+                // Client offers parameter without value, server has preference: use server's
+                (Some(None), Some(s)) => Some(Some(s)),
+                // Client offers parameter without value, server has no preference: leave unspecified
+                (Some(None), None) => Some(None),
+                // Client doesn't offer, use server's preference (if any)
+                (None, s) => s.map(Some),
             },
             #[cfg(not(feature = "zlib"))]
             client_max_window_bits: None,
             #[cfg(not(feature = "zlib"))]
             server_max_window_bits: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_no_context_takeover() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: None,
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: true,
+            client_no_context_takeover: true,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        assert!(merged.server_no_context_takeover);
+        assert!(merged.client_no_context_takeover);
+    }
+
+    #[test]
+    fn test_merge_no_context_takeover_server_requires() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: None,
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: None,
+            server_no_context_takeover: true,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // Server requires no_context_takeover, so it's enabled even if client doesn't request it
+        assert!(merged.server_no_context_takeover);
+        assert!(!merged.client_no_context_takeover);
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_window_bits_takes_minimum() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            server_max_window_bits: Some(15),
+            client_max_window_bits: Some(15),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(Some(12)),
+            client_max_window_bits: Some(Some(10)),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // Should take the minimum of client and server values
+        assert_eq!(merged.server_max_window_bits, Some(Some(12)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(10)));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_window_bits_client_only() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: None,
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(Some(12)),
+            client_max_window_bits: Some(Some(10)),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // Server accepts client's offered values when server has no preference
+        assert_eq!(merged.server_max_window_bits, Some(Some(12)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(10)));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_window_bits_server_only() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: Some(14),
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: Some(13),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // When client doesn't specify, use server's preference
+        assert_eq!(merged.server_max_window_bits, Some(Some(14)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(13)));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_window_bits_none_both() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            #[cfg(feature = "zlib")]
+            server_max_window_bits: None,
+            #[cfg(feature = "zlib")]
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // When neither specifies, should be None
+        assert_eq!(merged.server_max_window_bits, None);
+        assert_eq!(merged.client_max_window_bits, None);
+    }
+
+    #[test]
+    fn test_merge_mixed_options() {
+        #[cfg(feature = "zlib")]
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            server_max_window_bits: Some(15),
+            client_max_window_bits: Some(14),
+            server_no_context_takeover: true,
+            client_no_context_takeover: false,
+        };
+
+        #[cfg(not(feature = "zlib"))]
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            server_no_context_takeover: true,
+            client_no_context_takeover: false,
+        };
+
+        #[cfg(feature = "zlib")]
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(Some(12)),
+            client_max_window_bits: Some(Some(13)),
+            server_no_context_takeover: false,
+            client_no_context_takeover: true,
+        };
+
+        #[cfg(not(feature = "zlib"))]
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: true,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // Both server and client request no_context_takeover for their respective sides
+        assert!(merged.server_no_context_takeover);
+        assert!(merged.client_no_context_takeover);
+
+        #[cfg(feature = "zlib")]
+        {
+            // Window bits should take minimum
+            assert_eq!(merged.server_max_window_bits, Some(Some(12)));
+            assert_eq!(merged.client_max_window_bits, Some(Some(13)));
+        }
+
+        #[cfg(not(feature = "zlib"))]
+        {
+            // Without zlib feature, window bits should be None
+            assert_eq!(merged.server_max_window_bits, None);
+            assert_eq!(merged.client_max_window_bits, None);
+        }
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_client_offers_no_value() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            server_max_window_bits: Some(14),
+            client_max_window_bits: Some(13),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(None), // Client offers parameter without value
+            client_max_window_bits: Some(None), // Client offers parameter without value
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // When client offers without value, use server's preference
+        assert_eq!(merged.server_max_window_bits, Some(Some(14)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(13)));
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_client_offers_no_value_server_no_preference() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(None), // Client offers parameter without value
+            client_max_window_bits: Some(None), // Client offers parameter without value
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        // When client offers without value and server has no preference, leave unspecified
+        assert_eq!(merged.server_max_window_bits, Some(None));
+        assert_eq!(merged.client_max_window_bits, Some(None));
+    }
+
+    #[test]
+    fn test_parse_and_merge_client_offers_client_max_window_bits_no_value() {
+        use std::str::FromStr;
+
+        // Parse client offer: "permessage-deflate; client_max_window_bits"
+        let client_offer =
+            WebSocketExtensions::from_str("permessage-deflate; client_max_window_bits").unwrap();
+
+        // Verify client offered the parameter without a value
+        assert_eq!(client_offer.client_max_window_bits, Some(None));
+        assert_eq!(client_offer.server_max_window_bits, None);
+
+        #[cfg(feature = "zlib")]
+        {
+            // Server has a preference for client_max_window_bits
+            let server = DeflateOptions {
+                level: CompressionLevel::default(),
+                server_max_window_bits: Some(15),
+                client_max_window_bits: Some(12), // Server prefers 12
+                server_no_context_takeover: false,
+                client_no_context_takeover: false,
+            };
+
+            let merged = server.merge(&client_offer);
+
+            // Server should respond with its preference
+            assert_eq!(merged.client_max_window_bits, Some(Some(12)));
+            assert_eq!(merged.server_max_window_bits, Some(Some(15)));
+
+            // Verify the response string includes the value
+            let response = merged.to_string();
+            assert!(response.contains("client_max_window_bits=12"));
+            assert!(response.contains("server_max_window_bits=15"));
+        }
+
+        #[cfg(not(feature = "zlib"))]
+        {
+            // Without zlib, server can't negotiate window bits
+            let server = DeflateOptions {
+                level: CompressionLevel::default(),
+                server_no_context_takeover: false,
+                client_no_context_takeover: false,
+            };
+
+            let merged = server.merge(&client_offer);
+
+            // Should be None without zlib feature
+            assert_eq!(merged.client_max_window_bits, None);
+            assert_eq!(merged.server_max_window_bits, None);
         }
     }
 }

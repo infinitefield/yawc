@@ -28,8 +28,8 @@ static PERMESSAGE_DEFLATE: &str = "permessage-deflate";
 /// and can be modified through [`DeflateOptions`].
 #[derive(Debug, Clone, Default)]
 pub struct WebSocketExtensions {
-    pub(super) server_max_window_bits: Option<u8>,
-    pub(super) client_max_window_bits: Option<u8>,
+    pub(super) server_max_window_bits: Option<Option<u8>>,
+    pub(super) client_max_window_bits: Option<Option<u8>>,
     pub(super) server_no_context_takeover: bool,
     pub(super) client_no_context_takeover: bool,
 }
@@ -40,11 +40,11 @@ impl<'a> From<&'a DeflateOptions> for WebSocketExtensions {
     fn from(value: &'a DeflateOptions) -> Self {
         Self {
             #[cfg(feature = "zlib")]
-            server_max_window_bits: value.server_max_window_bits,
+            server_max_window_bits: value.server_max_window_bits.map(Some),
             #[cfg(not(feature = "zlib"))]
             server_max_window_bits: None,
             #[cfg(feature = "zlib")]
-            client_max_window_bits: value.client_max_window_bits,
+            client_max_window_bits: value.client_max_window_bits.map(Some),
             #[cfg(not(feature = "zlib"))]
             client_max_window_bits: None,
             server_no_context_takeover: value.server_no_context_takeover,
@@ -62,20 +62,26 @@ impl std::fmt::Display for WebSocketExtensions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{PERMESSAGE_DEFLATE}")?;
 
-        if let Some(server_max_window_bits) = self.server_max_window_bits {
-            if (9..16).contains(&server_max_window_bits) {
-                write!(f, "; server_max_window_bits={server_max_window_bits}")?;
-            } else {
+        match self.server_max_window_bits {
+            Some(Some(bits)) if (9..16).contains(&bits) => {
+                write!(f, "; server_max_window_bits={bits}")?;
+            }
+            Some(_) => {
                 write!(f, "; server_max_window_bits")?;
             }
+            None => {}
         }
-        if let Some(client_max_window_bits) = self.client_max_window_bits {
-            if (9..16).contains(&client_max_window_bits) {
-                write!(f, "; client_max_window_bits={client_max_window_bits}")?;
-            } else {
+
+        match self.client_max_window_bits {
+            Some(Some(bits)) if (9..16).contains(&bits) => {
+                write!(f, "; client_max_window_bits={bits}")?;
+            }
+            Some(_) => {
                 write!(f, "; client_max_window_bits")?;
             }
+            None => {}
         }
+
         if self.server_no_context_takeover {
             write!(f, "; server_no_context_takeover")?;
         }
@@ -134,18 +140,10 @@ impl WebSocketExtensions {
                     self.server_no_context_takeover = true;
                 }
                 "server_max_window_bits" => {
-                    if let Some(value) = value {
-                        self.server_max_window_bits = Some(value.parse().unwrap_or_default())
-                    } else {
-                        self.server_max_window_bits = Some(0);
-                    }
+                    self.server_max_window_bits = Some(value.and_then(|v| v.parse().ok()));
                 }
                 "client_max_window_bits" => {
-                    if let Some(value) = value {
-                        self.client_max_window_bits = Some(value.parse().unwrap_or_default())
-                    } else {
-                        self.client_max_window_bits = Some(0);
-                    }
+                    self.client_max_window_bits = Some(value.and_then(|v| v.parse().ok()));
                 }
                 _ => {}
             }
@@ -698,8 +696,19 @@ mod tests {
         let compression = WebSocketExtensions::from_str("permessage-deflate; client_no_context_takeover; server_max_window_bits=7; client_max_window_bits=2; server_no_context_takeover").unwrap();
         assert!(compression.client_no_context_takeover);
         assert!(compression.server_no_context_takeover);
-        assert_eq!(compression.server_max_window_bits, Some(7));
-        assert_eq!(compression.client_max_window_bits, Some(2));
+        assert_eq!(compression.server_max_window_bits, Some(Some(7)));
+        assert_eq!(compression.client_max_window_bits, Some(Some(2)));
+    }
+
+    #[test]
+    fn test_parse_extensions_client_max_window_bits_no_value() {
+        use std::str::FromStr;
+        let compression =
+            WebSocketExtensions::from_str("permessage-deflate; client_max_window_bits").unwrap();
+        assert_eq!(compression.client_max_window_bits, Some(None));
+        assert!(!compression.client_no_context_takeover);
+        assert!(!compression.server_no_context_takeover);
+        assert_eq!(compression.server_max_window_bits, None);
     }
 
     #[test]
@@ -723,7 +732,7 @@ mod tests {
             client_no_context_takeover: true,
             ..Default::default()
         };
-        extensions.server_max_window_bits = Some(15);
+        extensions.server_max_window_bits = Some(Some(15));
         let formatted = extensions.to_string();
         assert_eq!(
             formatted,
@@ -790,7 +799,7 @@ mod tests {
         .unwrap();
         assert!(extensions.server_no_context_takeover);
         assert!(!extensions.client_no_context_takeover);
-        assert_eq!(extensions.server_max_window_bits, Some(12));
+        assert_eq!(extensions.server_max_window_bits, Some(Some(12)));
         assert_eq!(extensions.client_max_window_bits, None);
     }
 
@@ -803,7 +812,7 @@ mod tests {
         )
         .unwrap();
         assert!(extensions.client_no_context_takeover);
-        assert_eq!(extensions.server_max_window_bits, Some(10));
+        assert_eq!(extensions.server_max_window_bits, Some(Some(10)));
     }
 
     #[test]
@@ -815,8 +824,8 @@ mod tests {
         )
         .unwrap();
         assert!(extensions.client_no_context_takeover);
-        assert_eq!(extensions.server_max_window_bits, Some(10));
-        assert_eq!(extensions.client_max_window_bits, Some(15));
+        assert_eq!(extensions.server_max_window_bits, Some(Some(10)));
+        assert_eq!(extensions.client_max_window_bits, Some(Some(15)));
     }
 
     #[test]
@@ -910,7 +919,7 @@ mod tests {
         use std::str::FromStr;
         let extensions =
             WebSocketExtensions::from_str("permessage-deflate; server_max_window_bits=").unwrap();
-        assert_eq!(extensions.server_max_window_bits, Some(0));
+        assert_eq!(extensions.server_max_window_bits, Some(None));
     }
 
     #[test]

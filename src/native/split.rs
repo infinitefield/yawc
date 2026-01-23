@@ -255,17 +255,6 @@ impl ReadHalf {
         // Remove mask immediately
         frame.mask = None;
 
-        // Mark if connection is closing
-        if frame.opcode == OpCode::Close {
-            self.is_closed = true;
-            return Ok(Some(frame));
-        }
-
-        // Control frames (Ping, Pong) are never fragmented - return immediately
-        if frame.opcode.is_control() {
-            return Ok(Some(frame));
-        }
-
         // Handle fragmentation and assembly
         match frame.opcode {
             OpCode::Text | OpCode::Binary => {
@@ -331,6 +320,10 @@ impl ReadHalf {
                     self.fragment = Some(fragment);
                     Ok(None)
                 }
+            }
+            OpCode::Close => {
+                self.is_closed = true;
+                Ok(Some(frame))
             }
             _ => Ok(Some(frame)),
         }
