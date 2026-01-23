@@ -172,9 +172,12 @@ impl Negotiation {
 
         log::debug!(
             "Established decompressor for {role} with settings \
-            client_no_context_takeover={} server_no_context_takeover={}",
+            client_no_context_takeover={} server_no_context_takeover={} \
+            server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.client_no_context_takeover
+            config.client_no_context_takeover,
+            config.server_max_window_bits,
+            config.client_max_window_bits
         );
 
         // configure the decompressor using the assigned role and preferred flags.
@@ -213,9 +216,12 @@ impl Negotiation {
 
         log::debug!(
             "Established compressor for {role} with settings \
-            client_no_context_takeover={} server_no_context_takeover={}",
+            client_no_context_takeover={} server_no_context_takeover={} \
+            server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.client_no_context_takeover
+            config.client_no_context_takeover,
+            config.server_max_window_bits,
+            config.client_max_window_bits
         );
 
         let level = self.compression_level.unwrap();
@@ -458,6 +464,9 @@ impl AsyncWrite for HttpStream {
 /// fragments. Only complete, non-fragmented frames are eligible for compression. This is
 /// consistent with RFC 7692, which specifies that the RSV1 bit (compression flag) is only
 /// set on the first frame of a fragmented message.
+/// This means that if the user fragments the messages by themselves, the messages **won't** be compressed.
+/// See [`examples/fragmented_messages.rs`](https://github.com/infinitefield/yawc/blob/master/examples/fragmented_messages.rs)
+/// for a complete example of sending and receiving fragmented messages.
 ///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
@@ -937,6 +946,16 @@ where
     }
 
     /// Sends a message as multiple fragmented frames.
+    ///
+    /// This method splits a large message into smaller fragments, useful for:
+    /// - Sending large payloads without blocking
+    /// - Implementing streaming message transmission
+    /// - Controlling memory usage for large messages
+    ///
+    /// # Example
+    ///
+    /// See [`examples/fragmented_messages.rs`](https://github.com/infinitefield/yawc/blob/master/examples/fragmented_messages.rs)
+    /// for a complete example of sending and receiving fragmented messages.
     pub async fn send_fragmented(
         &mut self,
         opcode: OpCode,
