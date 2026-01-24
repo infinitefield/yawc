@@ -39,10 +39,8 @@ jobs:
       - name: Autobahn|Testsuite client
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --verbose --release --example autobahn_client
           deno run -A --unstable autobahn/client-test.js
       - name: Autobahn|Testsuite server
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --verbose --release --example echo_server
           deno run -A --unstable autobahn/server-test.js
