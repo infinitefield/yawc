@@ -167,6 +167,8 @@ impl IncomingUpgrade {
                     .as_ref()
                     .map(|compression| compression.level),
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
+                max_backpressure_write_boundary: options.max_backpressure_write_boundary,
+                max_payload_write_size: options.max_payload_write_size,
                 max_read_buffer,
                 utf8: options.check_utf8,
                 fragment_timeout: options.fragment_timeout,

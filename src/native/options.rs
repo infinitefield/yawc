@@ -69,6 +69,24 @@ pub struct Options {
     ///
     /// Default: `None` (no timeout)
     pub fragment_timeout: Option<Duration>,
+
+    /// Maximum payload size for outgoing messages, in bytes.
+    ///
+    /// When set, messages exceeding this size will be automatically fragmented
+    /// into multiple frames. Each fragment will have a payload size at or below
+    /// this limit.
+    ///
+    /// Default: `None` (no automatic fragmentation)
+    pub max_payload_write_size: Option<usize>,
+
+    /// Backpressure boundary for the write buffer in bytes.
+    ///
+    /// When the write buffer exceeds this size, backpressure is applied to
+    /// prevent unbounded memory growth. This helps with flow control when
+    /// sending large amounts of data.
+    ///
+    /// Default: `None` (uses tokio-util default)
+    pub max_backpressure_write_boundary: Option<usize>,
 }
 
 impl Options {
@@ -299,6 +317,58 @@ impl Options {
     pub fn with_fragment_timeout(self, timeout: Duration) -> Self {
         Self {
             fragment_timeout: Some(timeout),
+            ..self
+        }
+    }
+
+    /// Sets the maximum payload size for outgoing messages.
+    ///
+    /// When set, outgoing messages that exceed this size will be automatically
+    /// fragmented into multiple frames. Each fragment will have a payload size
+    /// at or below this limit.
+    ///
+    /// # Parameters
+    /// - `size`: Maximum payload size in bytes for a single frame
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified max payload write size.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_max_payload_write_size(64 * 1024); // 64 KiB max per frame
+    /// ```
+    pub fn with_max_payload_write_size(self, size: usize) -> Self {
+        Self {
+            max_payload_write_size: Some(size),
+            ..self
+        }
+    }
+
+    /// Sets the backpressure boundary for the write buffer.
+    ///
+    /// When the write buffer exceeds this size, backpressure is applied to
+    /// prevent unbounded memory growth. This is useful for flow control when
+    /// sending large amounts of data.
+    ///
+    /// # Parameters
+    /// - `size`: Backpressure boundary in bytes
+    ///
+    /// # Returns
+    /// A modified `Options` instance with the specified backpressure boundary.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_backpressure_boundary(128 * 1024); // 128 KiB boundary
+    /// ```
+    pub fn with_backpressure_boundary(self, size: usize) -> Self {
+        Self {
+            max_backpressure_write_boundary: Some(size),
             ..self
         }
     }

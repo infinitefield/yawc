@@ -12,7 +12,7 @@
 
 use anyhow::Context;
 use futures::{SinkExt, StreamExt};
-use yawc::{Frame, OpCode, WebSocket};
+use yawc::{Frame, OpCode, Options, WebSocket};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,7 +25,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Connect to server
-    let client = WebSocket::connect("ws://localhost:9003".parse()?).await?;
+    let client = WebSocket::connect("ws://localhost:9003".parse()?)
+        .with_options(
+            Options::default()
+                .with_high_compression()
+                .with_max_payload_write_size(1024),
+        )
+        .await?;
 
     log::info!("Streaming large text in fragments");
 
@@ -152,7 +158,8 @@ async fn run_server() -> yawc::Result<()> {
     }
 
     async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Empty<Bytes>>> {
-        let (response, fut) = WebSocket::upgrade(&mut req)?;
+        let (response, fut) =
+            WebSocket::upgrade_with_options(&mut req, Options::default().with_high_compression())?;
 
         tokio::task::spawn(async move {
             if let Err(e) = handle_client(fut).await {

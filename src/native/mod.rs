@@ -164,6 +164,8 @@ pub(crate) struct Negotiation {
     pub(crate) max_read_buffer: usize,
     pub(crate) utf8: bool,
     pub(crate) fragment_timeout: Option<Duration>,
+    pub(crate) max_payload_write_size: Option<usize>,
+    pub(crate) max_backpressure_write_boundary: Option<usize>,
 }
 
 impl Negotiation {
@@ -175,7 +177,7 @@ impl Negotiation {
             client_no_context_takeover={} server_no_context_takeover={} \
             server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.server_no_context_takeover,
+            config.client_no_context_takeover,
             config.server_max_window_bits,
             config.client_max_window_bits
         );
@@ -219,7 +221,7 @@ impl Negotiation {
             client_no_context_takeover={} server_no_context_takeover={} \
             server_max_window_bits={:?} client_max_window_bits={:?}",
             config.client_no_context_takeover,
-            config.server_no_context_takeover,
+            config.client_no_context_takeover,
             config.server_max_window_bits,
             config.client_max_window_bits
         );
@@ -875,7 +877,9 @@ impl WebSocket<HttpStream> {
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
                 max_read_buffer,
                 utf8: options.check_utf8,
+                max_payload_write_size: options.max_payload_write_size,
                 fragment_timeout: options.fragment_timeout,
+                max_backpressure_write_boundary: options.max_backpressure_write_boundary,
             }),
         };
 
@@ -1006,10 +1010,15 @@ where
         let mut parts = FramedParts::new(stream, codec);
         parts.read_buf = read_buf.into();
 
+        let mut framed = Framed::from_parts(parts);
+        if let Some(boundary) = opts.max_backpressure_write_boundary {
+            framed.set_backpressure_boundary(boundary);
+        }
+
         Self {
-            stream: Framed::from_parts(parts),
+            stream: framed,
             read_half: ReadHalf::new(&opts),
-            write_half: WriteHalf::new(&opts),
+            write_half: WriteHalf::new(opts.max_payload_write_size, &opts),
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
@@ -1155,8 +1164,6 @@ where
     fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
 
-        // Only compress complete (FIN=1) Text or Binary frames
-        // Fragmented messages (FIN=0 or Continuation frames) are not compressed
         let should_compress =
             item.is_fin() && (item.opcode == OpCode::Text || item.opcode == OpCode::Binary);
 
@@ -1247,10 +1254,11 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         max_read_buffer,
         utf8: options.check_utf8,
         fragment_timeout: options.fragment_timeout,
+        max_payload_write_size: options.max_payload_write_size,
+        max_backpressure_write_boundary: options.max_backpressure_write_boundary,
     })
 }
 
-// called by the client
 fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation> {
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         return Err(WebSocketError::InvalidStatusCode(
@@ -1285,19 +1293,6 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         .map(WebSocketExtensions::from_str)
         .and_then(std::result::Result::ok);
 
-    // #[cfg(feature = "zlib")]
-    // if let (Some(extensions), Some(mine)) = (&mut extensions, &options.compression) {
-    //     match (
-    //         extensions.client_max_window_bits,
-    //         mine.client_max_window_bits,
-    //     ) {
-    //         (Some(Some(offered)), Some(ours)) => {
-    //             extensions.client_max_window_bits = Some(Some(offered.min(ours)));
-    //         }
-    //         _ => {}
-    //     }
-    // }
-
     let max_read_buffer = options.max_read_buffer.unwrap_or(
         options
             .max_payload_read
@@ -1312,6 +1307,8 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         max_read_buffer,
         utf8: options.check_utf8,
         fragment_timeout: options.fragment_timeout,
+        max_payload_write_size: options.max_payload_write_size,
+        max_backpressure_write_boundary: options.max_backpressure_write_boundary,
     })
 }
 
@@ -1421,6 +1418,8 @@ mod tests {
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
             fragment_timeout: None,
+            max_payload_write_size: None,
+            max_backpressure_write_boundary: None,
         };
 
         let client_ws = WebSocket::new(
