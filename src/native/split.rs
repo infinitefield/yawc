@@ -431,6 +431,18 @@ impl ReadHalf {
 /// - Masking of frames when acting as a client
 /// - Protocol-compliant connection closure
 /// - Frame buffering and flushing
+/// - Automatic fragmentation when `max_payload_write_size` is configured
+///
+/// # Automatic Fragmentation
+///
+/// When `max_payload_write_size` is set via [`Options::with_max_payload_write_size`](crate::Options::with_max_payload_write_size),
+/// outgoing messages that exceed this size will be automatically fragmented into multiple frames.
+/// Each fragment will have a payload size at or below the configured limit.
+///
+/// **Important**: Automatic fragmentation is mutually exclusive with manual fragmentation.
+/// If you're manually sending fragmented frames (using `FIN=0`), automatic fragmentation is disabled.
+/// Additionally, compressed messages cannot be automatically fragmented - the entire compressed
+/// payload is sent as one unit (though it may be split at the compression stage).
 ///
 /// # Warning
 ///

@@ -440,6 +440,34 @@ impl AsyncWrite for HttpStream {
 /// - **Incoming messages**: Compressed messages are automatically decompressed after
 ///   fragment assembly.
 ///
+/// # Automatic Fragmentation
+///
+/// When [`Options::with_max_payload_write_size`] is configured, the WebSocket will automatically
+/// fragment outgoing messages that exceed the specified size limit:
+///
+/// ```no_run
+/// use yawc::{WebSocket, Frame, Options};
+/// use futures::SinkExt;
+///
+/// # async fn example() -> yawc::Result<()> {
+/// let options = Options::default()
+///     .with_max_payload_write_size(64 * 1024); // 64 KiB per frame
+///
+/// let mut ws = WebSocket::connect("wss://example.com/ws".parse()?)
+///     .with_options(options)
+///     .await?;
+///
+/// // This large message will be automatically split into multiple frames
+/// let large_message = vec![0u8; 200_000]; // 200 KB
+/// ws.send(Frame::binary(large_message)).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// **Important**: Automatic fragmentation only applies to uncompressed messages. If compression
+/// is enabled, the message is compressed first as a single unit, and only the compressed output
+/// may be fragmented if it exceeds the size limit.
+///
 /// # Manual Fragmentation (Advanced)
 ///
 /// For low-level use cases, you can manually fragment messages by sending frames with
@@ -462,11 +490,11 @@ impl AsyncWrite for HttpStream {
 /// # }
 /// ```
 ///
-/// **Important**: When manually fragmenting messages, compression is **disabled** for all
-/// fragments. Only complete, non-fragmented frames are eligible for compression. This is
-/// consistent with RFC 7692, which specifies that the RSV1 bit (compression flag) is only
-/// set on the first frame of a fragmented message.
-/// This means that if the user fragments the messages by themselves, the messages **won't** be compressed.
+/// **Important**: Manual fragmentation disables both compression and automatic fragmentation.
+/// When manually fragmenting messages, compression is **disabled** for all fragments. Only
+/// complete, non-fragmented frames are eligible for compression. This is consistent with
+/// RFC 7692, which specifies that the RSV1 bit (compression flag) is only set on the first
+/// frame of a fragmented message.
 /// See [`examples/fragmented_messages.rs`](https://github.com/infinitefield/yawc/blob/master/examples/fragmented_messages.rs)
 /// for a complete example of sending and receiving fragmented messages.
 ///
