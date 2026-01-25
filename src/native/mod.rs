@@ -1192,13 +1192,22 @@ where
     fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
 
-        let should_compress =
-            item.is_fin() && (item.opcode == OpCode::Text || item.opcode == OpCode::Binary);
+        let should_compress = !item.opcode.is_control();
+        if !should_compress /* so it's text or binary */ && this.write_half.max_payload_write_size.is_some()
+        {
+            panic!("Fragment the frames yourself or use `max_payload_write_size`, but not both");
+        }
 
         let final_frame = if should_compress {
             if let Some(deflate) = this.deflate.as_mut() {
                 // Compress the payload if compression is enabled
-                let output = deflate.compress(&item.payload)?;
+                let output = deflate.compress(&item.payload, item.is_fin())?;
+                // the compressor returned no payload, we might need flushing later...
+                // (do not return here since an empty payload could be valid...)
+                // if output.is_empty() {
+                // return Ok(());
+                // }
+
                 item.into_compressed(output)
             } else {
                 item
@@ -1437,16 +1446,31 @@ mod tests {
 
     /// Helper function to create a WebSocket pair for testing.
     fn create_websocket_pair(buffer_size: usize) -> (WebSocket<MockStream>, WebSocket<MockStream>) {
+        create_websocket_pair_with_config(buffer_size, None, None)
+    }
+
+    fn create_websocket_pair_with_config(
+        buffer_size: usize,
+        max_payload_write_size: Option<usize>,
+        compression_level: Option<CompressionLevel>,
+    ) -> (WebSocket<MockStream>, WebSocket<MockStream>) {
         let (client_stream, server_stream) = MockStream::pair(buffer_size);
 
+        let extensions = compression_level.map(|_level| WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: None,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        });
+
         let negotiation = Negotiation {
-            extensions: None,
-            compression_level: None,
+            extensions,
+            compression_level,
             max_payload_read: MAX_PAYLOAD_READ,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
             fragment_timeout: None,
-            max_payload_write_size: None,
+            max_payload_write_size,
             max_backpressure_write_boundary: None,
         };
 
@@ -2060,5 +2084,188 @@ mod tests {
         assert_eq!(message_frame.opcode(), OpCode::Text);
         assert!(message_frame.is_fin());
         assert_eq!(message_frame.payload(), b"Hello, World!" as &[u8]);
+    }
+
+    #[tokio::test]
+    async fn test_large_compressed_fragmented_payload() {
+        // Test large payload with manual compression and fragmentation
+        // Fragment size: 65536 bytes
+        // This tests that:
+        // 1. User can manually fragment large payloads using set_fin()
+        // 2. Compression works across manually created fragments
+        // 3. Decompression and reassembly produce the original payload
+
+        const FRAGMENT_SIZE: usize = 65536;
+        const PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MB
+
+        use flate2::Compression;
+
+        let (mut client, mut server) = create_websocket_pair_with_config(
+            256 * 1024, // 256 KB buffer
+            None,       // No automatic fragmentation - we do it manually
+            Some(Compression::best()),
+        );
+
+        // Create a large payload with repetitive data (compresses well)
+        let mut payload = Vec::with_capacity(PAYLOAD_SIZE);
+        for i in 0..PAYLOAD_SIZE {
+            // Pattern that compresses well but isn't trivial
+            payload.push((i % 256) as u8);
+        }
+
+        // Add some unique markers to verify correct reconstruction
+        let marker = b"MARKER_START";
+        payload[0..marker.len()].copy_from_slice(marker);
+        let marker_end = b"MARKER_END__";
+        payload[PAYLOAD_SIZE - marker_end.len()..].copy_from_slice(marker_end);
+
+        // Manually fragment the payload and send as separate frames
+        let total_fragments = PAYLOAD_SIZE.div_ceil(FRAGMENT_SIZE);
+        println!(
+            "Sending {} bytes in {} fragments of {} bytes each",
+            PAYLOAD_SIZE, total_fragments, FRAGMENT_SIZE
+        );
+
+        let mut offset = 0;
+        let mut fragment_num = 0;
+
+        while offset < PAYLOAD_SIZE {
+            let end = std::cmp::min(offset + FRAGMENT_SIZE, PAYLOAD_SIZE);
+            let chunk = payload[offset..end].to_vec();
+            let is_final = end == PAYLOAD_SIZE;
+
+            let mut frame = if fragment_num == 0 {
+                // First frame: use Binary opcode
+                Frame::binary(chunk)
+            } else {
+                // Continuation frames
+                Frame::continuation(chunk)
+            };
+
+            // Set FIN bit only on the last fragment
+            frame.set_fin(is_final);
+
+            println!(
+                "Sending fragment {}/{}: {} bytes, FIN={}",
+                fragment_num + 1,
+                total_fragments,
+                frame.payload().len(),
+                is_final
+            );
+
+            client
+                .send(frame)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to send fragment {}", fragment_num + 1));
+
+            offset = end;
+            fragment_num += 1;
+        }
+
+        // Server receives the reassembled payload
+        let received_frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive large payload");
+
+        // Verify the payload was reassembled correctly
+        assert_eq!(received_frame.opcode(), OpCode::Binary);
+        assert!(received_frame.is_fin());
+        assert_eq!(received_frame.payload().len(), PAYLOAD_SIZE);
+
+        // Verify start marker
+        assert_eq!(
+            &received_frame.payload()[0..marker.len()],
+            marker,
+            "Start marker mismatch"
+        );
+
+        // Verify end marker
+        assert_eq!(
+            &received_frame.payload()[PAYLOAD_SIZE - marker_end.len()..],
+            marker_end,
+            "End marker mismatch"
+        );
+
+        // Verify entire payload
+        assert_eq!(
+            received_frame.payload(),
+            &payload[..],
+            "Payload reconstruction failed"
+        );
+
+        println!(
+            "Successfully sent {} manual fragments, compressed, decompressed, and reassembled {} bytes",
+            total_fragments, PAYLOAD_SIZE
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compressed_fragmented_with_interleaved_control() {
+        // Test compression + fragmentation + interleaved control frames
+        // This is the most complex scenario combining:
+        // 1. Compression (best quality)
+        // 2. Automatic fragmentation
+        // 3. Control frames between fragments
+
+        const FRAGMENT_SIZE: usize = 65536;
+
+        use flate2::Compression;
+
+        let (mut client, mut server) = create_websocket_pair_with_config(
+            128 * 1024,
+            Some(FRAGMENT_SIZE),
+            Some(Compression::best()),
+        );
+
+        // Create a payload that will span multiple fragments
+        let payload = "This is a test payload that should compress well. ".repeat(5000);
+        let original_payload = payload.clone();
+        let payload_bytes = payload.as_bytes().to_vec();
+
+        // Send the payload (will be fragmented automatically)
+        tokio::spawn(async move {
+            client
+                .send(Frame::binary(payload_bytes))
+                .await
+                .expect("Failed to send payload");
+
+            // Send a ping after starting the fragmented message
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            client
+                .send(Frame::ping("test"))
+                .await
+                .expect("Failed to send ping");
+        });
+
+        // Server should be able to receive the fragmented message and control frames
+        let mut received_message = None;
+        let mut received_ping = false;
+
+        for _ in 0..2 {
+            let frame = server.next_frame().await.expect("Failed to receive frame");
+
+            match frame.opcode() {
+                OpCode::Binary => {
+                    assert!(frame.is_fin());
+                    received_message = Some(frame.payload().to_vec());
+                }
+                OpCode::Ping => {
+                    received_ping = true;
+                }
+                _ => panic!("Unexpected frame type: {:?}", frame.opcode()),
+            }
+        }
+
+        assert!(received_message.is_some(), "Message not received");
+        assert!(received_ping, "Ping not received");
+
+        let received = String::from_utf8(received_message.unwrap())
+            .expect("Invalid UTF-8 in received payload");
+
+        assert_eq!(
+            received, original_payload,
+            "Compressed fragmented payload mismatch"
+        );
     }
 }

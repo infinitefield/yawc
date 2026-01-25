@@ -481,7 +481,7 @@ impl ReadHalf {
 pub struct WriteHalf {
     // it would be ideal to not use a VecDeque...
     fragmented_writes: VecDeque<Frame>,
-    max_payload_write_size: Option<usize>,
+    pub(super) max_payload_write_size: Option<usize>,
     close_state: Option<CloseState>,
 }
 

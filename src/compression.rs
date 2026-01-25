@@ -280,12 +280,13 @@ impl Compressor {
     ///
     /// # Parameters
     /// - `input`: The data slice to compress.
+    /// - `flush`: Whether to flush the compressor (typically true for final frames).
     ///
     /// # Returns
     /// A `BytesMut` containing the compressed data, or an `io::Error` if compression fails.
-    pub fn compress(&mut self, input: &[u8]) -> io::Result<Bytes> {
+    pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
         match &mut self.compressor_type {
-            CompressorType::Contextual(compressor) => compressor.compress(input),
+            CompressorType::Contextual(compressor) => compressor.compress(input, flush),
             CompressorType::NoContextTakeover(compressor) => compressor.compress_no_context(input),
         }
     }
@@ -323,16 +324,22 @@ impl Deflate {
     /// Compresses input data with no context takeover, resetting the compression dictionary before each compression.
     fn compress_no_context(&mut self, input: &[u8]) -> io::Result<Bytes> {
         self.compress.reset(); // Reset dictionary for no-context takeover
-        self.compress(input)
+        self.compress(input, true)
     }
 
     /// Compresses input data while maintaining compression context across frames.
-    fn compress(&mut self, mut input: &[u8]) -> io::Result<Bytes> {
+    fn compress(&mut self, mut input: &[u8], flush: bool) -> io::Result<Bytes> {
         while !input.is_empty() {
             let consumed = self.write(input)?;
             input = &input[consumed..];
         }
-        self.flush()
+
+        if flush {
+            self.flush()
+        } else {
+            // Return buffered data without flushing
+            Ok(self.output.split().freeze())
+        }
     }
 
     /// Writes a chunk of data to the output buffer during compression.
@@ -363,37 +370,28 @@ impl Deflate {
 
     /// Flushes the compressor, syncing any pending data and returning the accumulated output buffer.
     fn flush(&mut self) -> io::Result<Bytes> {
-        let mut flush_compress = |flag: FlushCompress| -> io::Result<usize> {
-            let output = &mut self.output;
-            let compressor = &mut self.compress;
+        let output = &mut self.output;
+        let compressor = &mut self.compress;
 
+        loop {
             let dst = chunk(output);
             let before_out = compressor.total_out();
 
-            compressor.compress(&[], dst, flag).map_err(deflate_error)?;
+            compressor
+                .compress(&[], dst, FlushCompress::Sync)
+                .map_err(deflate_error)?;
 
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
 
-            Ok(written)
-        };
-
-        flush_compress(FlushCompress::Sync)?;
-
-        // force flush until it returns 0
-        while flush_compress(FlushCompress::None)? != 0 {}
-
-        // since we don't finish the compressor in order to reuse it later
-        // force sync before returning
-
-        flush_compress(FlushCompress::Sync)?;
-
-        // Since the prefix is not mandatory, it might optionally be there
-        if self.output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
-            self.output.truncate(self.output.len() - 4);
+            // FlushCompress::Sync writes the end of the stream, indicating the stream is finished
+            if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
+                output.truncate(output.len() - 4);
+                break;
+            }
         }
 
-        Ok(self.output.split().freeze())
+        Ok(output.split().freeze())
     }
 }
 
@@ -761,7 +759,7 @@ mod tests {
     fn test_compress_with_context() {
         let mut deflate = Deflate::new(Compression::default());
         let data = b"test data";
-        let compressed = deflate.compress(data).expect("Compression failed");
+        let compressed = deflate.compress(data, true).expect("Compression failed");
         assert!(!compressed.is_empty());
     }
 
@@ -832,7 +830,7 @@ mod tests {
     fn test_decompress_with_context() {
         let mut deflate = Deflate::new(Compression::default());
         let data = b"test data";
-        let compressed = deflate.compress(data).expect("Compression failed");
+        let compressed = deflate.compress(data, true).expect("Compression failed");
 
         let mut inflate = Inflate::default();
         let decompressed = inflate
@@ -860,7 +858,7 @@ mod tests {
     fn test_compressor_no_context_takeover() {
         let mut compressor = Compressor::no_context_takeover(Compression::default());
         let data = b"sample data";
-        let compressed = compressor.compress(data).expect("Compression failed");
+        let compressed = compressor.compress(data, true).expect("Compression failed");
         assert!(!compressed.is_empty());
     }
 
@@ -868,7 +866,7 @@ mod tests {
     fn test_decompressor_no_context_takeover() {
         let mut compressor = Compressor::no_context_takeover(Compression::default());
         let data = b"sample data";
-        let compressed = compressor.compress(data).expect("Compression failed");
+        let compressed = compressor.compress(data, true).expect("Compression failed");
 
         let mut decompressor = Decompressor::no_context_takeover();
         let decompressed = decompressor
@@ -882,7 +880,7 @@ mod tests {
         let large_data = vec![1u8; 1024 * 1024]; // 1 MB of data
         let mut compressor = Compressor::new(Compression::default());
         let compressed = compressor
-            .compress(&large_data)
+            .compress(&large_data, true)
             .expect("Compression failed");
 
         let mut decompressor = Decompressor::new();
@@ -897,7 +895,7 @@ mod tests {
     fn test_partial_input_decompression() {
         let data = b"test data";
         let mut compressor = Compressor::new(Compression::default());
-        let compressed = compressor.compress(data).expect("Compression failed");
+        let compressed = compressor.compress(data, true).expect("Compression failed");
 
         let mut decompressor = Decompressor::new();
         let halfway = compressed.len() / 2;
@@ -939,7 +937,7 @@ mod tests {
 
             // Compress the data
             let compressed = compressor
-                .compress(csv_like_data.as_bytes())
+                .compress(csv_like_data.as_bytes(), true)
                 .unwrap_or_else(|_| panic!("Compression failed on message {i}"));
 
             println!(
@@ -980,7 +978,7 @@ mod tests {
             println!("Processing no-context message {i}");
 
             let compressed = compressor
-                .compress(csv_like_data.as_bytes())
+                .compress(csv_like_data.as_bytes(), true)
                 .unwrap_or_else(|_| panic!("No-context compression failed on message {i}"));
 
             let decompressed = decompressor
@@ -1021,7 +1019,7 @@ mod tests {
             println!("=== Processing detailed message {i} ===");
 
             let compressed = compressor
-                .compress(csv_like_data.as_bytes())
+                .compress(csv_like_data.as_bytes(), true)
                 .unwrap_or_else(|_| panic!("Compression failed on message {i}"));
 
             println!("Message {}: Compressed size: {}", i, compressed.len());
@@ -1064,7 +1062,9 @@ mod tests {
 
         // Compress the data
         let mut compressor = Compressor::new(Compression::default());
-        let compressed = compressor.compress(&data).expect("Compression failed");
+        let compressed = compressor
+            .compress(&data, true)
+            .expect("Compression failed");
 
         // Decompress the data
         let mut decompressor = Decompressor::new();
@@ -1095,7 +1095,7 @@ mod tests {
             println!("=== Raw deflate message {i} ===");
 
             let compressed = deflate
-                .compress(csv_like_data.as_bytes())
+                .compress(csv_like_data.as_bytes(), true)
                 .unwrap_or_else(|_| panic!("Raw compression failed on message {i}"));
 
             println!("Raw message {}: Compressed size: {}", i, compressed.len());
@@ -1132,7 +1132,7 @@ mod tests {
             let data_to_send = data.clone();
 
             let compressed = compressor
-                .compress(data_to_send.as_bytes())
+                .compress(data_to_send.as_bytes(), true)
                 .unwrap_or_else(|_| panic!("GitHub issue: Compression failed on message {i}"));
 
             println!(
@@ -1188,7 +1188,7 @@ mod tests {
             println!("Repetitive data test - message {i}");
 
             let compressed = compressor
-                .compress(repetitive_data.as_bytes())
+                .compress(repetitive_data.as_bytes(), true)
                 .map_err(|e| {
                     println!("Repetitive data: Compression error on message {i}: {e}");
                     e
@@ -1249,7 +1249,7 @@ mod tests {
                 );
 
                 let compressed = compressor
-                    .compress(pattern.as_bytes())
+                    .compress(pattern.as_bytes(), true)
                     .map_err(|e| {
                         println!(
                             "Stress test: Compression error on pattern {} message {}: {}",
@@ -1289,5 +1289,144 @@ mod tests {
         }
 
         println!("Stress test completed successfully - no compression issues detected");
+    }
+
+    #[test]
+    fn test_fragmented_compressed_frames() {
+        // Test that fragmented frames (continuation frames) work correctly with compression
+        // In WebSocket, a message can be split into multiple frames:
+        // - First frame: FIN=0, contains partial data
+        // - Continuation frames: FIN=0, contain more partial data
+        // - Final frame: FIN=1, contains last part of data
+
+        let test_data =
+            "This is a test message that will be fragmented across multiple frames. ".repeat(100);
+        let chunk_size = 500; // Split into chunks of 500 bytes
+
+        let mut compressor = Compressor::new(Compression::default());
+        let mut decompressor = Decompressor::new();
+
+        let mut compressed_fragments = Vec::new();
+        let mut offset = 0;
+
+        // Compress each fragment
+        while offset < test_data.len() {
+            let end = std::cmp::min(offset + chunk_size, test_data.len());
+            let chunk = &test_data.as_bytes()[offset..end];
+            let is_final = end == test_data.len();
+
+            // Only flush on the final frame
+            let compressed = compressor
+                .compress(chunk, is_final)
+                .expect("Fragmented compression failed");
+
+            compressed_fragments.push((compressed, is_final));
+            offset = end;
+        }
+
+        println!(
+            "Created {} compressed fragments",
+            compressed_fragments.len()
+        );
+
+        // Decompress each fragment
+        let mut decompressed_data = Vec::new();
+        for (idx, (compressed_chunk, is_final)) in compressed_fragments.iter().enumerate() {
+            println!(
+                "Decompressing fragment {} (final: {}, size: {})",
+                idx,
+                is_final,
+                compressed_chunk.len()
+            );
+
+            let result = decompressor
+                .decompress(compressed_chunk, *is_final)
+                .expect("Fragmented decompression failed");
+
+            // Only the final frame should return data
+            if *is_final {
+                assert!(
+                    result.is_some(),
+                    "Final frame should return decompressed data"
+                );
+                decompressed_data = result.unwrap().to_vec();
+            } else {
+                assert!(result.is_none(), "Non-final frame should return None");
+            }
+        }
+
+        // Verify the decompressed data matches the original
+        assert_eq!(
+            &decompressed_data[..],
+            test_data.as_bytes(),
+            "Fragmented decompressed data doesn't match original"
+        );
+
+        println!("Fragmented frame test passed - data integrity maintained");
+    }
+
+    #[test]
+    fn test_fragmented_frames_with_context() {
+        // Test fragmentation with context preservation across multiple messages
+        let messages = vec![
+            "First message with repetitive data: ".repeat(50),
+            "Second message also repetitive: ".repeat(50),
+            "Third message continues the pattern: ".repeat(50),
+        ];
+
+        let mut compressor = Compressor::new(Compression::default());
+        let mut decompressor = Decompressor::new();
+
+        for (msg_idx, message) in messages.iter().enumerate() {
+            println!("Processing fragmented message {}", msg_idx + 1);
+
+            // Split each message into 3 fragments
+            let chunk_size = message.len() / 3;
+            let mut fragments = Vec::new();
+
+            for i in 0..3 {
+                let start = i * chunk_size;
+                let end = if i == 2 {
+                    message.len()
+                } else {
+                    (i + 1) * chunk_size
+                };
+                let chunk = &message.as_bytes()[start..end];
+                let is_final = i == 2;
+
+                let compressed = compressor.compress(chunk, is_final).expect(&format!(
+                    "Compression failed on message {} fragment {}",
+                    msg_idx + 1,
+                    i + 1
+                ));
+
+                fragments.push((compressed, is_final));
+            }
+
+            // Decompress fragments
+            let mut decompressed_data = Vec::new();
+            for (frag_idx, (compressed, is_final)) in fragments.iter().enumerate() {
+                let result = decompressor
+                    .decompress(compressed, *is_final)
+                    .expect(&format!(
+                        "Decompression failed on message {} fragment {}",
+                        msg_idx + 1,
+                        frag_idx + 1
+                    ));
+
+                if *is_final {
+                    decompressed_data = result.unwrap().to_vec();
+                }
+            }
+
+            assert_eq!(
+                &decompressed_data[..],
+                message.as_bytes(),
+                "Message {} fragmented data doesn't match",
+                msg_idx + 1
+            );
+        }
+
+        println!("Fragmented frames with context test passed");
     }
 }
