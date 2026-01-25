@@ -6,7 +6,11 @@ const pwd = new URL(".", import.meta.url).pathname;
 const AUTOBAHN_TESTSUITE_DOCKER =
   "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
 
-const CONTAINER_NAME = "fuzzingserver";
+// Accept optional feature flag from command line (e.g., "zlib")
+const FEATURE_FLAG = Deno.args[0] || "";
+const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
+const CONTAINER_NAME = `fuzzingserver${FEATURE_SUFFIX}`;
+const PORT = FEATURE_FLAG === "zlib" ? 9002 : 9001;
 const CLIENT_EXE = "target/release/examples/autobahn_client";
 
 async function containerExists(name) {
@@ -22,8 +26,14 @@ async function containerRunning(name) {
 }
 
 async function ensureClientBuilt() {
-  console.log("autobahn_client not found, building...");
-  await $`cargo build --release --example autobahn_client --features zlib`;
+  console.log(
+    `Building autobahn_client${FEATURE_FLAG ? ` with feature: ${FEATURE_FLAG}` : ""}...`,
+  );
+  if (FEATURE_FLAG) {
+    await $`cargo build --release --example autobahn_client --features ${FEATURE_FLAG}`;
+  } else {
+    await $`cargo build --release --example autobahn_client`;
+  }
 }
 
 // Start
@@ -39,11 +49,13 @@ if (await containerExists(CONTAINER_NAME)) {
     await $`docker start ${CONTAINER_NAME}`;
   }
 } else {
-  console.log(`Starting Autobahn ${CONTAINER_NAME} docker container...`);
+  console.log(
+    `Starting Autobahn ${CONTAINER_NAME} docker container on port ${PORT}...`,
+  );
   $`docker run --name ${CONTAINER_NAME} \
     -v ${pwd}/fuzzingserver.json:/fuzzingserver.json:ro \
     -v ${pwd}/reports:/reports \
-    -p 9001:9001 \
+    -p ${PORT}:9001 \
     --rm ${AUTOBAHN_TESTSUITE_DOCKER} \
     wstest -m fuzzingserver -s fuzzingserver.json`.spawn();
 
@@ -52,7 +64,9 @@ if (await containerExists(CONTAINER_NAME)) {
 }
 
 await ensureClientBuilt();
-await $`${CLIENT_EXE}`.env("RUST_BACKTRACE", "full");
+await $`${CLIENT_EXE}`
+  .env("RUST_BACKTRACE", "full")
+  .env("AUTOBAHN_PORT", PORT.toString());
 
 const { yawc } = JSON.parse(
   Deno.readTextFileSync("./autobahn/reports/client/index.json"),

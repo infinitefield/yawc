@@ -4,11 +4,19 @@ use serde_json::Value;
 use std::collections::HashMap;
 use yawc::{close::CloseCode, frame::OpCode, Frame, Options, TcpWebSocket, WebSocket};
 
+fn get_port() -> u16 {
+    std::env::var("AUTOBAHN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(9001)
+}
+
 async fn get_case_info(case: u32) -> String {
+    let port = get_port();
     for attempt in 1..=3 {
         match async {
             let mut ws = WebSocket::connect(
-                format!("ws://localhost:9001/getCaseInfo?case={case}")
+                format!("ws://localhost:{port}/getCaseInfo?case={case}")
                     .parse()
                     .unwrap(),
             )
@@ -94,8 +102,9 @@ fn get_options_for_case_id(case_id: &str) -> Options {
 
 async fn connect(path: &str, case_id: Option<&str>) -> Result<TcpWebSocket> {
     let options = case_id.map(get_options_for_case_id).unwrap_or_default();
+    let port = get_port();
 
-    let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
+    let client = WebSocket::connect(format!("ws://localhost:{port}/{path}").parse().unwrap())
         .with_options(options)
         .await?;
     Ok(client)

@@ -5,7 +5,12 @@ const AUTOBAHN_TESTSUITE_DOCKER =
   "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
 
 const pwd = new URL(".", import.meta.url).pathname;
-const CONTAINER_NAME = "fuzzingclient";
+
+// Accept optional feature flag from command line (e.g., "zlib")
+const FEATURE_FLAG = Deno.args[0] || "";
+const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
+const CONTAINER_NAME = `fuzzingclient${FEATURE_SUFFIX}`;
+const PORT = FEATURE_FLAG === "zlib" ? 9003 : 9002;
 const ECHO_SERVER_EXE = "target/release/examples/autobahn_server";
 
 const isMac = Deno.build.os === "darwin";
@@ -25,15 +30,18 @@ async function containerRunning(name) {
 }
 
 async function ensureEchoServerBuilt() {
-  console.log("echo_server not found, building...");
-  await $`cargo build --release --example autobahn_server --features axum`;
+  console.log(
+    `Building autobahn_server${FEATURE_FLAG ? ` with feature: ${FEATURE_FLAG}` : ""}...`,
+  );
+  const features = FEATURE_FLAG ? `axum,${FEATURE_FLAG}` : "axum";
+  await $`cargo build --release --example autobahn_server --features ${features}`;
 }
 
 // Start
 
 const configPath = `${pwd}/fuzzingclient.json`;
 const config = JSON.parse(Deno.readTextFileSync(configPath));
-config.servers[0].url = `ws://${dockerHost}:9002`;
+config.servers[0].url = `ws://${dockerHost}:${PORT}`;
 Deno.writeTextFileSync(configPath, JSON.stringify(config, null, 2));
 
 await ensureEchoServerBuilt();
@@ -41,6 +49,10 @@ await ensureEchoServerBuilt();
 const controller = new AbortController();
 const server = new Deno.Command(ECHO_SERVER_EXE, {
   signal: controller.signal,
+  env: {
+    ...Deno.env.toObject(),
+    AUTOBAHN_PORT: PORT.toString(),
+  },
 }).spawn();
 
 // Give server time to start
@@ -59,14 +71,14 @@ if (await containerExists(CONTAINER_NAME)) {
   }
 } else {
   console.log(
-    `Starting Autobahn ${CONTAINER_NAME} fuzzing client container...`,
+    `Starting Autobahn ${CONTAINER_NAME} fuzzing client container on port ${PORT}...`,
   );
   const cmd = [
     "docker run",
     `--name ${CONTAINER_NAME}`,
     `-v ${pwd}/fuzzingclient.json:/fuzzingclient.json:ro`,
     `-v ${pwd}/reports:/reports`,
-    "-p 9002:9002",
+    `-p ${PORT}:${PORT}`,
     networkArgs,
     "--rm",
     AUTOBAHN_TESTSUITE_DOCKER,

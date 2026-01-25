@@ -1193,8 +1193,8 @@ where
         let this = self.get_mut();
 
         let should_compress = !item.opcode.is_control();
-        if !should_compress /* so it's text or binary */ && this.write_half.max_payload_write_size.is_some()
-        {
+        // text or binary, not fin and has payload setting
+        if !should_compress && !item.is_fin() && this.write_half.max_payload_write_size.is_some() {
             panic!("Fragment the frames yourself or use `max_payload_write_size`, but not both");
         }
 

@@ -56,7 +56,12 @@ async fn main() {
 
     let app = Router::new().route("/", get(ws_handler));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 9002));
+    let port = std::env::var("AUTOBAHN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(9002);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     log::info!("Autobahn test server listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await.unwrap();
