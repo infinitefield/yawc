@@ -1875,4 +1875,190 @@ mod tests {
         let expected = "part0part1part2part3part4";
         assert_eq!(frame.payload(), expected.as_bytes());
     }
+
+    #[tokio::test]
+    async fn test_automatic_fragmentation_large_messages() {
+        // Create WebSocket pair with max_payload_write_size set to 100 bytes
+        let (client_stream, server_stream) = MockStream::pair(8192);
+
+        let negotiation = Negotiation {
+            extensions: None,
+            compression_level: None,
+            max_payload_read: MAX_PAYLOAD_READ,
+            max_read_buffer: MAX_READ_BUFFER,
+            utf8: false,
+            fragment_timeout: None,
+            max_payload_write_size: Some(100),
+            max_backpressure_write_boundary: None,
+        };
+
+        let mut client_ws = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            negotiation.clone(),
+        );
+
+        let mut server_ws = WebSocket::new(Role::Server, server_stream, Bytes::new(), negotiation);
+
+        // Send a large message (300 bytes) from client
+        let large_payload = vec![b'A'; 300];
+        client_ws
+            .send(Frame::binary(large_payload.clone()))
+            .await
+            .unwrap();
+
+        // Server should receive the complete message (reassembled from fragments)
+        let received = server_ws.next_frame().await.unwrap();
+        assert_eq!(received.opcode(), OpCode::Binary);
+        assert_eq!(received.payload(), large_payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_automatic_fragmentation_small_messages() {
+        // Create WebSocket pair with max_payload_write_size set to 100 bytes
+        let (client_stream, server_stream) = MockStream::pair(8192);
+
+        let negotiation = Negotiation {
+            extensions: None,
+            compression_level: None,
+            max_payload_read: MAX_PAYLOAD_READ,
+            max_read_buffer: MAX_READ_BUFFER,
+            utf8: false,
+            fragment_timeout: None,
+            max_payload_write_size: Some(100),
+            max_backpressure_write_boundary: None,
+        };
+
+        let mut client_ws = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            negotiation.clone(),
+        );
+
+        let mut server_ws = WebSocket::new(Role::Server, server_stream, Bytes::new(), negotiation);
+
+        // Send a small message (50 bytes) from client
+        let small_payload = vec![b'B'; 50];
+        client_ws
+            .send(Frame::text(small_payload.clone()))
+            .await
+            .unwrap();
+
+        // Server should receive the complete message
+        let received = server_ws.next_frame().await.unwrap();
+        assert_eq!(received.opcode(), OpCode::Text);
+        assert_eq!(received.payload(), small_payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_no_fragmentation_when_not_configured() {
+        // Create WebSocket pair WITHOUT max_payload_write_size
+        let (client_stream, server_stream) = MockStream::pair(8192);
+
+        let negotiation = Negotiation {
+            extensions: None,
+            compression_level: None,
+            max_payload_read: MAX_PAYLOAD_READ,
+            max_read_buffer: MAX_READ_BUFFER,
+            utf8: false,
+            fragment_timeout: None,
+            max_payload_write_size: None,
+            max_backpressure_write_boundary: None,
+        };
+
+        let mut client_ws = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            negotiation.clone(),
+        );
+
+        let mut server_ws = WebSocket::new(Role::Server, server_stream, Bytes::new(), negotiation);
+
+        // Send a large message (1000 bytes) without fragmentation config
+        let large_payload = vec![b'C'; 1000];
+        client_ws
+            .send(Frame::binary(large_payload.clone()))
+            .await
+            .unwrap();
+
+        // Server should receive the complete message
+        let received = server_ws.next_frame().await.unwrap();
+        assert_eq!(received.opcode(), OpCode::Binary);
+        assert_eq!(received.payload(), large_payload.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_interleave_control_frames_with_continuation_frames() {
+        // Per RFC 6455 Section 5.5:
+        // "Control frames themselves MUST NOT be fragmented."
+        // "Control frames MAY be injected in the middle of a fragmented message."
+        //
+        // This test verifies that control frames (ping/pong) can be interleaved
+        // with continuation frames during message fragmentation, and that the
+        // fragmented message is still correctly reassembled.
+        let (mut client, mut server) = create_websocket_pair(4096);
+
+        // Send first fragment of a text message (FIN=0)
+        let mut fragment1 = Frame::text("Hello, ");
+        fragment1.set_fin(false);
+        client
+            .send(fragment1)
+            .await
+            .expect("Failed to send first fragment");
+
+        // Interleave a ping frame in the middle of the fragmented message
+        client
+            .send(Frame::ping("ping during fragmentation"))
+            .await
+            .expect("Failed to send ping");
+
+        // Send second continuation fragment (FIN=0)
+        let mut fragment2 = Frame::continuation("World");
+        fragment2.set_fin(false);
+        client
+            .send(fragment2)
+            .await
+            .expect("Failed to send second fragment");
+
+        // Interleave a pong frame
+        client
+            .send(Frame::pong("pong during fragmentation"))
+            .await
+            .expect("Failed to send pong");
+
+        // Send final continuation fragment (FIN=1)
+        let fragment3 = Frame::continuation("!");
+        client
+            .send(fragment3)
+            .await
+            .expect("Failed to send final fragment");
+
+        // Server should receive the ping frame first
+        let ping_frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive ping frame");
+        assert_eq!(ping_frame.opcode(), OpCode::Ping);
+        assert_eq!(ping_frame.payload(), b"ping during fragmentation" as &[u8]);
+
+        // Server should receive the pong frame
+        let pong_frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive pong frame");
+        assert_eq!(pong_frame.opcode(), OpCode::Pong);
+        assert_eq!(pong_frame.payload(), b"pong during fragmentation" as &[u8]);
+
+        // Server should receive the complete reassembled message
+        let message_frame = server
+            .next_frame()
+            .await
+            .expect("Failed to receive reassembled message");
+        assert_eq!(message_frame.opcode(), OpCode::Text);
+        assert!(message_frame.is_fin());
+        assert_eq!(message_frame.payload(), b"Hello, World!" as &[u8]);
+    }
 }

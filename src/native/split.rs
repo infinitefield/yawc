@@ -479,8 +479,6 @@ impl ReadHalf {
 /// }
 /// ```
 pub struct WriteHalf {
-    // flat to indicate whether the user sent a fragmented message
-    prev_was_fragmented: bool,
     // it would be ideal to not use a VecDeque...
     fragmented_writes: VecDeque<Frame>,
     max_payload_write_size: Option<usize>,
@@ -510,7 +508,6 @@ impl WriteHalf {
     pub(super) fn new(max_payload_write_size: Option<usize>, _opts: &Negotiation) -> Self {
         Self {
             max_payload_write_size,
-            prev_was_fragmented: false,
             fragmented_writes: VecDeque::with_capacity(2),
             close_state: None,
         }
@@ -572,30 +569,8 @@ impl WriteHalf {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        if !frame.is_fin() || self.prev_was_fragmented {
-            self.prev_was_fragmented = !frame.is_fin();
-            // if the user is fragmenting by themselves
-            self.fragmented_writes.push_back(frame);
-        } else {
-            self.prev_was_fragmented = false;
-            let max_payload_write = self.max_payload_write_size.unwrap_or(usize::MAX);
-            if frame.payload.len() <= max_payload_write {
-                self.fragmented_writes.push_back(frame);
-            } else {
-                let chunks = frame.payload.len().div_ceil(max_payload_write);
-                // split the payload
-                for index in 0..chunks {
-                    let start = index * max_payload_write;
-                    let payload = frame.payload.slice(start..start + max_payload_write);
-                    self.fragmented_writes.push_back(Frame::new(
-                        payload.len() < max_payload_write,
-                        frame.opcode,
-                        frame.mask,
-                        payload,
-                    ));
-                }
-            }
-        }
+        let fragments = frame.into_fragments(self.max_payload_write_size.unwrap_or(usize::MAX));
+        self.fragmented_writes.extend(fragments);
 
         Ok(())
     }
