@@ -10,7 +10,7 @@ use hyper::{
     Request, Response,
 };
 use tokio::net::TcpListener;
-use yawc::{CompressionLevel, OpCode, Options, WebSocket};
+use yawc::{OpCode, Options, WebSocket};
 
 /// Handles an individual WebSocket client connection by echoing back any received messages.
 async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
