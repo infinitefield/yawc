@@ -384,7 +384,7 @@ We prioritize practical solutions over theory. If something works and delivers r
 
 If you specialize in performance-critical software, understand systems down to the bare metal, and know how to optimize x64 assembly, we’d love to hear from you.
 
-[Explore career opportunities](https://job-boards.eu.greenhouse.io/infinitefield)
+[Explore career opportunities](https://jobs.ashbyhq.com/infinitefield/)
 
 ## Dev
 
