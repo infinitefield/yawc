@@ -699,6 +699,7 @@ impl DeflateOptions {
         }
     }
 
+    /// Called by the server when upgrading.
     pub(super) fn merge(&self, offered: &WebSocketExtensions) -> WebSocketExtensions {
         WebSocketExtensions {
             // Accept client's no_context_takeover settings
@@ -718,8 +719,8 @@ impl DeflateOptions {
                 (Some(Some(c)), None) => Some(Some(c)),
                 // Client offers parameter without value, server has preference: use server's
                 (Some(None), Some(s)) => Some(Some(s)),
-                // Client offers parameter without value, server has no preference: leave unspecified
-                (Some(None), None) => Some(None),
+                // Client offers parameter without value, server has no preference: use the minimum value
+                (Some(None), None) => Some(Some(9)),
                 // Client doesn't offer, use server's preference (if any)
                 (None, s) => s.map(Some),
             },
@@ -734,8 +735,8 @@ impl DeflateOptions {
                 (Some(Some(c)), None) => Some(Some(c)),
                 // Client offers parameter without value, server has preference: use server's
                 (Some(None), Some(s)) => Some(Some(s)),
-                // Client offers parameter without value, server has no preference: leave unspecified
-                (Some(None), None) => Some(None),
+                // Client offers parameter without value, server has no preference: use the minimum value
+                (Some(None), None) => Some(Some(9)),
                 // Client doesn't offer, use server's preference (if any)
                 (None, s) => s.map(Some),
             },

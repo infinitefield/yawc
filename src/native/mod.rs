@@ -189,6 +189,8 @@ impl Negotiation {
                 #[cfg(feature = "zlib")]
                 if let Some(Some(window_bits)) = config.client_max_window_bits {
                     Decompressor::new_with_window_bits(window_bits.max(9))
+                } else if let Some(None) = config.client_max_window_bits {
+                    Decompressor::new_with_window_bits(9)
                 } else {
                     Decompressor::new()
                 }

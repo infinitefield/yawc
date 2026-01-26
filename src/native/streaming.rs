@@ -168,8 +168,8 @@ impl<S> Streaming<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, opts: &Negotiation) -> Self {
-        let decoder = codec::Decoder::new(role, opts.max_payload_read);
+    pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, negotiated: &Negotiation) -> Self {
+        let decoder = codec::Decoder::new(role, negotiated.max_payload_read);
         let encoder = codec::Encoder::new(role);
         let codec = Codec::from((decoder, encoder));
 
@@ -177,7 +177,7 @@ where
         parts.read_buf = read_buf.into();
 
         let mut framed = Framed::from_parts(parts);
-        if let Some(boundary) = opts.max_backpressure_write_boundary {
+        if let Some(boundary) = negotiated.max_backpressure_write_boundary {
             framed.set_backpressure_boundary(boundary);
         }
 
@@ -188,8 +188,8 @@ where
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
-            deflate: opts.compressor(role),
-            inflate: opts.decompressor(role),
+            deflate: negotiated.compressor(role),
+            inflate: negotiated.decompressor(role),
         }
     }
 
