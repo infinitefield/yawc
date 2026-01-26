@@ -1,3 +1,54 @@
+//! Low-level streaming WebSocket layer for manual fragment control.
+//!
+//! This module provides the [`Streaming`] type, which gives users direct control over
+//! WebSocket frame fragmentation without automatic reassembly or fragmentation.
+//!
+//! # When to Use Streaming
+//!
+//! Use `Streaming` when you need:
+//! - **Manual fragment control**: Send and receive individual fragments without automatic reassembly
+//! - **Memory-efficient streaming**: Process large messages incrementally without buffering
+//! - **Custom fragmentation logic**: Implement application-specific fragmentation strategies
+//! - **Real-time processing**: Handle fragments as they arrive for low-latency applications
+//!
+//! # Comparison with WebSocket
+//!
+//! | Feature | `WebSocket` | `Streaming` |
+//! |---------|------------|------------|
+//! | Fragment reassembly | ✓ Automatic | ✗ Manual |
+//! | Auto-fragmentation | ✓ Optional | ✗ Manual |
+//! | Compression | ✓ Per-message | ✓ Streaming |
+//! | Ease of use | High | Mid |
+//! | Memory usage | Higher | Lower |
+//! | Control | Limited | Full |
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use yawc::{WebSocket, Frame, OpCode};
+//! use futures::SinkExt;
+//!
+//! # async fn example() -> yawc::Result<()> {
+//! // Convert WebSocket to Streaming for manual fragment control
+//! let ws = WebSocket::connect("ws://example.com".parse()?).await?;
+//! let mut streaming = ws.into_streaming();
+//!
+//! // Send a message as multiple fragments manually
+//! streaming.send(Frame::text("Hello").with_fin(false)).await?;
+//! streaming.send(Frame::continuation(" ").with_fin(false)).await?;
+//! streaming.send(Frame::continuation("World!")).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Safety
+//!
+//! When using `Streaming`, you are responsible for:
+//! - **Fragment ordering**: Continuation frames must follow a non-FIN data frame
+//! - **OpCode rules**: Only the first fragment carries the message opcode
+//! - **Control frames**: Cannot be fragmented and can be sent between data fragments
+//! - **Compression**: RSV1 bit is managed automatically based on compression state
+
 use std::{
     collections::VecDeque,
     pin::Pin,
@@ -18,6 +69,83 @@ use crate::{
     Frame, ReadHalf, WebSocketError, WriteHalf,
 };
 
+/// Low-level streaming WebSocket connection with manual fragment control.
+///
+/// `Streaming` provides direct access to WebSocket frames without automatic
+/// fragmentation or reassembly. This allows for:
+/// - Streaming large files directly from/to disk without loading them in memory
+/// - Implementing custom fragmentation strategies
+/// - Processing data incrementally as fragments arrive
+/// - Fine-grained control over frame boundaries
+///
+/// # Conversion
+///
+/// You can convert a [`WebSocket`](super::WebSocket) into a `Streaming` connection:
+///
+/// ```rust,no_run
+/// # use yawc::WebSocket;
+/// # async fn example() -> yawc::Result<()> {
+/// let ws = WebSocket::connect("ws://example.com".parse()?).await?;
+/// let streaming = ws.into_streaming();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Fragmentation Protocol
+///
+/// When manually fragmenting messages:
+/// 1. Send first fragment with desired OpCode (Text/Binary) and `FIN=false`
+/// 2. Send continuation fragments with OpCode::Continuation and `FIN=false`
+/// 3. Send final fragment with OpCode::Continuation and `FIN=true`
+///
+/// # Example: Streaming File Upload
+///
+/// ```rust,no_run
+/// use yawc::{WebSocket, Frame, OpCode};
+/// use futures::SinkExt;
+/// use std::io::Read;
+///
+/// # async fn upload_file() -> yawc::Result<()> {
+/// let ws = WebSocket::connect("ws://example.com/upload".parse()?).await?;
+/// let mut streaming = ws.into_streaming();
+///
+/// let mut file = std::fs::File::open("large_file.bin")?;
+/// let mut buffer = vec![0u8; 64 * 1024]; // 64 KiB chunks
+/// let mut first = true;
+///
+/// loop {
+///     let bytes_read = file.read(&mut buffer)?;
+///     if bytes_read == 0 {
+///         break;
+///     }
+///
+///     let chunk = buffer[..bytes_read].to_vec();
+///     let frame = if first {
+///         first = false;
+///         Frame::binary(chunk).with_fin(false)
+///     } else {
+///         Frame::continuation(chunk).with_fin(false)
+///     };
+///
+///     streaming.send(frame).await?;
+/// }
+///
+/// // Send final empty fragment to close the message
+/// streaming.send(Frame::continuation(vec![])).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Compression Behavior
+///
+/// Unlike [`WebSocket`](super::WebSocket) which compresses complete messages,
+/// `Streaming` performs **streaming compression**:
+/// - Compression state is maintained across fragments
+/// - RSV1 bit is automatically managed (set only on first fragment)
+/// - Decompression happens per-fragment with context preservation
+///
+/// This allows compressed data to be processed incrementally without waiting
+/// for the complete message.
 pub struct Streaming<S> {
     stream: Framed<S, Codec>,
     // Reading state
@@ -65,15 +193,46 @@ where
         }
     }
 
-    /// Splits the [`WebSocket`] into its low-level components for advanced usage.
+    /// Splits the `Streaming` connection into its low-level components for advanced usage.
+    ///
+    /// This method provides access to the underlying framed stream and read/write halves,
+    /// allowing for direct manipulation of the WebSocket protocol layer.
     ///
     /// # Safety
-    /// This function is unsafe because it splits ownership of shared state.
+    ///
+    /// This function is unsafe because it splits ownership of shared state. The caller
+    /// must ensure that:
+    /// - Only one component performs reads at a time
+    /// - Only one component performs writes at a time
+    /// - Protocol invariants are maintained (control frames, fragment ordering, etc.)
+    ///
+    /// # Example
+    ///
+    /// See [`examples/streaming.rs`](https://github.com/infinitefield/yawc/blob/master/examples/streaming.rs)
+    /// for a complete example of using `split_stream()` for low-level frame processing.
     pub unsafe fn split_stream(self) -> (Framed<S, Codec>, ReadHalf, WriteHalf) {
         (self.stream, self.read_half, self.write_half)
     }
 
     /// Polls for the next frame in the WebSocket stream.
+    ///
+    /// This method returns individual frames without reassembling fragments. Applications
+    /// using this method must handle fragmentation manually by checking the `FIN` flag
+    /// and `OpCode` of each frame.
+    ///
+    /// # Returns
+    ///
+    /// - `Poll::Ready(Ok(frame))` - A complete frame is available
+    /// - `Poll::Ready(Err(e))` - A protocol error occurred
+    /// - `Poll::Pending` - No frame is available yet
+    ///
+    /// # Fragment Handling
+    ///
+    /// Frames may arrive as:
+    /// - Complete messages: `OpCode::{Text,Binary}` with `FIN=true`
+    /// - First fragment: `OpCode::{Text,Binary}` with `FIN=false`
+    /// - Middle fragments: `OpCode::Continuation` with `FIN=false`
+    /// - Final fragment: `OpCode::Continuation` with `FIN=true`
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
         let wake_proxy = Arc::clone(&self.wake_proxy);
         wake_proxy.set_waker(ContextKind::Read, cx.waker());

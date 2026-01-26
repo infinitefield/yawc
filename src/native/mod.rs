@@ -416,7 +416,7 @@ pub(super) struct Fragmentation {
 ///
 /// This layer is responsible for:
 /// - **Outgoing fragmentation**: Breaking large frames into smaller fragments based on fragment_size
-/// - **Incoming defragmentation**: Reassembling fragmented messages received from the peer (unless streaming mode is enabled)
+/// - **Incoming defragmentation**: Reassembling fragmented messages received from the peer
 ///
 /// The layer is owned by WebSocket and operates independently for read and write operations.
 struct FragmentLayer {
@@ -634,35 +634,35 @@ impl FragmentLayer {
 /// is enabled, the message is compressed first as a single unit, and only the compressed output
 /// may be fragmented if it exceeds the size limit.
 ///
-/// # Manual Fragmentation (Advanced)
+/// # Manual Fragmentation with Streaming
 ///
-/// For low-level use cases, you can manually fragment messages by sending frames with
-/// `FIN=0`. This is an advanced feature and requires careful handling:
+/// `WebSocket` automatically handles fragmentation and reassembly. If you need **manual control**
+/// over individual fragments (e.g., for streaming large files or custom fragmentation logic),
+/// convert the `WebSocket` to a [`Streaming`] connection:
 ///
 /// ```no_run
 /// use yawc::{WebSocket, Frame};
 /// use futures::SinkExt;
 ///
-/// # async fn example(mut ws: WebSocket<tokio::net::TcpStream>) -> yawc::Result<()> {
-/// // First fragment: Text frame with FIN=0 (not compressed)
-/// ws.send(Frame::text("Hello ").with_fin(false)).await?;
+/// # async fn example() -> yawc::Result<()> {
+/// let ws = WebSocket::connect("wss://example.com/ws".parse()?).await?;
 ///
-/// // Second fragment: Continuation frame with FIN=0 (not compressed)
-/// ws.send(Frame::continuation("World").with_fin(false)).await?;
+/// // Convert to Streaming for manual fragment control
+/// let mut streaming = ws.into_streaming();
 ///
-/// // Final fragment: Continuation frame with FIN=1 (not compressed)
-/// ws.send(Frame::continuation("!")).await?;
+/// // Manually send fragments
+/// streaming.send(Frame::text("Hello ").with_fin(false)).await?;
+/// streaming.send(Frame::continuation("World").with_fin(false)).await?;
+/// streaming.send(Frame::continuation("!")).await?;
 /// # Ok(())
 /// # }
 /// ```
 ///
-/// **Important**: Manual fragmentation disables both compression and automatic fragmentation.
-/// When manually fragmenting messages, compression is **disabled** for all fragments. Only
-/// complete, non-fragmented frames are eligible for compression. This is consistent with
-/// RFC 7692, which specifies that the RSV1 bit (compression flag) is only set on the first
-/// frame of a fragmented message.
-/// See [`examples/fragmented_messages.rs`](https://github.com/infinitefield/yawc/blob/master/examples/fragmented_messages.rs)
-/// for a complete example of sending and receiving fragmented messages.
+/// **Important**: Attempting to send manual fragments (frames with `FIN=0`) through `WebSocket`
+/// while automatic fragmentation is enabled will panic. Use [`Streaming`] for manual fragmentation.
+///
+/// See [`examples/streaming.rs`](https://github.com/infinitefield/yawc/blob/master/examples/streaming.rs)
+/// for a complete example of manual fragment control for streaming large files.
 ///
 /// # Connecting
 /// To establish a WebSocket connection as a client:
@@ -1089,6 +1089,35 @@ where
         self.streaming.split_stream()
     }
 
+    /// Converts this `WebSocket` into a [`Streaming`] connection for manual fragment control.
+    ///
+    /// Use this when you need direct control over WebSocket frame fragmentation without
+    /// automatic reassembly or fragmentation. This is useful for:
+    /// - Streaming large files incrementally without loading them in memory
+    /// - Implementing custom fragmentation strategies
+    /// - Processing fragments as they arrive for low-latency applications
+    /// - Fine-grained control over compression boundaries
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use yawc::{WebSocket, Frame};
+    /// use futures::SinkExt;
+    ///
+    /// # async fn example() -> yawc::Result<()> {
+    /// let ws = WebSocket::connect("wss://example.com/ws".parse()?).await?;
+    /// let mut streaming = ws.into_streaming();
+    ///
+    /// // Send fragments manually
+    /// streaming.send(Frame::text("Part 1").with_fin(false)).await?;
+    /// streaming.send(Frame::continuation("Part 2")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// See [`Streaming`] documentation and
+    /// [`examples/streaming.rs`](https://github.com/infinitefield/yawc/blob/master/examples/streaming.rs)
+    /// for more details.
     pub fn into_streaming(self) -> Streaming<S> {
         self.streaming
     }

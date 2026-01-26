@@ -15,7 +15,7 @@ pub type CompressionLevel = flate2::Compression;
 /// `Options` allows comprehensive control over WebSocket connection behavior, including:
 /// - **Payload size limits**: Control memory usage and prevent abuse
 /// - **Compression**: Reduce bandwidth using permessage-deflate (RFC 7692)
-/// - **Fragmentation**: Handle large messages and streaming data
+/// - **Fragmentation**: Handle large messages
 /// - **UTF-8 validation**: Ensure text frame compliance
 /// - **TCP options**: Fine-tune network behavior
 ///
@@ -28,8 +28,7 @@ pub type CompressionLevel = flate2::Compression;
 /// [`Options::fragmentation`] (see [`Fragmentation`] for details).
 ///
 /// - **Outgoing**: Automatically fragments large messages when [`Fragmentation::fragment_size`] is set
-/// - **Incoming**: Reassembles fragments by default, or delivers them as-is in streaming mode
-///   (enabled via [`Fragmentation::streaming`])
+/// - **Incoming**: Automatically reassembles fragments into complete messages before delivery
 ///
 /// ## 2. Compression Layer
 /// Applies permessage-deflate compression to reduce bandwidth. Controlled by
@@ -48,15 +47,6 @@ pub type CompressionLevel = flate2::Compression;
 /// let options = Options::default()
 ///     .with_max_payload_read(1024 * 1024)  // 1 MiB max incoming
 ///     .with_utf8();                         // Validate text frames
-/// ```
-///
-/// ## High-Performance Streaming
-/// ```rust
-/// use yawc::Options;
-///
-/// let options = Options::default()
-///     .with_low_latency_compression()
-///     .with_no_delay();  // Disable Nagle's algorithm
 /// ```
 ///
 /// ## CPU and Memory-Constrained Environment
