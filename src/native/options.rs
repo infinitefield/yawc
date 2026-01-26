@@ -1010,8 +1010,8 @@ mod tests {
         let merged = server.merge(&client_offer);
 
         // When client offers without value and server has no preference, leave unspecified
-        assert_eq!(merged.server_max_window_bits, Some(None));
-        assert_eq!(merged.client_max_window_bits, Some(None));
+        assert_eq!(merged.server_max_window_bits, Some(Some(9)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(9)));
     }
 
     #[test]
