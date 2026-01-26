@@ -1,65 +1,117 @@
 //! Native WebSocket implementation for Tokio runtime.
 //!
-//! # Architecture Layer: Protocol & Application
+//! # Architecture Overview
 //!
-//! This module implements the **top layer** of the WebSocket processing stack,
-//! providing the main [`WebSocket`] type that applications interact with.
+//! This module provides the core WebSocket implementation with two complementary APIs:
+//!
+//! - **[`WebSocket`]**: High-level API with automatic fragment assembly, compression, and protocol handling
+//! - **[`Streaming`]**: Low-level API for manual fragment control and streaming compression
 //!
 //! ## WebSocket Layer Responsibilities
 //!
-//! The [`WebSocket`] type handles:
+//! The [`WebSocket`] type provides automatic handling of:
 //!
-//! - **Decompression**: Applies permessage-deflate decompression (RFC 7692) to complete messages
-//! - **UTF-8 validation**: Validates text frames contain valid UTF-8
+//! - **Fragment assembly**: Automatically reassembles fragmented messages into complete payloads
+//! - **Message compression**: Applies permessage-deflate (RFC 7692) decompression to complete messages
+//! - **UTF-8 validation**: Validates text frames contain valid UTF-8 (when enabled)
 //! - **Protocol control**: Handles Ping/Pong and Close frames automatically
-//! - **Connection management**: Manages WebSocket connection lifecycle
-//! - **Futures integration**: Implements `Stream` and `Sink` traits
+//! - **Automatic fragmentation**: Optionally splits large outgoing messages into fragments
 //!
-//! ## Layered Processing
+//! ## Streaming Layer Responsibilities
 //!
-//! Messages flow through three distinct layers:
+//! The [`Streaming`] type provides direct control over:
+//!
+//! - **Manual fragments**: Send and receive individual frame fragments without assembly
+//! - **Streaming compression**: Compress data incrementally with partial flushes
+//! - **Memory efficiency**: Process large messages without buffering entire payloads
+//! - **Frame-level access**: Direct access to WebSocket frames for custom protocols
+//!
+//! ## Complete Architecture Stack
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────┐
-//! │  WebSocket Layer (this module)                 │
-//! │  • Decompresses complete assembled messages    │
-//! │  • Validates UTF-8 for text frames             │
-//! │  • Handles Ping/Pong/Close protocol            │
+//! │  Application Layer                             │
 //! └──────────────────┬─────────────────────────────┘
 //!                    │
 //! ┌──────────────────▼─────────────────────────────┐
-//! │  ReadHalf Layer (split module)                 │
-//! │  • Assembles fragmented messages               │
-//! │  • Tracks fragment state and timeouts          │
-//! │  • Enforces message size limits                │
+//! │  WebSocket Layer (automatic mode)              │
+//! │  • Automatic fragment assembly                 │
+//! │  • Message-level compression                   │
+//! │  • UTF-8 validation for text frames            │
+//! │  • Automatic Ping/Pong/Close handling          │
+//! │  • Automatic fragmentation (optional)          │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//!          ┌─────────▼─────────┐
+//!          │  .into_streaming()│
+//!          └─────────┬─────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  Streaming Layer (manual mode)                 │
+//! │  • Manual fragment control                     │
+//! │  • Streaming compression with partial flushes  │
+//! │  • Direct frame access                         │
+//! │  • Memory-efficient large message handling     │
 //! └──────────────────┬─────────────────────────────┘
 //!                    │
 //! ┌──────────────────▼─────────────────────────────┐
-//! │  Codec Layer (codec module)                    │
-//! │  • Decodes individual frames from bytes        │
-//! │  • Handles masking/unmasking                   │
-//! │  • Parses frame headers (FIN, RSV, OpCode)     │
-//! └────────────────────────────────────────────────┘
+//! │  ReadHalf / WriteHalf                          │
+//! │  • Connection state management                 │
+//! │  • Buffer coordination                         │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//! ┌──────────────────▼─────────────────────────────┐
+//! │  Codec Layer                                   │
+//! │  • Frame encoding/decoding                     │
+//! │  • Masking/unmasking                           │
+//! │  • Header parsing (FIN, RSV, OpCode)           │
+//! └──────────────────┬─────────────────────────────┘
+//!                    │
+//!              Network (TCP/TLS)
 //! ```
 //!
-//! ## Example: Compressed Fragmented Message
+//! ## Example: WebSocket Mode (Automatic)
 //!
-//! When receiving a compressed message split across 3 fragments:
+//! When receiving a compressed fragmented message with [`WebSocket`]:
 //!
-//! 1. **Codec**: Decodes 3 individual frames
+//! 1. **Codec**: Decodes 3 individual frames from network bytes
 //!    - `Frame(Text, RSV1=1, FIN=0, payload1)`
 //!    - `Frame(Continuation, RSV1=0, FIN=0, payload2)`
 //!    - `Frame(Continuation, RSV1=0, FIN=1, payload3)`
 //!
-//! 2. **ReadHalf**: Assembles complete compressed message
-//!    - Returns `Frame(Text, RSV1=1, FIN=1, payload1+payload2+payload3)`
+//! 2. **WebSocket**: Assembles and decompresses automatically
+//!    - Concatenates: `payload1 + payload2 + payload3`
+//!    - Decompresses the complete message
+//!    - Validates UTF-8 for text frames
+//!    - Returns: `Frame(Text, payload="decompressed data")`
 //!
-//! 3. **WebSocket**: Decompresses and validates
-//!    - Decompresses the concatenated payload
-//!    - Validates UTF-8 if it's a text frame
-//!    - Returns final frame to application
+//! ## Example: Streaming Mode (Manual)
 //!
-//! This ensures RFC 6455 fragmentation and RFC 7692 compression are both handled correctly.
+//! When receiving the same message with [`Streaming`]:
+//!
+//! 1. **Codec**: Decodes individual frames (same as above)
+//!
+//! 2. **Streaming**: Returns each frame individually
+//!    - Application receives: `Frame(Text, RSV1=1, FIN=0, payload1)`
+//!    - Application receives: `Frame(Continuation, RSV1=0, FIN=0, payload2)`
+//!    - Application receives: `Frame(Continuation, RSV1=0, FIN=1, payload3)`
+//!    - Application handles assembly and decompression manually
+//!
+//! This allows applications to stream-decompress data as fragments arrive,
+//! enabling memory-efficient processing of large messages.
+//!
+//! ## Use Case Selection
+//!
+//! **Use [`WebSocket`] when:**
+//! - You want automatic protocol handling
+//! - Messages fit comfortably in memory
+//! - You need simple, ergonomic APIs
+//!
+//! **Use [`Streaming`] when:**
+//! - Processing messages larger than available memory (e.g., file transfers)
+//! - Implementing custom fragmentation strategies
+//! - Building low-latency systems requiring frame-level control
+//! - Streaming compression is needed for real-time data
 
 mod builder;
 mod options;
@@ -103,7 +155,7 @@ use url::Url;
 pub use crate::stream::MaybeTlsStream;
 pub use builder::{HttpRequest, HttpRequestBuilder, WebSocketBuilder};
 pub use frame::{Frame, OpCode};
-pub use options::{CompressionLevel, DeflateOptions, Options};
+pub use options::{CompressionLevel, DeflateOptions, Fragmentation, Options};
 pub use split::{ReadHalf, WriteHalf};
 pub use upgrade::UpgradeFut;
 
@@ -404,7 +456,7 @@ impl AsyncWrite for HttpStream {
 
 // ================== FragmentLayer ====================
 
-pub(super) struct Fragmentation {
+pub(super) struct FragmentationState {
     started: Instant,
     opcode: OpCode,
     is_compressed: bool,
@@ -423,7 +475,7 @@ struct FragmentLayer {
     /// Queue for outgoing fragments (from automatic fragmentation)
     outgoing_fragments: VecDeque<Frame>,
     /// Fragment accumulation for assembling incoming fragmented messages
-    incoming_fragment: Option<Fragmentation>,
+    incoming_fragment: Option<FragmentationState>,
     /// Maximum fragment size for outgoing messages
     fragment_size: Option<usize>,
     /// Maximum buffer size for incoming fragmented messages
@@ -502,7 +554,7 @@ impl FragmentLayer {
 
                 // Handle fragmented messages
                 if !frame.fin {
-                    let fragmentation = Fragmentation {
+                    let fragmentation = FragmentationState {
                         started: Instant::now(),
                         opcode: frame.opcode,
                         is_compressed: frame.is_compressed,
@@ -2113,17 +2165,7 @@ mod tests {
         );
 
         // Create a large payload with repetitive data (compresses well)
-        let mut payload = Vec::with_capacity(PAYLOAD_SIZE);
-        for i in 0..PAYLOAD_SIZE {
-            // Pattern that compresses well but isn't trivial
-            payload.push((i % 256) as u8);
-        }
-
-        // Add some unique markers to verify correct reconstruction
-        let marker = b"MARKER_START";
-        payload[0..marker.len()].copy_from_slice(marker);
-        let marker_end = b"MARKER_END__";
-        payload[PAYLOAD_SIZE - marker_end.len()..].copy_from_slice(marker_end);
+        let payload: Vec<u8> = (0..PAYLOAD_SIZE).map(|i| (i % 256) as u8).collect();
 
         // Manually fragment the payload and send as separate frames
         let total_fragments = PAYLOAD_SIZE.div_ceil(FRAGMENT_SIZE);
@@ -2185,27 +2227,7 @@ mod tests {
         assert_eq!(received_frame.opcode(), OpCode::Binary);
         assert!(received_frame.is_fin());
         assert_eq!(received_frame.payload().len(), PAYLOAD_SIZE);
-
-        // Verify start marker
-        assert_eq!(
-            &received_frame.payload()[0..marker.len()],
-            marker,
-            "Start marker mismatch"
-        );
-
-        // Verify end marker
-        assert_eq!(
-            &received_frame.payload()[PAYLOAD_SIZE - marker_end.len()..],
-            marker_end,
-            "End marker mismatch"
-        );
-
-        // Verify entire payload
-        assert_eq!(
-            received_frame.payload(),
-            &payload[..],
-            "Payload reconstruction failed"
-        );
+        assert_eq!(received_frame.payload().as_ref(), &payload[..]);
 
         println!(
             "Successfully sent {} manual fragments, compressed, decompressed, and reassembled {} bytes",

@@ -15,10 +15,9 @@
 //!
 //! | Feature | `WebSocket` | `Streaming` |
 //! |---------|------------|------------|
-//! | Fragment reassembly | ✓ Automatic | ✗ Manual |
-//! | Auto-fragmentation | ✓ Optional | ✗ Manual |
-//! | Compression | ✓ Per-message | ✓ Streaming |
-//! | Ease of use | High | Mid |
+//! | Fragment reassembly | Automatic | Manual |
+//! | Auto-fragmentation | Optional | Manual |
+//! | Compression | Yes | Yes |
 //! | Memory usage | Higher | Lower |
 //! | Control | Limited | Full |
 //!
@@ -80,7 +79,7 @@ use crate::{
 ///
 /// # Conversion
 ///
-/// You can convert a [`WebSocket`](super::WebSocket) into a `Streaming` connection:
+/// You can convert a [`WebSocket`](super::WebSocket) into a [`Streaming`] connection:
 ///
 /// ```rust,no_run
 /// # use yawc::WebSocket;

@@ -1,11 +1,38 @@
 # yawc
 
-Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
+Fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
+
+yawc is the **only Rust WebSocket library** that provides both high-level automatic APIs and low-level streaming control with full compression support, making it suitable for everything from simple chat applications to high-performance data streaming systems.
 
 [![Crates.io](https://img.shields.io/crates/v/yawc.svg)](https://crates.io/crates/yawc)
 [![Documentation](https://docs.rs/yawc/badge.svg)](https://docs.rs/yawc)
 [![License](https://img.shields.io/badge/license-AGPL%20v3.0-blue.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
+
+## Why yawc?
+
+yawc stands apart as the **most flexible and feature-complete WebSocket library** in the Rust ecosystem:
+
+### Unique Features
+
+**Production-grade performance**
+
+- Zero-copy frame processing where possible
+- SIMD-optimized masking operations
+- Compact memory layout (16-byte frame state vs 24+ bytes in other libraries)
+- Powers 24/7 high-frequency trading systems
+
+**Only library with streaming compression support**
+
+- Compress data incrementally without buffering entire messages in memory
+- Partial flush support for real-time compression
+- Memory-efficient handling of multi-GB payloads
+
+**Dual-level API design**
+
+- **High-level [`WebSocket`]**: Automatic fragment assembly, compression, UTF-8 validation
+- **Low-level [`Streaming`]**: Manual fragment control, streaming compression, direct frame access
+- Seamlessly convert between both as needed: `ws.into_streaming()`
 
 ## Features
 
