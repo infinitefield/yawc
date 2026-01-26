@@ -241,6 +241,10 @@ impl ReadHalf {
     {
         use futures::StreamExt;
 
+        if self.is_closed {
+            return Poll::Ready(Err(WebSocketError::ConnectionClosed));
+        }
+
         let frame = ready!(stream.poll_next_unpin(cx));
         let res = match frame {
             Some(res) => res,

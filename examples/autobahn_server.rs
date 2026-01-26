@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::{response::IntoResponse, routing::get, Router};
 use tokio::net::TcpListener;
-use yawc::{frame::OpCode, CompressionLevel, HttpStream, IncomingUpgrade, Options, WebSocket};
+use yawc::{frame::OpCode, HttpStream, IncomingUpgrade, Options, WebSocket};
 
 async fn ws_handler(ws: IncomingUpgrade) -> impl IntoResponse {
     // Configure options based on what Autobahn tests need
@@ -25,7 +25,6 @@ fn get_server_options() -> Options {
         .with_max_payload_read(100 * 1024 * 1024)
         .with_max_read_buffer(200 * 1024 * 1024)
         .with_low_latency_compression()
-        .with_compression_level(CompressionLevel::none())
 }
 
 async fn handle_socket(mut ws: WebSocket<HttpStream>) {
@@ -56,12 +55,7 @@ async fn main() {
 
     let app = Router::new().route("/", get(ws_handler));
 
-    let port = std::env::var("AUTOBAHN_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(9002);
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 9002));
     log::info!("Autobahn test server listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await.unwrap();

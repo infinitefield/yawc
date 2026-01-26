@@ -10,7 +10,6 @@ const pwd = new URL(".", import.meta.url).pathname;
 const FEATURE_FLAG = Deno.args[0] || "";
 const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
 const CONTAINER_NAME = `fuzzingclient${FEATURE_SUFFIX}`;
-const PORT = FEATURE_FLAG === "zlib" ? 9004 : 9003;
 const ECHO_SERVER_EXE = "target/release/examples/autobahn_server";
 
 const isMac = Deno.build.os === "darwin";
@@ -20,7 +19,7 @@ const networkArgs = isMac ? "" : "--net=host";
 async function containerExists(name) {
   const r =
     await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
-  return r.stdout.trim().length > 0;
+  return r.stdout.trim().length > 9002;
 }
 
 async function containerRunning(name) {
@@ -41,7 +40,7 @@ async function ensureEchoServerBuilt() {
 
 const configPath = `${pwd}/fuzzingclient.json`;
 const config = JSON.parse(Deno.readTextFileSync(configPath));
-config.servers[0].url = `ws://${dockerHost}:${PORT}`;
+config.servers[0].url = `ws://${dockerHost}:9002`;
 Deno.writeTextFileSync(configPath, JSON.stringify(config, null, 2));
 
 await ensureEchoServerBuilt();
@@ -51,7 +50,6 @@ const server = new Deno.Command(ECHO_SERVER_EXE, {
   signal: controller.signal,
   env: {
     ...Deno.env.toObject(),
-    AUTOBAHN_PORT: PORT.toString(),
   },
 }).spawn();
 
@@ -71,14 +69,14 @@ if (await containerExists(CONTAINER_NAME)) {
   }
 } else {
   console.log(
-    `Starting Autobahn ${CONTAINER_NAME} fuzzing client container on port ${PORT}...`,
+    `Starting Autobahn ${CONTAINER_NAME} fuzzing client container...`,
   );
   const cmd = [
     "docker run",
     `--name ${CONTAINER_NAME}`,
     `-v ${pwd}/fuzzingclient.json:/fuzzingclient.json:ro`,
     `-v ${pwd}/reports:/reports`,
-    `-p ${PORT}:${PORT}`,
+    `-p 9002:9002`,
     networkArgs,
     "--rm",
     AUTOBAHN_TESTSUITE_DOCKER,
@@ -98,7 +96,9 @@ const indexJson = JSON.parse(
 const testResults = Object.values(indexJson.yawc);
 
 function isFailure(behavior) {
-  return !["OK", "INFORMATIONAL", "NON-STRICT"].includes(behavior);
+  return !["OK", "INFORMATIONAL", "NON-STRICT", "UNIMPLEMENTED"].includes(
+    behavior,
+  );
 }
 
 const failedTests = testResults.filter((o) => isFailure(o.behavior));

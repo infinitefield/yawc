@@ -652,7 +652,7 @@ impl DeflateOptions {
         Self {
             level: CompressionLevel::fast(),
             #[cfg(feature = "zlib")]
-            server_max_window_bits: Some(9), // Minimal window
+            server_max_window_bits: None,
             #[cfg(feature = "zlib")]
             client_max_window_bits: None,
             server_no_context_takeover: false,
@@ -671,7 +671,7 @@ impl DeflateOptions {
         Self {
             level: CompressionLevel::best(),
             #[cfg(feature = "zlib")]
-            server_max_window_bits: Some(15), // Maximum window
+            server_max_window_bits: None,
             #[cfg(feature = "zlib")]
             client_max_window_bits: None,
             server_no_context_takeover: false,
@@ -691,7 +691,7 @@ impl DeflateOptions {
         Self {
             level: CompressionLevel::default(),
             #[cfg(feature = "zlib")]
-            server_max_window_bits: Some(12),
+            server_max_window_bits: None,
             #[cfg(feature = "zlib")]
             client_max_window_bits: None,
             server_no_context_takeover: false,

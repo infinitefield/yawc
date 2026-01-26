@@ -1,26 +1,14 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
-use tokio::time::sleep;
+use std::collections::HashMap;
 use yawc::{close::CloseCode, frame::OpCode, Frame, Options, TcpWebSocket, WebSocket};
 
-fn get_port() -> u16 {
-    std::env::var("AUTOBAHN_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(9001)
-}
-
 async fn get_case_info(case: u32) -> String {
-    let port = get_port();
     for attempt in 1..=3 {
         match async {
             let mut ws = WebSocket::connect(
-                format!("ws://localhost:{port}/getCaseInfo?case={case}")
+                format!("ws://localhost:9001/getCaseInfo?case={case}")
                     .parse()
                     .unwrap(),
             )
@@ -82,8 +70,7 @@ fn get_options_for_case_id(case_id: &str) -> Options {
                 return base_options.with_client_max_window_bits(15);
             } else if case_id.starts_with("13.5.") {
                 return base_options
-                    // .server_no_context_takeover()
-                    // .client_no_context_takeover()
+                    .client_no_context_takeover()
                     .with_client_max_window_bits(9);
             } else if case_id.starts_with("13.6.") {
                 return base_options
@@ -106,32 +93,18 @@ fn get_options_for_case_id(case_id: &str) -> Options {
 
 async fn connect(path: &str, case_id: Option<&str>) -> Result<TcpWebSocket> {
     let options = case_id.map(get_options_for_case_id).unwrap_or_default();
-    let port = get_port();
 
-    let client = WebSocket::connect(format!("ws://localhost:{port}/{path}").parse().unwrap())
+    let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
         .with_options(options)
         .await?;
     Ok(client)
 }
 
 async fn get_case_count() -> Result<u32> {
-    let started_at = Instant::now();
-    loop {
-        let mut ws = match connect("getCaseCount", None).await {
-            Ok(ok) => ok,
-            Err(_) => {
-                if started_at.elapsed() > Duration::from_secs(300) {
-                    panic!("unable to connect")
-                }
-                // ...
-                sleep(Duration::from_millis(250)).await;
-                continue;
-            }
-        };
-        let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
-        ws.send(Frame::close(CloseCode::Normal, [])).await?;
-        break Ok(std::str::from_utf8(msg.payload())?.parse()?);
-    }
+    let mut ws = connect("getCaseCount", None).await?;
+    let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
+    ws.send(Frame::close(CloseCode::Normal, [])).await?;
+    Ok(std::str::from_utf8(msg.payload())?.parse()?)
 }
 
 #[tokio::main]

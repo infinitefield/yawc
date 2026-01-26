@@ -287,7 +287,9 @@ impl Compressor {
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
         match &mut self.compressor_type {
             CompressorType::Contextual(compressor) => compressor.compress(input, flush),
-            CompressorType::NoContextTakeover(compressor) => compressor.compress_no_context(input),
+            CompressorType::NoContextTakeover(compressor) => {
+                compressor.compress_no_context(input, flush)
+            }
         }
     }
 }
@@ -322,9 +324,12 @@ impl Deflate {
     }
 
     /// Compresses input data with no context takeover, resetting the compression dictionary before each compression.
-    fn compress_no_context(&mut self, input: &[u8]) -> io::Result<Bytes> {
-        self.compress.reset(); // Reset dictionary for no-context takeover
-        self.compress(input, true)
+    fn compress_no_context(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
+        let res = self.compress(input, flush);
+        if flush {
+            self.compress.reset(); // Reset dictionary for no-context takeover
+        }
+        res
     }
 
     /// Compresses input data while maintaining compression context across frames.
@@ -591,8 +596,11 @@ impl Inflate {
 
     /// Decompresses input data in no-context-takeover mode, resetting the decompression context before each call.
     fn decompress_no_context(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
-        self.decompress.reset(false); // Reset the context for no-context takeover
-        self.decompress(input, stream_end)
+        let res = self.decompress(input, stream_end);
+        if stream_end {
+            self.decompress.reset(false); // Reset the context for no-context takeover
+        }
+        res
     }
 
     /// Decompresses input data while maintaining decompression context across frames.
@@ -747,7 +755,7 @@ mod tests {
         let mut deflate = Deflate::new(Compression::default());
         let data = b"test data";
         let compressed = deflate
-            .compress_no_context(data)
+            .compress_no_context(data, true)
             .expect("Compression failed");
         assert!(!compressed.is_empty());
     }
@@ -841,7 +849,7 @@ mod tests {
         let mut deflate = Deflate::new(Compression::default());
         let data = b"test data";
         let compressed = deflate
-            .compress_no_context(data)
+            .compress_no_context(data, true)
             .expect("Compression failed");
 
         let mut inflate = Inflate::default();
@@ -1342,7 +1350,7 @@ mod tests {
     #[test]
     fn test_fragmented_frames_with_context() {
         // Test fragmentation with context preservation across multiple messages
-        let messages = vec![
+        let messages = [
             "First message with repetitive data: ".repeat(50),
             "Second message also repetitive: ".repeat(50),
             "Third message continues the pattern: ".repeat(50),
@@ -1368,11 +1376,13 @@ mod tests {
                 let chunk = &message.as_bytes()[start..end];
                 let is_final = i == 2;
 
-                let compressed = compressor.compress(chunk, is_final).expect(&format!(
-                    "Compression failed on message {} fragment {}",
-                    msg_idx + 1,
-                    i + 1
-                ));
+                let compressed = compressor.compress(chunk, is_final).unwrap_or_else(|_| {
+                    panic!(
+                        "Compression failed on message {} fragment {}",
+                        msg_idx + 1,
+                        i + 1
+                    )
+                });
 
                 fragments.push((compressed, is_final));
             }
@@ -1382,11 +1392,13 @@ mod tests {
             for (frag_idx, (compressed, is_final)) in fragments.iter().enumerate() {
                 let result = decompressor
                     .decompress(compressed, *is_final)
-                    .expect(&format!(
-                        "Decompression failed on message {} fragment {}",
-                        msg_idx + 1,
-                        frag_idx + 1
-                    ));
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Decompression failed on message {} fragment {}",
+                            msg_idx + 1,
+                            frag_idx + 1
+                        )
+                    });
 
                 decompressed_data.extend_from_slice(&result);
             }
@@ -1400,5 +1412,89 @@ mod tests {
         }
 
         println!("Fragmented frames with context test passed");
+    }
+
+    #[test]
+    fn test_no_context_takeover_behavior() {
+        // Test that verifies no_context_takeover properly resets compression state
+        // between messages, ensuring consistent compression ratios unlike contextual compression
+
+        let repetitive_message = "This is a repeated message. ".repeat(100);
+
+        // Test with contextual compression (maintains state)
+        let mut contextual_compressor = Compressor::new(Compression::default());
+        let mut compressed_sizes_contextual = Vec::new();
+
+        for i in 0..5 {
+            let compressed = contextual_compressor
+                .compress(repetitive_message.as_bytes(), true)
+                .expect("Contextual compression failed");
+            compressed_sizes_contextual.push(compressed.len());
+            println!(
+                "Contextual compression round {}: {} bytes",
+                i + 1,
+                compressed.len()
+            );
+        }
+
+        // Test with no_context_takeover (resets state)
+        let mut no_context_compressor = Compressor::no_context_takeover(Compression::default());
+        let mut compressed_sizes_no_context = Vec::new();
+
+        for i in 0..5 {
+            let compressed = no_context_compressor
+                .compress(repetitive_message.as_bytes(), true)
+                .expect("No-context compression failed");
+            compressed_sizes_no_context.push(compressed.len());
+            println!(
+                "No-context compression round {}: {} bytes",
+                i + 1,
+                compressed.len()
+            );
+        }
+
+        // With no_context_takeover, all compressed sizes should be identical
+        // because the compression state is reset each time
+        for i in 1..compressed_sizes_no_context.len() {
+            assert_eq!(
+                compressed_sizes_no_context[0],
+                compressed_sizes_no_context[i],
+                "No-context takeover should produce identical compression sizes, \
+                 but round 1 had {} bytes while round {} had {} bytes",
+                compressed_sizes_no_context[0],
+                i + 1,
+                compressed_sizes_no_context[i]
+            );
+        }
+
+        // Test decompression works correctly with no_context_takeover
+        let mut no_context_decompressor = Decompressor::no_context_takeover();
+
+        for i in 0..5 {
+            let compressed = no_context_compressor
+                .compress(repetitive_message.as_bytes(), true)
+                .expect("Compression failed");
+
+            let decompressed = no_context_decompressor
+                .decompress(&compressed, true)
+                .expect("Decompression failed");
+
+            assert_eq!(
+                &decompressed[..],
+                repetitive_message.as_bytes(),
+                "Decompressed data doesn't match original on round {}",
+                i + 1
+            );
+        }
+
+        println!("No-context takeover behavior test passed");
+        println!(
+            "No-context compression sizes: {:?}",
+            compressed_sizes_no_context
+        );
+        println!(
+            "Contextual compression sizes: {:?}",
+            compressed_sizes_contextual
+        );
     }
 }

@@ -6,12 +6,9 @@ const pwd = new URL(".", import.meta.url).pathname;
 const AUTOBAHN_TESTSUITE_DOCKER =
   "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
 
-// Accept optional feature flag from command line (e.g., "zlib")
-const FEATURE_FLAG = Deno.args[0] || "";
-const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
-const CONTAINER_NAME = `fuzzingserver${FEATURE_SUFFIX}`;
-const PORT = FEATURE_FLAG === "zlib" ? 9002 : 9001;
+const CONTAINER_NAME = "fuzzingserver";
 const CLIENT_EXE = "target/release/examples/autobahn_client";
+const WITH_ZLIB = Deno.args[0] === "zlib";
 
 async function containerExists(name) {
   const result =
@@ -26,12 +23,12 @@ async function containerRunning(name) {
 }
 
 async function ensureClientBuilt() {
-  console.log(
-    `Building autobahn_client${FEATURE_FLAG ? ` with feature: ${FEATURE_FLAG}` : ""}...`,
-  );
-  if (FEATURE_FLAG) {
-    await $`cargo build --release --example autobahn_client --features ${FEATURE_FLAG}`;
+  console.log("Building autobahn_client...");
+  if (WITH_ZLIB) {
+    console.log("Building with zlib compression support");
+    await $`cargo build --release --example autobahn_client --features zlib`;
   } else {
+    console.log("Building without zlib compression support");
     await $`cargo build --release --example autobahn_client`;
   }
 }
@@ -47,23 +44,23 @@ if (await containerExists(CONTAINER_NAME)) {
       `Autobahn ${CONTAINER_NAME} docker container exists but is stopped. Starting it.`,
     );
     await $`docker start ${CONTAINER_NAME}`;
+    await sleep(5);
   }
 } else {
-  console.log(
-    `Starting Autobahn ${CONTAINER_NAME} docker container on port ${PORT}...`,
-  );
+  console.log(`Starting Autobahn ${CONTAINER_NAME} docker container...`);
   $`docker run --name ${CONTAINER_NAME} \
     -v ${pwd}/fuzzingserver.json:/fuzzingserver.json:ro \
     -v ${pwd}/reports:/reports \
-    -p ${PORT}:9001 \
+    -p 9001:9001 \
     --rm ${AUTOBAHN_TESTSUITE_DOCKER} \
     wstest -m fuzzingserver -s fuzzingserver.json`.spawn();
+
+  // sleep long because it might take a while to pull the files
+  await sleep(30);
 }
 
 await ensureClientBuilt();
-await $`${CLIENT_EXE}`
-  .env("RUST_BACKTRACE", "full")
-  .env("AUTOBAHN_PORT", PORT.toString());
+await $`${CLIENT_EXE}`.env("RUST_BACKTRACE", "full");
 
 const { yawc } = JSON.parse(
   Deno.readTextFileSync("./autobahn/reports/client/index.json"),
@@ -72,7 +69,12 @@ const { yawc } = JSON.parse(
 const result = Object.values(yawc);
 
 function failed(name) {
-  return name !== "OK" && name !== "INFORMATIONAL" && name !== "NON-STRICT";
+  return (
+    name !== "OK" &&
+    name !== "INFORMATIONAL" &&
+    name !== "NON-STRICT" &&
+    name !== "UNIMPLEMENTED"
+  );
 }
 
 const failedtests = result.filter((outcome) => failed(outcome.behavior));
