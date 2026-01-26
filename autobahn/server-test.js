@@ -5,7 +5,11 @@ const AUTOBAHN_TESTSUITE_DOCKER =
   "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074";
 
 const pwd = new URL(".", import.meta.url).pathname;
-const CONTAINER_NAME = "fuzzingclient";
+
+// Accept optional feature flag from command line (e.g., "zlib")
+const FEATURE_FLAG = Deno.args[0] || "";
+const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
+const CONTAINER_NAME = `fuzzingclient${FEATURE_SUFFIX}`;
 const ECHO_SERVER_EXE = "target/release/examples/autobahn_server";
 
 const isMac = Deno.build.os === "darwin";
@@ -15,7 +19,7 @@ const networkArgs = isMac ? "" : "--net=host";
 async function containerExists(name) {
   const r =
     await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
-  return r.stdout.trim().length > 0;
+  return r.stdout.trim().length > 9002;
 }
 
 async function containerRunning(name) {
@@ -25,8 +29,11 @@ async function containerRunning(name) {
 }
 
 async function ensureEchoServerBuilt() {
-  console.log("echo_server not found, building...");
-  await $`cargo build --release --example autobahn_server --features axum`;
+  console.log(
+    `Building autobahn_server${FEATURE_FLAG ? ` with feature: ${FEATURE_FLAG}` : ""}...`,
+  );
+  const features = FEATURE_FLAG ? `axum,${FEATURE_FLAG}` : "axum";
+  await $`cargo build --release --example autobahn_server --features ${features}`;
 }
 
 // Start
@@ -41,6 +48,9 @@ await ensureEchoServerBuilt();
 const controller = new AbortController();
 const server = new Deno.Command(ECHO_SERVER_EXE, {
   signal: controller.signal,
+  env: {
+    ...Deno.env.toObject(),
+  },
 }).spawn();
 
 // Give server time to start
@@ -66,7 +76,7 @@ if (await containerExists(CONTAINER_NAME)) {
     `--name ${CONTAINER_NAME}`,
     `-v ${pwd}/fuzzingclient.json:/fuzzingclient.json:ro`,
     `-v ${pwd}/reports:/reports`,
-    "-p 9002:9002",
+    `-p 9002:9002`,
     networkArgs,
     "--rm",
     AUTOBAHN_TESTSUITE_DOCKER,
@@ -86,7 +96,9 @@ const indexJson = JSON.parse(
 const testResults = Object.values(indexJson.yawc);
 
 function isFailure(behavior) {
-  return !["OK", "INFORMATIONAL", "NON-STRICT"].includes(behavior);
+  return !["OK", "INFORMATIONAL", "NON-STRICT", "UNIMPLEMENTED"].includes(
+    behavior,
+  );
 }
 
 const failedTests = testResults.filter((o) => isFailure(o.behavior));

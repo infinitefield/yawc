@@ -7,20 +7,58 @@
 //!
 //! ## Architecture Layer: Tokio Codec
 //!
-//! The codec layer is responsible for:
+//! The [`Codec`] layer is responsible for:
 //! - **Frame decoding**: Parsing raw bytes from the network into structured [`Frame`] objects
 //! - **Frame encoding**: Serializing [`Frame`] objects into raw bytes for network transmission
-//! - **Header parsing**: Extracting FIN, RSV1-3, OpCode, and mask bits
+//! - **Header parsing**: Extracting FIN, RSV1-3, [`OpCode`], and mask bits
 //! - **Masking/unmasking**: Applying and removing XOR masks as per RFC 6455
 //! - **Payload length handling**: Supporting 7-bit, 16-bit, and 64-bit payload lengths
 //!
 //! ## What the Codec Does NOT Handle
 //!
 //! The codec operates at the frame level only. It does **not** handle:
-//! - Fragment assembly (handled by [`ReadHalf`](crate::native::split::ReadHalf))
-//! - Decompression (handled by [`WebSocket`](crate::WebSocket))
-//! - UTF-8 validation (handled by [`WebSocket`](crate::WebSocket))
-//! - Protocol control (Ping/Pong/Close handling)
+//! - **Fragment assembly**: Handled by [`WebSocket`] layer (automatic reassembly of fragmented messages)
+//! - **Compression/Decompression**: Handled by [`Streaming`] and [`WebSocket`] layers
+//! - **UTF-8 validation**: Handled by [`WebSocket`] layer for text frames
+//! - **Protocol control**: Automatic Ping/Pong/Close handling at [`WebSocket`] layer
+//! - **Connection state**: Managed by [`ReadHalf`] and [`WriteHalf`]
+//!
+//! ## yawc Architecture Stack
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────┐
+//! │ Application Layer                              │
+//! └────────────────┬───────────────────────────────┘
+//!                  │
+//! ┌────────────────▼───────────────────────────────┐
+//! │ WebSocket Layer                                │
+//! │ • Fragment assembly & automatic fragmentation  │
+//! │ • UTF-8 validation                             │
+//! └────────────────┬───────────────────────────────┘
+//!                  │
+//! ┌────────────────▼───────────────────────────────┐
+//! │ Streaming Layer (optional)                     │
+//! │ • Manual fragment control                      │
+//! │ • Streaming compression with partial flushes   │
+//! │ • Direct frame access                          │
+//! │ • Automatic Ping/Pong/Close handling           │
+//! └────────────────┬───────────────────────────────┘
+//!                  │
+//! ┌────────────────▼───────────────────────────────┐
+//! │ ReadHalf / WriteHalf                           │
+//! │ • Connection state management                  │
+//! │ • Buffer coordination                          │
+//! └────────────────┬───────────────────────────────┘
+//!                  │
+//! ┌────────────────▼───────────────────────────────┐
+//! │ Codec Layer (this module)                      │
+//! │ • Frame encoding/decoding                      │
+//! │ • Masking/unmasking                            │
+//! │ • Header parsing                               │
+//! └────────────────┬───────────────────────────────┘
+//!                  │
+//!           Network (TCP/TLS)
+//! ```
 //!
 //! ## Components
 //!
@@ -35,11 +73,20 @@
 //! Network bytes → Decoder → Frame(OpCode::Text, RSV1=1, FIN=0)
 //! Network bytes → Decoder → Frame(OpCode::Continuation, RSV1=0, FIN=0)
 //! Network bytes → Decoder → Frame(OpCode::Continuation, RSV1=0, FIN=1)
+//!        ↓
+//! WebSocket layer assembles fragments and decompresses complete message
 //! ```
 //!
-//! The decoder simply returns individual frames. Fragment assembly happens at the
-//! [`ReadHalf`](crate::native::split::ReadHalf) layer, and decompression happens at the
-//! [`WebSocket`](crate::WebSocket) layer.
+//! The [`Decoder`] simply returns individual frames. Fragment assembly happens at the
+//! [`WebSocket`] layer, and compression/decompression is handled by [`Streaming`]
+//! (for streaming compression) or [`WebSocket`] (for message-level compression).
+//!
+//! [`Frame`]: crate::Frame
+//! [`OpCode`]: crate::OpCode
+//! [`WebSocket`]: crate::WebSocket
+//! [`Streaming`]: crate::streaming::Streaming
+//! [`ReadHalf`]: crate::ReadHalf
+//! [`WriteHalf`]: crate::WriteHalf
 
 use bytes::{Buf, BytesMut};
 use tokio_util::codec;

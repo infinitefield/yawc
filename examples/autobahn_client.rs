@@ -70,8 +70,7 @@ fn get_options_for_case_id(case_id: &str) -> Options {
                 return base_options.with_client_max_window_bits(15);
             } else if case_id.starts_with("13.5.") {
                 return base_options
-                    // .server_no_context_takeover()
-                    // .client_no_context_takeover()
+                    .client_no_context_takeover()
                     .with_client_max_window_bits(9);
             } else if case_id.starts_with("13.6.") {
                 return base_options

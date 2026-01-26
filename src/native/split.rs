@@ -130,13 +130,10 @@
 //! Prefer `futures::StreamExt::split()` unless you have specific low-level requirements.
 
 use std::{
-    collections::VecDeque,
     future::poll_fn,
     task::{ready, Context, Poll},
-    time::{Duration, Instant},
 };
 
-use bytes::Bytes;
 use futures::SinkExt;
 
 use crate::{
@@ -144,16 +141,6 @@ use crate::{
     frame::{Frame, OpCode},
     Result, WebSocketError,
 };
-
-use super::Negotiation;
-
-struct Fragmentation {
-    started: Instant,
-    opcode: OpCode,
-    is_compressed: bool,
-    bytes_read: usize,
-    parts: VecDeque<Bytes>,
-}
 
 // ================ ReadHalf ====================
 
@@ -202,130 +189,17 @@ struct Fragmentation {
 /// }
 /// ```
 pub struct ReadHalf {
+    /// This flag is true when the first message is NOT FIN and RSV1 is set.
+    pub(super) compressed_stream: bool,
     /// Indicates if the connection has been closed.
     pub(super) is_closed: bool,
-    /// Fragment accumulation state
-    fragment: Option<Fragmentation>,
-    /// Maximum read buffer size for fragmented messages
-    max_read_buffer: usize,
-    /// Optional timeout for fragment assembly
-    fragment_timeout: Option<Duration>,
 }
 
 impl ReadHalf {
-    pub(super) fn new(opts: &Negotiation) -> Self {
+    pub(super) fn new() -> Self {
         Self {
+            compressed_stream: false,
             is_closed: false,
-            fragment: None,
-            max_read_buffer: opts.max_read_buffer,
-            fragment_timeout: opts.fragment_timeout,
-        }
-    }
-
-    /// Processes an incoming WebSocket frame, handling message fragmentation and decompression if required.
-    ///
-    /// This function manages both data frames (text and binary) and control frames (ping, pong, and close).
-    /// For fragmented messages, it accumulates the fragments until the message is complete, handling
-    /// decompression if needed. If an uncompressed frame is received but compression is required, an error
-    /// is returned.
-    ///
-    /// This function also removes the mask from every message to avoid forwarding in case the user is echoing the frame.
-    ///
-    /// - For `OpCode::Text` and `OpCode::Binary` frames:
-    ///     - If the frame is final (`fin` flag set), it processes the frame as a complete message.
-    ///     - If the frame is part of a fragmented message (`fin` flag not set), it starts accumulating
-    ///       fragments or returns an error if a previous incomplete fragment exists.
-    /// - For `OpCode::Continuation` frames:
-    ///     - Continues accumulating data for the ongoing fragmented message.
-    ///     - If the frame is final, the accumulated fragments are processed and assembled into a complete message.
-    /// - For control frames:
-    ///     - `Ping`, `Pong`, and `Close` frames are processed as-is if they are not fragmented.
-    ///     - Control frames are returned to the user for optional custom handling.
-    ///
-    /// # Parameters
-    /// - `frame`: The incoming frame to be processed.
-    ///
-    /// # Returns
-    /// - `Ok(Some(Frame))` if the frame is ready for further processing.
-    /// - `Ok(None)` if the frame is part of a fragmented message and not yet complete.
-    /// - `Err(WebSocketError)` if an error occurs, such as invalid fragment or unsupported compression.
-    fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        use bytes::BufMut;
-
-        // Remove mask immediately
-        frame.mask = None;
-
-        // Handle fragmentation and assembly
-        match frame.opcode {
-            OpCode::Text | OpCode::Binary => {
-                // Check for invalid fragmentation state
-                if self.fragment.is_some() {
-                    return Err(WebSocketError::InvalidFragment);
-                }
-
-                // Handle fragmented messages
-                if !frame.fin {
-                    self.fragment = Some(Fragmentation {
-                        started: Instant::now(),
-                        opcode: frame.opcode,
-                        is_compressed: frame.is_compressed,
-                        bytes_read: frame.payload.len(),
-                        parts: VecDeque::from([frame.payload]),
-                    });
-                    return Ok(None);
-                }
-
-                // Non-fragmented message - return as-is
-                Ok(Some(frame))
-            }
-            OpCode::Continuation => {
-                let mut fragment = self
-                    .fragment
-                    .take()
-                    .ok_or(WebSocketError::InvalidFragment)?;
-
-                fragment.bytes_read += frame.payload.len();
-
-                // Check buffer size
-                if fragment.bytes_read >= self.max_read_buffer {
-                    return Err(WebSocketError::FrameTooLarge);
-                }
-
-                fragment.parts.push_back(frame.payload);
-
-                if frame.fin {
-                    // Assemble complete message
-                    frame.opcode = fragment.opcode;
-                    frame.is_compressed = fragment.is_compressed;
-                    frame.payload = fragment
-                        .parts
-                        .into_iter()
-                        .fold(
-                            bytes::BytesMut::with_capacity(fragment.bytes_read),
-                            |mut acc, b| {
-                                acc.put(b);
-                                acc
-                            },
-                        )
-                        .freeze();
-
-                    // Return assembled frame as-is (decompression and validation happen in WebSocket layer)
-                    Ok(Some(frame))
-                } else if self
-                    .fragment_timeout
-                    .is_some_and(|timeout| fragment.started.elapsed() > timeout)
-                {
-                    Err(WebSocketError::FragmentTimeout)
-                } else {
-                    self.fragment = Some(fragment);
-                    Ok(None)
-                }
-            }
-            OpCode::Close => {
-                self.is_closed = true;
-                Ok(Some(frame))
-            }
-            _ => Ok(Some(frame)),
         }
     }
 
@@ -367,29 +241,59 @@ impl ReadHalf {
     {
         use futures::StreamExt;
 
-        while !self.is_closed {
-            let frame = ready!(stream.poll_next_unpin(cx));
-            let res = match frame {
-                Some(res) => res,
-                None => {
-                    self.is_closed = true;
-                    break;
-                }
-            };
-
-            match res {
-                Ok(frame) => match self.on_frame(frame) {
-                    Ok(Some(frame)) => {
-                        return Poll::Ready(Ok(frame));
-                    }
-                    Err(err) => return Poll::Ready(Err(err)),
-                    Ok(None) => {}
-                },
-                Err(err) => return Poll::Ready(Err(err)),
-            }
+        if self.is_closed {
+            return Poll::Ready(Err(WebSocketError::ConnectionClosed));
         }
 
-        Poll::Ready(Err(WebSocketError::ConnectionClosed))
+        let frame = ready!(stream.poll_next_unpin(cx));
+        let res = match frame {
+            Some(res) => res,
+            None => {
+                self.is_closed = true;
+                return Poll::Ready(Err(WebSocketError::ConnectionClosed));
+            }
+        };
+
+        match res {
+            Ok(mut frame) => {
+                #[cfg(test)]
+                println!(
+                    "<<Incoming<< OpCode={:?} Fin={} Payload={}",
+                    frame.opcode,
+                    frame.fin,
+                    frame.payload.len()
+                );
+
+                // Remove mask immediately
+                frame.mask = None;
+
+                // Mark connection as closed if we receive a close frame
+                if frame.opcode == OpCode::Close {
+                    // don't do `self.is_closed = frame.opcode == OpCode::Close`
+                    self.is_closed = true;
+                }
+
+                // the frame is considered compressed if it is compressed (of course)
+                // OR it's not a control frame and it's within a compressed frame.
+                frame.is_compressed =
+                    frame.is_compressed || (!frame.opcode.is_control() && self.compressed_stream);
+
+                // If the ocde is Text or Binary, and it is the first of a compressed sequence of fragmented frames
+                if (frame.opcode == OpCode::Text || frame.opcode == OpCode::Binary)
+                    && !frame.is_fin()
+                    && frame.is_compressed
+                {
+                    self.compressed_stream = true;
+                }
+                // If the continuation frame is the last.
+                if (frame.opcode == OpCode::Continuation) && frame.is_fin() {
+                    self.compressed_stream = false;
+                }
+
+                Poll::Ready(Ok(frame))
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
     }
 
     /// Convenience method to read the next frame from the stream.
@@ -424,49 +328,12 @@ impl ReadHalf {
 
 /// Write half of the WebSocket connection.
 ///
-/// [`WriteHalf`] manages sending WebSocket frames and closing the connection gracefully.
-/// It handles:
-///
-/// - Compression of outgoing frames when enabled
-/// - Masking of frames when acting as a client
-/// - Protocol-compliant connection closure
-/// - Frame buffering and flushing
-///
-/// # Warning
-///
-/// In most cases, you should **not** use [`WriteHalf`] directly. Instead, use
-/// [`futures::StreamExt::split`](https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.split)
-/// on the [`WebSocket`](super::WebSocket) to obtain stream halves that maintain all WebSocket protocol handling.
-/// Direct use of [`WriteHalf`] bypasses important protocol management like automatic control frame handling.
-///
-/// # Connection Closure
-/// When closing the connection, [`WriteHalf`] follows the WebSocket protocol by:
-///
-/// 1. Sending a [`OpCode::Close`] frame to the peer
-/// 2. Flushing any pending frames
-/// 3. Closing the underlying network stream
-///
-/// This ensures a clean shutdown where all data is delivered before disconnection.
-///
-/// # Example
-/// ```no_run
-/// use tokio::net::TcpStream;
-/// use yawc::{WebSocket, frame::OpCode, Options, Result};
-/// use futures::StreamExt;
-/// use tokio_rustls::TlsConnector;
-///
-/// #[tokio::main]
-/// async fn main() -> Result<()> {
-///     // Connect WebSocket
-///     let ws = WebSocket::connect("wss://example.com/ws".parse()?).await?;
-///
-///     // Split into read/write halves
-///     let (stream, read_half, write_half) = unsafe { ws.split_stream() };
-///     // do something ...
-///     Ok(())
-/// }
-/// ```
+/// Keeps track of the sender's state.
 pub struct WriteHalf {
+    // Whether the user is streaming frames or not.
+    //
+    // This is used to prevent the RSV1 bit to be set on Continuation frames.
+    pub(super) streaming: bool,
     close_state: Option<CloseState>,
 }
 
@@ -490,8 +357,11 @@ enum CloseState {
 }
 
 impl WriteHalf {
-    pub(super) fn new(_opts: &Negotiation) -> Self {
-        Self { close_state: None }
+    pub(super) fn new() -> Self {
+        Self {
+            streaming: false,
+            close_state: None,
+        }
     }
 
     /// Polls the readiness of the `WriteHalf` to send a new frame.
@@ -514,6 +384,7 @@ impl WriteHalf {
             return Poll::Ready(Err(WebSocketError::ConnectionClosed));
         }
 
+        // ready if the underlying is
         stream.poll_ready_unpin(cx)
     }
 
@@ -549,7 +420,27 @@ impl WriteHalf {
             self.close_state = Some(CloseState::Flushing);
         }
 
-        stream.start_send_unpin(frame)
+        // We are streaming if the frame is not control
+        // and the FIN flag is not set.
+        //
+        // If the FIN flag was set on a Continuation frame, then streaming has finished
+        if !frame.opcode.is_control() {
+            self.streaming = !frame.is_fin();
+        }
+
+        #[cfg(test)]
+        println!(
+            ">>Outgoing>> OpCode={:?} Fin={} Payload={}",
+            frame.opcode,
+            frame.fin,
+            frame.payload.len()
+        );
+
+        // Send directly to the underlying stream (fragmentation happens in WebSocket layer now)
+        use futures::SinkExt;
+        stream.start_send_unpin(frame)?;
+
+        Ok(())
     }
 
     /// Polls to flush all pending frames in the `WriteHalf`.
@@ -567,6 +458,8 @@ impl WriteHalf {
     where
         S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
     {
+        // Just flush the underlying stream (no queue to drain anymore)
+        use futures::SinkExt;
         stream.poll_flush_unpin(cx)
     }
 

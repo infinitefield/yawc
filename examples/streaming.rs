@@ -13,10 +13,10 @@
 //! prefer the high-level `futures::StreamExt::split()` which handles protocol details
 //! automatically.
 
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
 use std::fs::File;
 use std::io::Write;
-use yawc::{Frame, OpCode, WebSocket};
+use yawc::{Frame, OpCode, Options, WebSocket};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,34 +29,33 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Connect to server
-    let ws = WebSocket::connect("ws://localhost:9004".parse()?).await?;
+    let ws = WebSocket::connect("ws://localhost:9004".parse()?)
+        .with_options(Options::default().with_high_compression())
+        .await?;
+    let mut stream = ws.into_streaming();
 
     log::info!("Connected to streaming server");
-
-    // SAFETY: We're taking ownership of the stream and will handle all protocol details manually
-    let (mut stream, mut read_half, mut write_half) = unsafe { ws.split_stream() };
 
     // Open file for writing
     let mut file = File::create("received_stream.txt")?;
     log::info!("Created output file: received_stream.txt");
 
     let mut total_bytes = 0;
-    let fragment_count = 0;
+    let mut fragment_count = 0;
 
     log::info!("Waiting for fragmented message...");
 
     // Process fragments as they arrive
     loop {
         // Use the convenience method instead of manual polling
-        let frame = match read_half.next_frame(&mut stream).await {
-            Ok(frame) => frame,
-            Err(err) => {
-                log::error!("Error reading frame: {}", err);
-                break;
-            }
+        let frame = match stream.next().await {
+            Some(frame) => frame,
+            None => break,
         };
 
         let (opcode, is_fin, payload) = frame.into_parts();
+
+        fragment_count += 1;
 
         match opcode {
             OpCode::Text | OpCode::Binary => {
@@ -93,19 +92,7 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
             }
-            OpCode::Close => {
-                log::info!("Connection closed by server");
-                break;
-            }
-            OpCode::Ping => {
-                // Manually handle ping by sending pong
-                write_half
-                    .send_frame(&mut stream, Frame::pong(payload))
-                    .await?;
-            }
-            OpCode::Pong => {
-                // Ignore pong frames
-            }
+            _ => {}
         }
     }
 
@@ -115,14 +102,6 @@ async fn main() -> anyhow::Result<()> {
         fragment_count,
         total_bytes
     );
-
-    // Send close frame
-    write_half
-        .send_frame(
-            &mut stream,
-            Frame::close(yawc::close::CloseCode::Normal, b"Done"),
-        )
-        .await?;
 
     server_handle.abort();
 
@@ -141,7 +120,8 @@ async fn run_server() -> yawc::Result<()> {
     use tokio::net::TcpListener;
 
     async fn handle_client(fut: yawc::UpgradeFut) -> yawc::Result<()> {
-        let mut ws = fut.await?;
+        let ws = fut.await?;
+        let mut stream = ws.into_streaming();
 
         log::info!("[Server] Ssending fragmented message");
 
@@ -171,7 +151,7 @@ async fn run_server() -> yawc::Result<()> {
                 Frame::continuation(chunk).with_fin(false)
             };
 
-            ws.send(frame).await?;
+            stream.send(frame).await?;
 
             // Simulate network delay
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -186,7 +166,8 @@ async fn run_server() -> yawc::Result<()> {
     }
 
     async fn server_upgrade(mut req: Request<Incoming>) -> yawc::Result<Response<Empty<Bytes>>> {
-        let (response, fut) = WebSocket::upgrade(&mut req)?;
+        let (response, fut) =
+            WebSocket::upgrade_with_options(&mut req, Options::default().with_high_compression())?;
 
         tokio::task::spawn(async move {
             if let Err(e) = handle_client(fut).await {

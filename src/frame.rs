@@ -403,6 +403,49 @@ impl Frame {
         }
     }
 
+    pub(crate) fn into_fragments(self, partition: usize) -> impl Iterator<Item = Frame> {
+        struct Split {
+            index: usize,
+            max_size: usize,
+            frame: Option<Frame>,
+        }
+
+        impl Iterator for Split {
+            type Item = Frame;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let mut frame = self.frame.take()?;
+                if frame.payload.len() <= self.max_size {
+                    if self.index != 0 {
+                        // prepare the last frame
+                        frame.set_fin(true);
+                        frame.opcode = OpCode::Continuation;
+                    }
+                    // just return the remaining frame
+                    Some(frame)
+                } else {
+                    let is_first = self.index == 0;
+                    self.index += 1;
+                    let chunk = frame.payload.split_to(self.max_size);
+                    let opcode = if is_first {
+                        frame.opcode
+                    } else {
+                        OpCode::Continuation
+                    };
+                    let mask = frame.mask;
+                    self.frame = Some(frame);
+                    Some(Frame::new(false, opcode, mask, chunk))
+                }
+            }
+        }
+
+        Split {
+            index: 0,
+            max_size: partition,
+            frame: Some(self),
+        }
+    }
+
     /// Creates a close frame with a raw payload (for internal use).
     pub(crate) fn close_raw<T: Into<Bytes>>(payload: T) -> Self {
         Self {
@@ -439,24 +482,6 @@ impl Frame {
             mask,
             payload: payload.into(),
             is_compressed: false,
-        }
-    }
-
-    /// Creates a new frame with compression enabled (internal use).
-    ///
-    /// Similar to `new`, but sets the compression flag to indicate the payload
-    /// has been compressed using the permessage-deflate extension.
-    ///
-    /// # Parameters
-    /// - `fin`: Indicates if this frame is the final fragment in a message.
-    /// - `opcode`: The operation code of the frame, defining its type.
-    /// - `mask`: Optional 4-byte masking key for client-to-server frames.
-    /// - `payload`: The compressed frame payload data.
-    pub(crate) fn into_compressed(self, payload: impl Into<Bytes>) -> Self {
-        Self {
-            payload: payload.into(),
-            is_compressed: true,
-            ..self
         }
     }
 

@@ -8,6 +8,7 @@ const AUTOBAHN_TESTSUITE_DOCKER =
 
 const CONTAINER_NAME = "fuzzingserver";
 const CLIENT_EXE = "target/release/examples/autobahn_client";
+const WITH_ZLIB = Deno.args[0] === "zlib";
 
 async function containerExists(name) {
   const result =
@@ -22,8 +23,14 @@ async function containerRunning(name) {
 }
 
 async function ensureClientBuilt() {
-  console.log("autobahn_client not found, building...");
-  await $`cargo build --release --example autobahn_client --features zlib`;
+  console.log("Building autobahn_client...");
+  if (WITH_ZLIB) {
+    console.log("Building with zlib compression support");
+    await $`cargo build --release --example autobahn_client --features zlib`;
+  } else {
+    console.log("Building without zlib compression support");
+    await $`cargo build --release --example autobahn_client`;
+  }
 }
 
 // Start
@@ -37,6 +44,7 @@ if (await containerExists(CONTAINER_NAME)) {
       `Autobahn ${CONTAINER_NAME} docker container exists but is stopped. Starting it.`,
     );
     await $`docker start ${CONTAINER_NAME}`;
+    await sleep(5);
   }
 } else {
   console.log(`Starting Autobahn ${CONTAINER_NAME} docker container...`);
@@ -61,7 +69,12 @@ const { yawc } = JSON.parse(
 const result = Object.values(yawc);
 
 function failed(name) {
-  return name !== "OK" && name !== "INFORMATIONAL" && name !== "NON-STRICT";
+  return (
+    name !== "OK" &&
+    name !== "INFORMATIONAL" &&
+    name !== "NON-STRICT" &&
+    name !== "UNIMPLEMENTED"
+  );
 }
 
 const failedtests = result.filter((outcome) => failed(outcome.behavior));

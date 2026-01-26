@@ -36,11 +36,11 @@ jobs:
           wasm-pack test --node --lib
       - name: Check formatting
         run: cargo fmt -- --check --verbose
-      - name: Autobahn|Testsuite client
+      - name: Autobahn|Testsuite client (with zlib)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          deno run -A --unstable autobahn/client-test.js
-      - name: Autobahn|Testsuite server
+          deno run -A --unstable autobahn/client-test.js zlib
+      - name: Autobahn|Testsuite server (with zlib)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          deno run -A --unstable autobahn/server-test.js
+          deno run -A --unstable autobahn/server-test.js zlib

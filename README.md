@@ -1,26 +1,56 @@
 # yawc
 
-Yet another websocket crate. But a fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
+Fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
+
+yawc is the **only Rust WebSocket library** that provides both high-level automatic APIs and low-level streaming control with full compression support, making it suitable for everything from simple chat applications to high-performance data streaming systems.
 
 [![Crates.io](https://img.shields.io/crates/v/yawc.svg)](https://crates.io/crates/yawc)
 [![Documentation](https://docs.rs/yawc/badge.svg)](https://docs.rs/yawc)
 [![License](https://img.shields.io/badge/license-AGPL%20v3.0-blue.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 
+## Why yawc?
+
+yawc stands apart as the **most flexible and feature-complete WebSocket library** in the Rust ecosystem:
+
+### Unique Features
+
+**Production-grade performance**
+
+- Zero-copy frame processing where possible
+- SIMD-optimized masking operations
+- Compact memory layout (16-byte frame state vs 24+ bytes in other libraries)
+- Powers 24/7 high-frequency trading systems
+
+**Only library with streaming compression support**
+
+- Compress data incrementally without buffering entire messages in memory
+- Partial flush support for real-time compression
+- Memory-efficient handling of multi-GB payloads
+
+**Dual-level API design**
+
+- **High-level [`WebSocket`]**: Automatic fragment assembly, compression, UTF-8 validation
+- **Low-level [`Streaming`]**: Manual fragment control, streaming compression, direct frame access
+- Seamlessly convert between both as needed: `ws.into_streaming()`
+
 ## Features
 
 - **Full RFC 6455 Compliance**: Complete implementation of the WebSocket protocol
 - **Secure by Default**: Built-in TLS support with `rustls`
-- **Advanced Compression**: Support for permessage-deflate (RFC 7692)
+- **Advanced Compression**: Support for permessage-deflate (RFC 7692) with streaming compression and context takeover control
 - **Zero-Copy Design**: Efficient frame processing with minimal allocations
-- **Automatic Frame Management**: Handles control frames and fragmentation
+- **Streaming API**: Low-level API for manual fragment control, memory-efficient processing of large messages, and fine-grained compression control
+- **Automatic Frame Management**: Handles control frames and fragmentation automatically, or use `Streaming` for manual control
+- **Flow Control**: Configurable backpressure boundaries and automatic fragmentation for large messages
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
 - **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications (both text and binary modes supported)
 
 ## About compression
 
-yawc supports websocket compression through the [Options](https://docs.rs/yawc/latest/yawc/struct.Options.html) struct.
-You can use `Options.with_compression_level(CompressLevel::fast())` in order to configure compression.
+yawc supports WebSocket compression through the [Options](https://docs.rs/yawc/latest/yawc/struct.Options.html) struct with the permessage-deflate extension (RFC 7692).
+
+### Basic Compression
 
 ```rust
 let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwrap())
@@ -28,8 +58,23 @@ let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwr
     .await;
 ```
 
-The `zlib` feature is NOT mandatory to enable compression. `zlib` is configured as a feature for the [window](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) parameters.
-By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend. An implementation of miniz using Rust.
+### Advanced Compression Features
+
+- **Streaming compression**: Compress large messages incrementally without buffering (available via `Streaming` API)
+- **Context takeover control**: Reset compression state between messages for consistent memory usage
+- **Configurable compression levels**: Balance between compression ratio and CPU usage
+- **Window size control**: Fine-tune memory vs compression tradeoff (requires `zlib` feature)
+
+```rust
+// Example: Memory-optimized compression for long-lived connections
+let options = Options::default()
+    .with_compression_level(CompressionLevel::fast())
+    .server_no_context_takeover()  // Reset context after each message
+    .client_no_context_takeover(); // Prevent client-side memory growth
+```
+
+The `zlib` feature is NOT mandatory to enable compression. `zlib` is only required for the [window bits](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) configuration parameters.
+By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide backend - a pure Rust implementation of deflate.
 
 ## Upgrading or Migrating?
 
@@ -213,6 +258,48 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 
 ## Advanced Features
 
+### Streaming API
+
+For advanced use cases requiring manual control over frame fragmentation, yawc provides a low-level `Streaming` API:
+
+```rust
+use yawc::{WebSocket, Frame, OpCode};
+use futures::{SinkExt, StreamExt};
+
+// Convert WebSocket to Streaming for manual fragment control
+let ws = WebSocket::connect("wss://example.com".parse()?).await?;
+let mut streaming = ws.into_streaming();
+
+// Send a large message as multiple fragments manually
+streaming.send(Frame::text("First part").with_fin(false)).await?;
+streaming.send(Frame::continuation(" second part").with_fin(false)).await?;
+streaming.send(Frame::continuation(" final part")).await?;
+
+// Receive frames without automatic reassembly
+while let Some(frame) = streaming.next().await {
+    match frame.opcode() {
+        OpCode::Text => println!("Text fragment: FIN={}", frame.is_fin()),
+        OpCode::Continuation => println!("Continuation: FIN={}", frame.is_fin()),
+        _ => {}
+    }
+}
+```
+
+**When to use `Streaming`:**
+
+- Streaming large files directly from/to disk without buffering in memory
+- Implementing custom fragmentation strategies for specific protocols
+- Processing data incrementally as fragments arrive for real-time applications
+- Fine-grained control over compression boundaries and frame timing
+
+**Key differences from `WebSocket`:**
+
+- No automatic fragment reassembly - you receive individual frames
+- No automatic fragmentation - you control when messages are split
+- Supports streaming compression with partial flushes
+- Lower memory usage for large messages
+- More control, but requires understanding of WebSocket fragmentation protocol
+
 ### Compression Control
 
 Fine-tune compression settings for optimal performance:
@@ -224,11 +311,61 @@ let ws = WebSocket::connect("wss://example.com".parse()?)
     .with_options(
         Options::default()
             .with_compression_level(CompressionLevel::default())
-            .server_no_context_takeover()  // Optimize memory usage
+            .server_no_context_takeover()  // Reset compression context after each message
+            .client_no_context_takeover()  // Optimize memory for client side
             .with_client_max_window_bits(11)  // Control compression window (requires zlib feature)
     )
     .await?;
 ```
+
+**Context Takeover Options:**
+
+The `no_context_takeover` options control how compression state is managed between messages:
+
+- **With context takeover (default)**: The compression dictionary is maintained across messages, providing better compression ratios for similar data but using more memory over time.
+
+- **Without context takeover**: The compression dictionary is reset after each message, trading compression efficiency for consistent memory usage. Ideal for:
+  - Long-lived connections where memory growth is a concern
+  - Memory-constrained environments (mobile devices, embedded systems)
+  - Applications with diverse message content where dictionary reuse provides little benefit
+
+```rust
+// Example: Memory-optimized compression for long-lived connections
+let options = Options::default()
+    .with_compression_level(CompressionLevel::fast())
+    .server_no_context_takeover()
+    .client_no_context_takeover();
+```
+
+### Automatic Fragmentation and Flow Control
+
+Configure automatic fragmentation and backpressure for large messages:
+
+```rust
+use yawc::{WebSocket, Options};
+use std::time::Duration;
+
+let ws = WebSocket::connect("wss://example.com".parse()?)
+    .with_options(
+        Options::default()
+            .with_max_fragment_size(64 * 1024)  // Auto-fragment messages > 64 KiB
+            .with_backpressure_boundary(128 * 1024)  // Apply backpressure at 128 KiB
+            .with_fragment_timeout(Duration::from_secs(30))  // Timeout incomplete fragments
+    )
+    .await?;
+```
+
+**Fragmentation options:**
+
+- `with_max_fragment_size()`: Automatically split large outgoing messages into fragments
+- `with_fragment_timeout()`: Protect against incomplete fragmented messages that never complete
+- `with_backpressure_boundary()`: Control memory usage by applying backpressure when write buffer grows
+
+These options are particularly useful for:
+
+- Handling large file uploads/downloads
+- Streaming real-time data with bounded memory
+- Preventing memory exhaustion from slow consumers
 
 ### Split Streams
 
