@@ -5,6 +5,196 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Streaming API
+
+- **New `Streaming` type**: Low-level WebSocket API with manual fragment control
+  - Provides direct access to WebSocket frames without automatic reassembly
+  - Enables memory-efficient streaming of large messages
+  - Supports streaming compression with partial flushes
+  - Convert from `WebSocket` using `.into_streaming()`
+  - See documentation for `Streaming` type for usage examples
+
+#### Compression Enhancements
+
+- **Streaming compression support**: Compress data incrementally without buffering entire messages
+  - New `compress_streaming()` method on `Compressor` for partial flushes
+  - Enables real-time compression of large payloads
+  - Reduces memory usage for large messages
+
+- **No-context-takeover support for streaming**: Reset compression context after each message in streaming mode
+  - Ensures consistent memory usage across long-lived connections
+  - Available for both `Compressor` and `Decompressor`
+
+#### Configuration Options
+
+- **`with_max_fragment_size(size)`**: Configure automatic fragmentation of outgoing messages
+  - Messages exceeding this size are automatically split into fragments
+  - Useful for controlling memory usage and latency
+
+- **`with_backpressure_boundary(size)`**: Set backpressure boundary for write buffer
+  - Prevents unbounded memory growth when sending large amounts of data
+  - Enables flow control for high-throughput applications
+
+- **Fragment timeout configuration**: Control timeout for incomplete fragmented message assembly
+  - Protects against partial messages that never complete
+  - Configurable via `with_fragment_timeout(duration)`
+
+### Changed
+
+- **Improved compression handling**: Compression now only applies to complete messages (FIN frames)
+  - Fragmented messages handle compression at the message level, not per-fragment
+  - More efficient and RFC-compliant behavior
+
+- **WriteHalf simplification**: Removed role handling and compression from WriteHalf
+  - Compression is now handled at the WebSocket layer
+  - Cleaner separation of concerns
+
+### Fixed
+
+- **Compression context management**: Fixed issues with compression state across multiple messages
+- **Autobahn test coverage**: Expanded test cases for better protocol compliance verification
+
+## [0.3.1]
+
+### Changed
+
+- **Simplified WriteHalf**: Removed role parameter from WriteHalf implementation
+- **Compression handling moved to WebSocket layer**: Compression now only applies to FIN text/binary frames
+  - Fragment-level compression is managed at the message level
+  - More efficient and correct implementation
+
+### Fixed
+
+- **Compression state management**: Fixed compression context handling for complete messages
+
+### Documentation
+
+- Updated upgrade guide with compression best practices
+- Enhanced README with clearer compression examples
+
+## [0.3.0]
+
+### Added
+
+#### Generic Stream Support
+
+- **Generic `AsyncRead + AsyncWrite` support**: WebSocket now accepts any stream implementing tokio's async traits
+  - Enables integration with other runtimes via adapters
+  - Better flexibility for custom transport layers
+  - Examples: `client_smol.rs`, `echo_server_smol.rs`
+
+#### New Examples
+
+- `examples/client_smol.rs`: Using yawc with the smol runtime
+- `examples/echo_server_smol.rs`: Echo server with smol runtime
+- `examples/streaming.rs`: Streaming large payloads efficiently
+- `examples/auth_client.rs`: Authentication flow with custom headers
+
+#### Configuration & Features
+
+- **Fragment timeout support**: Configurable timeout for incomplete fragmented messages
+  - New error: `WebSocketError::FragmentTimeout`
+  - Configure via `Options::with_fragment_timeout()`
+
+- **TCP_NODELAY support**: Disable Nagle's algorithm for lower latency
+  - Configure via `Options::with_no_delay()`
+  - Improves latency for small, frequent messages
+
+- **Custom DNS resolution**: Support for custom DNS resolvers and TCP address override
+  - Useful for testing and custom networking scenarios
+  - See `examples/custom_dns.rs`
+
+#### Compression Improvements
+
+- **Improved compression context handling**: Better management of deflate compression contexts
+  - Fixed edge cases in compression negotiation
+  - Better handling of window bits with and without values
+  - Improved zlib support with `zlib` feature flag
+
+- **Compression test suite**: Extensive tests for compression edge cases
+  - Tests for context takeover behavior
+  - Fragmented compression tests
+  - Stress tests with various data patterns
+
+### Changed
+
+#### Architecture Improvements
+
+- **Fragment handling moved from ReadHalf to WebSocket**: More intuitive and RFC-compliant
+  - Transparent fragmentation at the WebSocket level
+  - Better separation of concerns
+  - Improved testability
+
+- **Simplified codec layer**: More efficient frame encoding/decoding
+  - Proper role-based masking enforcement
+  - Better buffer management
+  - Reduced allocations
+
+- **WebSocket layering improvements**: Cleaner separation between layers
+  - Codec → ReadHalf → WebSocket hierarchy
+  - Each layer has well-defined responsibilities
+  - Better documentation of data flow
+
+#### Code Quality
+
+- **Removed FrameView dependency**: Unified on `Frame` type
+  - Simpler API surface
+  - Better performance
+  - Less confusion about frame ownership
+
+- **Buffer optimizations**: Reduced buffer allocations and copies
+  - Payload stored as `Bytes` instead of `BytesMut`
+  - Better use of zero-copy operations
+  - Improved memory efficiency
+
+#### WASM Improvements
+
+- **Binary mode support for WASM**: Full support for binary WebSocket messages in WebAssembly
+  - Previously only text mode was supported
+  - Feature parity with native targets
+
+### Breaking Changes
+
+- **Reqwest updated to 0.13**: If using the `reqwest` feature, update your dependency
+- **Removed `json` feature flag**: Add `serde_json` directly to dependencies if needed
+
+### Fixed
+
+- **Close frame handling**: Better validation and propagation of close frames
+  - Distinguish between empty and malformed close reasons
+  - Proper error propagation in `poll_next_frame`
+  - Close frames are now exposed to users for custom handling
+
+- **Compression bugs**: Fixed several issues with permessage-deflate
+  - Fixed deflate stream suffix handling
+  - Improved sync flush behavior
+  - Better context takeover management
+
+- **Windows compatibility**: Various fixes for Windows platform support
+- **WASM test compatibility**: Tests properly skip on WASM targets
+- **Masking bugs**: Fixed role-based frame masking for client/server
+
+### Development
+
+- **Improved Autobahn testing**: Better test scripts and coverage
+  - More comprehensive fuzzing
+  - Improved test reporting
+  - Environment configuration support
+
+- **Better benchmarking infrastructure**: Enhanced performance testing
+  - See `benches/` directory for comparative benchmarks
+
+### Documentation
+
+- Enhanced inline documentation throughout the codebase
+- Better examples covering common use cases
+- Improved architecture documentation in README
+- Migration guides updated
+
 ## [0.2.0]
 
 ### Breaking Changes
