@@ -120,7 +120,7 @@ async fn get_case_count() -> Result<u32> {
         let mut ws = match connect("getCaseCount", None).await {
             Ok(ok) => ok,
             Err(_) => {
-                if started_at.elapsed() > Duration::from_secs(60) {
+                if started_at.elapsed() > Duration::from_secs(300) {
                     panic!("unable to connect")
                 }
                 // ...

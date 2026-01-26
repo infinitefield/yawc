@@ -452,7 +452,6 @@ impl FragmentLayer {
     ///
     /// Panics if the user tries to manually fragment while auto-fragmentation is enabled.
     fn fragment_outgoing(&mut self, frame: Frame) {
-        println!("{:?} - {}", frame.opcode, frame.is_fin());
         // Check for invalid manual fragmentation with auto-fragmentation enabled
         if !frame.is_fin() && self.fragment_size.is_some() {
             panic!(
@@ -486,6 +485,7 @@ impl FragmentLayer {
     fn assemble_incoming(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
         use bytes::BufMut;
 
+        #[cfg(test)]
         println!(
             "<<Fragmentation<< OpCode={:?} fin={} len={}",
             frame.opcode(),
