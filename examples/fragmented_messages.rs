@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         .with_options(
             Options::default()
                 .with_high_compression()
-                .with_max_payload_write_size(1024),
+                .with_max_fragment_size(1024),
         )
         .await?;
 

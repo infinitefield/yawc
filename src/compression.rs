@@ -352,7 +352,8 @@ impl Deflate {
         let before_out = compressor.total_out();
         let before_in = compressor.total_in();
 
-        let status = compressor.compress(input, dst, flate2::FlushCompress::None);
+        // partially flush the buffer
+        let status = compressor.compress(input, dst, flate2::FlushCompress::Partial);
 
         let written = (compressor.total_out() - before_out) as usize;
         let consumed = (compressor.total_in() - before_in) as usize;
@@ -537,7 +538,7 @@ impl Decompressor {
     /// * `Ok(None)` - More input needed to complete decompression
     /// * `Err(io::Error)` - Decompression failed due to invalid/corrupt data
     ///
-    pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<Bytes>> {
+    pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
         match &mut self.decompressor_type {
             DecompressorType::Contextual(decompressor) => {
                 decompressor.decompress(input, stream_end)
@@ -589,25 +590,21 @@ impl Inflate {
     }
 
     /// Decompresses input data in no-context-takeover mode, resetting the decompression context before each call.
-    fn decompress_no_context(
-        &mut self,
-        input: &[u8],
-        stream_end: bool,
-    ) -> io::Result<Option<Bytes>> {
+    fn decompress_no_context(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
         self.decompress.reset(false); // Reset the context for no-context takeover
         self.decompress(input, stream_end)
     }
 
     /// Decompresses input data while maintaining decompression context across frames.
-    fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Option<Bytes>> {
+    fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
         self.write(input)?;
 
         if stream_end {
             // Add the required 4-byte suffix as per RFC 7692, Section 7.2.2
             self.write(&[0x0, 0x0, 0xff, 0xff])?;
-            self.flush().map(Some)
+            self.flush()
         } else {
-            Ok(None)
+            Ok(self.output.split().freeze())
         }
     }
 
@@ -836,7 +833,7 @@ mod tests {
         let decompressed = inflate
             .decompress(&compressed, true)
             .expect("Decompression failed");
-        assert_eq!(decompressed.as_ref().unwrap(), &data[..]);
+        assert_eq!(decompressed.as_ref(), &data[..]);
     }
 
     #[test]
@@ -851,7 +848,7 @@ mod tests {
         let decompressed = inflate
             .decompress_no_context(&compressed, true)
             .expect("Decompression failed");
-        assert_eq!(decompressed.as_ref().unwrap(), &data[..]);
+        assert_eq!(decompressed.as_ref(), &data[..]);
     }
 
     #[test]
@@ -872,7 +869,7 @@ mod tests {
         let decompressed = decompressor
             .decompress(&compressed, true)
             .expect("Decompression failed");
-        assert_eq!(decompressed.as_ref().unwrap(), &data[..]);
+        assert_eq!(decompressed.as_ref(), &data[..]);
     }
 
     #[test]
@@ -888,28 +885,7 @@ mod tests {
             .decompress(&compressed, true)
             .expect("Decompression failed");
 
-        assert_eq!(&decompressed.unwrap()[..], &large_data[..]);
-    }
-
-    #[test]
-    fn test_partial_input_decompression() {
-        let data = b"test data";
-        let mut compressor = Compressor::new(Compression::default());
-        let compressed = compressor.compress(data, true).expect("Compression failed");
-
-        let mut decompressor = Decompressor::new();
-        let halfway = compressed.len() / 2;
-
-        assert!(decompressor
-            .decompress(&compressed[..halfway], false)
-            .unwrap()
-            .is_none());
-        // Check that decompression returns None meaning more data is needed
-        let remaining_decompressed = decompressor
-            .decompress(&compressed[halfway..], true)
-            .expect("Decompression failed");
-
-        assert_eq!(remaining_decompressed.unwrap(), &data[..]);
+        assert_eq!(&decompressed[..], &large_data[..]);
     }
 
     #[test]
@@ -952,7 +928,7 @@ mod tests {
                 .decompress(&compressed, true)
                 .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
-            let decompressed_data = decompressed.unwrap();
+            let decompressed_data = decompressed;
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
@@ -985,7 +961,7 @@ mod tests {
                 .decompress(&compressed, true)
                 .unwrap_or_else(|_| panic!("No-context decompression failed on message {i}"));
 
-            let decompressed_data = decompressed.unwrap();
+            let decompressed_data = decompressed;
             assert_eq!(
                 std::str::from_utf8(&decompressed_data[..]).unwrap(),
                 csv_like_data,
@@ -1041,7 +1017,7 @@ mod tests {
                 .decompress(&compressed, true)
                 .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
-            let decompressed_data = decompressed.unwrap();
+            let decompressed_data = decompressed;
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
@@ -1074,7 +1050,7 @@ mod tests {
 
         // The decompression result should be Some(BytesMut) for a final frame
         assert_eq!(
-            decompressed.unwrap(),
+            decompressed,
             &data[..],
             "Decompressed data does not match original"
         );
@@ -1104,7 +1080,7 @@ mod tests {
                 .decompress(&compressed, true)
                 .unwrap_or_else(|_| panic!("Raw decompression failed on message {i}"));
 
-            let decompressed_data = decompressed.unwrap();
+            let decompressed_data = decompressed;
             assert_eq!(
                 &decompressed_data[..],
                 csv_like_data.as_bytes(),
@@ -1146,16 +1122,13 @@ mod tests {
             let decompressed = decompressor.decompress(&compressed, true);
 
             match decompressed {
-                Ok(Some(decompressed_data)) => {
+                Ok(decompressed_data) => {
                     assert_eq!(
                         &decompressed_data[..],
                         data_to_send.as_bytes(),
                         "GitHub issue: Decompressed data doesn't match original on message {i}"
                     );
                     println!("GitHub issue message {i}: Successfully processed");
-                }
-                Ok(None) => {
-                    panic!("GitHub issue: Unexpected None result on message {i}");
                 }
                 Err(e) => {
                     println!("GitHub issue: REPRODUCED! Decompression error on message {i}: {e}");
@@ -1211,7 +1184,7 @@ mod tests {
                 })
                 .unwrap_or_else(|_| panic!("Repetitive data: Decompression failed on message {i}"));
 
-            let decompressed_data = decompressed.unwrap();
+            let decompressed_data = decompressed;
             assert_eq!(
                 &decompressed_data[..],
                 repetitive_data.as_bytes(),
@@ -1277,7 +1250,7 @@ mod tests {
                     .unwrap_or_else(|_| panic!("Stress test: Decompression failed on pattern {} message {}",
                                    pattern_idx + 1, msg_idx));
 
-                let decompressed_data = decompressed.unwrap();
+                let decompressed_data = decompressed;
                 assert_eq!(
                     &decompressed_data[..],
                     pattern.as_bytes(),
@@ -1343,15 +1316,16 @@ mod tests {
                 .decompress(compressed_chunk, *is_final)
                 .expect("Fragmented decompression failed");
 
+            decompressed_data.extend_from_slice(&result);
+
             // Only the final frame should return data
             if *is_final {
                 assert!(
-                    result.is_some(),
+                    !result.is_empty(),
                     "Final frame should return decompressed data"
                 );
-                decompressed_data = result.unwrap().to_vec();
             } else {
-                assert!(result.is_none(), "Non-final frame should return None");
+                assert!(!result.is_empty(), "Non-final frame should return None");
             }
         }
 
@@ -1414,9 +1388,7 @@ mod tests {
                         frag_idx + 1
                     ));
 
-                if *is_final {
-                    decompressed_data = result.unwrap().to_vec();
-                }
+                decompressed_data.extend_from_slice(&result);
             }
 
             assert_eq!(

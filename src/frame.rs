@@ -485,24 +485,6 @@ impl Frame {
         }
     }
 
-    /// Creates a new frame with compression enabled (internal use).
-    ///
-    /// Similar to `new`, but sets the compression flag to indicate the payload
-    /// has been compressed using the permessage-deflate extension.
-    ///
-    /// # Parameters
-    /// - `fin`: Indicates if this frame is the final fragment in a message.
-    /// - `opcode`: The operation code of the frame, defining its type.
-    /// - `mask`: Optional 4-byte masking key for client-to-server frames.
-    /// - `payload`: The compressed frame payload data.
-    pub(crate) fn into_compressed(self, payload: impl Into<Bytes>) -> Self {
-        Self {
-            payload: payload.into(),
-            is_compressed: true,
-            ..self
-        }
-    }
-
     /// Returns the frame's opcode.
     ///
     /// # Example

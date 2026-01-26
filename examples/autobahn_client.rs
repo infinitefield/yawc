@@ -1,7 +1,11 @@
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use tokio::time::sleep;
 use yawc::{close::CloseCode, frame::OpCode, Frame, Options, TcpWebSocket, WebSocket};
 
 fn get_port() -> u16 {
@@ -111,10 +115,23 @@ async fn connect(path: &str, case_id: Option<&str>) -> Result<TcpWebSocket> {
 }
 
 async fn get_case_count() -> Result<u32> {
-    let mut ws = connect("getCaseCount", None).await?;
-    let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
-    ws.send(Frame::close(CloseCode::Normal, [])).await?;
-    Ok(std::str::from_utf8(msg.payload())?.parse()?)
+    let started_at = Instant::now();
+    loop {
+        let mut ws = match connect("getCaseCount", None).await {
+            Ok(ok) => ok,
+            Err(_) => {
+                if started_at.elapsed() > Duration::from_secs(60) {
+                    panic!("unable to connect")
+                }
+                // ...
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        let msg = ws.next().await.ok_or_else(|| anyhow::Error::msg("idk"))?;
+        ws.send(Frame::close(CloseCode::Normal, [])).await?;
+        break Ok(std::str::from_utf8(msg.payload())?.parse()?);
+    }
 }
 
 #[tokio::main]

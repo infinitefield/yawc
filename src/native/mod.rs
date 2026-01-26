@@ -64,9 +64,10 @@
 mod builder;
 mod options;
 mod split;
+pub mod streaming;
 mod upgrade;
 
-use crate::{close, codec, compression, frame, Result, WebSocketError};
+use crate::{codec, compression, frame, streaming::Streaming, Result, WebSocketError};
 
 use {
     bytes::Bytes,
@@ -87,16 +88,15 @@ use std::{
     str::FromStr,
     sync::Arc,
     task::{ready, Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use close::CloseCode;
 use codec::Codec;
 use compression::{Compressor, Decompressor, WebSocketExtensions};
-use futures::task::AtomicWaker;
+use futures::{task::AtomicWaker, SinkExt};
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
-use tokio_util::codec::{Framed, FramedParts};
+use tokio_util::codec::Framed;
 use url::Url;
 
 // Re-exports
@@ -163,8 +163,7 @@ pub(crate) struct Negotiation {
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
     pub(crate) utf8: bool,
-    pub(crate) fragment_timeout: Option<Duration>,
-    pub(crate) max_payload_write_size: Option<usize>,
+    pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
 }
 
@@ -403,6 +402,173 @@ impl AsyncWrite for HttpStream {
     }
 }
 
+// ================== FragmentLayer ====================
+
+pub(super) struct Fragmentation {
+    started: Instant,
+    opcode: OpCode,
+    is_compressed: bool,
+    bytes_read: usize,
+    parts: VecDeque<Bytes>,
+}
+
+/// Handles fragmentation and defragmentation of WebSocket frames.
+///
+/// This layer is responsible for:
+/// - **Outgoing fragmentation**: Breaking large frames into smaller fragments based on fragment_size
+/// - **Incoming defragmentation**: Reassembling fragmented messages received from the peer (unless streaming mode is enabled)
+///
+/// The layer is owned by WebSocket and operates independently for read and write operations.
+struct FragmentLayer {
+    /// Queue for outgoing fragments (from automatic fragmentation)
+    outgoing_fragments: VecDeque<Frame>,
+    /// Fragment accumulation for assembling incoming fragmented messages
+    incoming_fragment: Option<Fragmentation>,
+    /// Maximum fragment size for outgoing messages
+    fragment_size: Option<usize>,
+    /// Maximum buffer size for incoming fragmented messages
+    max_read_buffer: usize,
+    /// Timeout for receiving complete fragmented messages
+    fragment_timeout: Option<Duration>,
+}
+
+impl FragmentLayer {
+    /// Creates a new FragmentLayer with the given configuration.
+    fn new(
+        fragment_size: Option<usize>,
+        max_read_buffer: usize,
+        fragment_timeout: Option<Duration>,
+    ) -> Self {
+        Self {
+            outgoing_fragments: VecDeque::new(),
+            incoming_fragment: None,
+            fragment_size,
+            max_read_buffer,
+            fragment_timeout,
+        }
+    }
+
+    /// Fragments an outgoing frame if necessary and queues the fragments.
+    ///
+    /// Panics if the user tries to manually fragment while auto-fragmentation is enabled.
+    fn fragment_outgoing(&mut self, frame: Frame) {
+        println!("{:?} - {}", frame.opcode, frame.is_fin());
+        // Check for invalid manual fragmentation with auto-fragmentation enabled
+        if !frame.is_fin() && self.fragment_size.is_some() {
+            panic!(
+                "Fragment the frames yourself or use `fragment_size`, but not both. Use Streaming"
+            );
+        }
+
+        let max_fragment_size = self.fragment_size.unwrap_or(usize::MAX);
+        self.outgoing_fragments
+            .extend(frame.into_fragments(max_fragment_size));
+    }
+
+    /// Returns the next queued outgoing fragment, if any.
+    #[inline(always)]
+    fn pop_outgoing_fragment(&mut self) -> Option<Frame> {
+        self.outgoing_fragments.pop_front()
+    }
+
+    /// Returns true if there are pending outgoing fragments.
+    #[inline(always)]
+    fn has_outgoing_fragments(&self) -> bool {
+        !self.outgoing_fragments.is_empty()
+    }
+
+    /// Processes an incoming frame, handling fragmentation and reassembly.
+    ///
+    /// Returns:
+    /// - `Ok(Some(frame))` if a complete frame is ready (either non-fragmented or fully reassembled)
+    /// - `Ok(None)` if this is a fragment and we're still waiting for more
+    /// - `Err` if there's a protocol violation or timeout
+    fn assemble_incoming(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
+        use bytes::BufMut;
+
+        println!(
+            "<<Fragmentation<< OpCode={:?} fin={} len={}",
+            frame.opcode(),
+            frame.is_fin(),
+            frame.payload.len()
+        );
+
+        match frame.opcode {
+            OpCode::Text | OpCode::Binary => {
+                // Check for invalid fragmentation state
+                if self.incoming_fragment.is_some() {
+                    return Err(WebSocketError::InvalidFragment);
+                }
+
+                // Handle fragmented messages
+                if !frame.fin {
+                    let fragmentation = Fragmentation {
+                        started: Instant::now(),
+                        opcode: frame.opcode,
+                        is_compressed: frame.is_compressed,
+                        bytes_read: frame.payload.len(),
+                        parts: VecDeque::from([frame.payload]),
+                    };
+                    self.incoming_fragment = Some(fragmentation);
+
+                    return Ok(None);
+                }
+
+                // Non-fragmented message - return as-is
+                Ok(Some(frame))
+            }
+            OpCode::Continuation => {
+                let mut fragment = self
+                    .incoming_fragment
+                    .take()
+                    .ok_or_else(|| WebSocketError::InvalidFragment)?;
+
+                fragment.bytes_read += frame.payload.len();
+
+                // Check buffer size
+                if fragment.bytes_read >= self.max_read_buffer {
+                    return Err(WebSocketError::FrameTooLarge);
+                }
+
+                // Check timeout
+                if let Some(timeout) = self.fragment_timeout {
+                    if fragment.started.elapsed() > timeout {
+                        return Err(WebSocketError::FragmentTimeout);
+                    }
+                }
+
+                fragment.parts.push_back(frame.payload);
+
+                if frame.fin {
+                    // Assemble complete message
+                    frame.opcode = fragment.opcode;
+                    frame.is_compressed = fragment.is_compressed;
+                    frame.payload = fragment
+                        .parts
+                        .into_iter()
+                        .fold(
+                            bytes::BytesMut::with_capacity(fragment.bytes_read),
+                            |mut acc, b| {
+                                acc.put(b);
+                                acc
+                            },
+                        )
+                        .freeze();
+
+                    Ok(Some(frame))
+                } else {
+                    self.incoming_fragment = Some(fragment);
+                    Ok(None)
+                }
+            }
+            _ => {
+                // Control frames pass through unchanged
+                Ok(Some(frame))
+            }
+        }
+    }
+}
+
 // ================== WebSocket ====================
 
 /// WebSocket stream for both clients and servers.
@@ -442,7 +608,7 @@ impl AsyncWrite for HttpStream {
 ///
 /// # Automatic Fragmentation
 ///
-/// When [`Options::with_max_payload_write_size`] is configured, the WebSocket will automatically
+/// When [`Options::with_max_fragment_size`] is configured, the WebSocket will automatically
 /// fragment outgoing messages that exceed the specified size limit:
 ///
 /// ```no_run
@@ -451,7 +617,7 @@ impl AsyncWrite for HttpStream {
 ///
 /// # async fn example() -> yawc::Result<()> {
 /// let options = Options::default()
-///     .with_max_payload_write_size(64 * 1024); // 64 KiB per frame
+///     .with_max_fragment_size(64 * 1024); // 64 KiB per frame
 ///
 /// let mut ws = WebSocket::connect("wss://example.com/ws".parse()?)
 ///     .with_options(options)
@@ -513,15 +679,10 @@ impl AsyncWrite for HttpStream {
 /// }
 /// ```
 pub struct WebSocket<S> {
-    stream: Framed<S, Codec>,
-    read_half: ReadHalf,
-    write_half: WriteHalf,
-    wake_proxy: Arc<WakeProxy>,
-    obligated_sends: VecDeque<Frame>,
-    flush_sends: bool,
-    inflate: Option<Decompressor>,
-    deflate: Option<Compressor>,
+    streaming: Streaming<S>,
     check_utf8: bool,
+    /// Handles fragmentation and defragmentation of frames
+    fragment_layer: FragmentLayer,
 }
 
 impl WebSocket<MaybeTlsStream<TcpStream>> {
@@ -905,8 +1066,7 @@ impl WebSocket<HttpStream> {
                 max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
                 max_read_buffer,
                 utf8: options.check_utf8,
-                max_payload_write_size: options.max_payload_write_size,
-                fragment_timeout: options.fragment_timeout,
+                fragmentation: options.fragmentation.clone(),
                 max_backpressure_write_boundary: options.max_backpressure_write_boundary,
             }),
         };
@@ -926,48 +1086,20 @@ where
     /// # Safety
     /// This function is unsafe because it splits ownership of shared state.
     pub unsafe fn split_stream(self) -> (Framed<S, Codec>, ReadHalf, WriteHalf) {
-        (self.stream, self.read_half, self.write_half)
+        self.streaming.split_stream()
+    }
+
+    pub fn into_streaming(self) -> Streaming<S> {
+        self.streaming
     }
 
     /// Polls for the next frame in the WebSocket stream.
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
-        let wake_proxy = Arc::clone(&self.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Read, cx.waker());
-
         loop {
-            let res = wake_proxy.with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx));
-            match res {
-                Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
-                    Some(frame) => return Poll::Ready(Ok(frame)),
-                    None => continue,
-                },
-                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
-                    ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)))?;
-                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
-                }
-                Poll::Ready(Err(err)) => {
-                    let code = match err {
-                        WebSocketError::FrameTooLarge => CloseCode::Size,
-                        WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
-                        WebSocketError::ReservedBitsNotZero
-                        | WebSocketError::ControlFrameFragmented
-                        | WebSocketError::PingFrameTooLarge
-                        | WebSocketError::InvalidFragment
-                        | WebSocketError::FragmentTimeout
-                        | WebSocketError::InvalidContinuationFrame
-                        | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
-                        _ => CloseCode::Error,
-                    };
-                    self.emit_close(Frame::close(code, err.to_string()));
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending => {
-                    let res = ready!(wake_proxy.with_context(|cx| self.poll_flush_obligated(cx)));
-                    if let Err(err) = res {
-                        return Poll::Ready(Err(err));
-                    }
-                    return Poll::Pending;
-                }
+            let frame = ready!(self.streaming.poll_next_frame(cx))?;
+            match self.on_frame(frame)? {
+                Some(ok) => break Poll::Ready(Ok(ok)),
+                None => continue,
             }
         }
     }
@@ -977,121 +1109,28 @@ where
         poll_fn(|cx| self.poll_next_frame(cx)).await
     }
 
-    /// Sends a message as multiple fragmented frames.
-    ///
-    /// This method splits a large message into smaller fragments, useful for:
-    /// - Sending large payloads without blocking
-    /// - Implementing streaming message transmission
-    /// - Controlling memory usage for large messages
-    ///
-    /// # Example
-    ///
-    /// See [`examples/fragmented_messages.rs`](https://github.com/infinitefield/yawc/blob/master/examples/fragmented_messages.rs)
-    /// for a complete example of sending and receiving fragmented messages.
-    pub async fn send_fragmented(
-        &mut self,
-        opcode: OpCode,
-        payload: impl Into<Bytes>,
-        fragment_size: usize,
-    ) -> Result<()> {
-        let payload = payload.into();
-        let total_len = payload.len();
-
-        if total_len <= fragment_size {
-            return futures::SinkExt::send(self, Frame::from((opcode, payload))).await;
-        }
-
-        let mut offset = 0;
-        let mut is_first = true;
-
-        while offset < total_len {
-            let end = (offset + fragment_size).min(total_len);
-            let chunk = payload.slice(offset..end);
-            let is_last = end == total_len;
-
-            let frame = if is_first {
-                Frame::from((opcode, chunk)).with_fin(false)
-            } else if is_last {
-                Frame::continuation(chunk)
-            } else {
-                Frame::continuation(chunk).with_fin(false)
-            };
-
-            futures::SinkExt::send(self, frame).await?;
-
-            offset = end;
-            is_first = false;
-        }
-
-        Ok(())
-    }
-
     /// Creates a new WebSocket from an existing stream.
     ///
     /// The `read_buf` parameter should contain any bytes that were read from the stream
     /// during the HTTP upgrade but weren't consumed (leftover data after the HTTP response).
     pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, opts: Negotiation) -> Self {
-        let decoder = codec::Decoder::new(role, opts.max_payload_read);
-        let encoder = codec::Encoder::new(role);
-        let codec = Codec::from((decoder, encoder));
-
-        let mut parts = FramedParts::new(stream, codec);
-        parts.read_buf = read_buf.into();
-
-        let mut framed = Framed::from_parts(parts);
-        if let Some(boundary) = opts.max_backpressure_write_boundary {
-            framed.set_backpressure_boundary(boundary);
-        }
-
         Self {
-            stream: framed,
-            read_half: ReadHalf::new(&opts),
-            write_half: WriteHalf::new(opts.max_payload_write_size, &opts),
-            wake_proxy: Arc::new(WakeProxy::default()),
-            obligated_sends: VecDeque::new(),
-            flush_sends: false,
-            inflate: opts.decompressor(role),
-            deflate: opts.compressor(role),
+            streaming: Streaming::new(role, stream, read_buf, &opts),
             check_utf8: opts.utf8,
+            fragment_layer: FragmentLayer::new(
+                opts.fragmentation.as_ref().and_then(|f| f.fragment_size),
+                opts.max_read_buffer,
+                opts.fragmentation.as_ref().and_then(|f| f.timeout),
+            ),
         }
     }
 
-    fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        // control frames can't be fragmented.
-        // if !frame.is_fin() && frame.opcode().is_control() {
-        //     return Err(WebSocketError::InvalidFragment);
-        // }
+    fn on_frame(&mut self, frame: Frame) -> Result<Option<Frame>> {
+        let frame = match self.fragment_layer.assemble_incoming(frame)? {
+            Some(frame) => frame,
+            None => return Ok(None), // Still waiting for more fragments
+        };
 
-        // Handle protocol frames first
-        match frame.opcode {
-            OpCode::Ping => {
-                self.on_ping(&frame);
-                return Ok(Some(frame));
-            }
-            OpCode::Close => {
-                return match self.on_close(&frame) {
-                    Ok(_) => Ok(Some(frame)),
-                    Err(err) => Err(err),
-                };
-            }
-            OpCode::Pong => return Ok(Some(frame)),
-            _ => {}
-        }
-
-        // Handle decompression for data frames (after fragmentation assembly)
-        if frame.is_compressed {
-            if let Some(ref mut inflate) = self.inflate {
-                let decompressed = inflate.decompress(&frame.payload, true)?;
-                if let Some(payload) = decompressed {
-                    frame.is_compressed = false;
-                    frame.payload = payload;
-                }
-            } else {
-                return Err(WebSocketError::CompressionNotSupported);
-            }
-        }
-
-        // UTF-8 validation for text frames
         if frame.opcode == OpCode::Text && self.check_utf8 {
             #[cfg(not(feature = "simd"))]
             if std::str::from_utf8(&frame.payload).is_err() {
@@ -1104,54 +1143,6 @@ where
         }
 
         Ok(Some(frame))
-    }
-
-    fn on_ping(&mut self, frame: &Frame) {
-        self.obligated_sends
-            .push_back(Frame::pong(frame.payload.clone()));
-    }
-
-    fn on_close(&mut self, frame: &Frame) -> Result<()> {
-        match frame.payload.len() {
-            0 => {}
-            1 => return Err(WebSocketError::InvalidCloseFrame),
-            _ => {
-                let code = frame.close_code().expect("close code");
-                let _ = frame.close_reason()?;
-
-                if !code.is_allowed() {
-                    self.emit_close(Frame::close(CloseCode::Protocol, &frame.payload[2..]));
-                    return Err(WebSocketError::InvalidCloseCode);
-                }
-            }
-        }
-
-        let frame = Frame::close_raw(frame.payload.clone());
-        self.emit_close(frame);
-
-        Ok(())
-    }
-
-    fn emit_close(&mut self, frame: Frame) {
-        self.obligated_sends.push_back(frame);
-        self.read_half.is_closed = true;
-    }
-
-    fn poll_flush_obligated(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        while !self.obligated_sends.is_empty() {
-            ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
-
-            let next = self.obligated_sends.pop_front().expect("obligated send");
-            self.write_half.start_send(&mut self.stream, next)?;
-            self.flush_sends = true;
-        }
-
-        if self.flush_sends {
-            ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
-            self.flush_sends = false;
-        }
-
-        Poll::Ready(Ok(()))
     }
 }
 
@@ -1181,42 +1172,13 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| {
-            ready!(this.poll_flush_obligated(cx))?;
-            this.write_half.poll_ready(&mut this.stream, cx)
-        })
+        this.streaming.poll_ready_unpin(cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
-
-        let should_compress = !item.opcode.is_control();
-        // text or binary, not fin and has payload setting
-        if !should_compress && !item.is_fin() && this.write_half.max_payload_write_size.is_some() {
-            panic!("Fragment the frames yourself or use `max_payload_write_size`, but not both");
-        }
-
-        let final_frame = if should_compress {
-            if let Some(deflate) = this.deflate.as_mut() {
-                // Compress the payload if compression is enabled
-                let output = deflate.compress(&item.payload, item.is_fin())?;
-                // the compressor returned no payload, we might need flushing later...
-                // (do not return here since an empty payload could be valid...)
-                // if output.is_empty() {
-                // return Ok(());
-                // }
-
-                item.into_compressed(output)
-            } else {
-                item
-            }
-        } else {
-            item
-        };
-
-        this.write_half.start_send(&mut this.stream, final_frame)
+        this.fragment_layer.fragment_outgoing(item);
+        Ok(())
     }
 
     fn poll_flush(
@@ -1224,9 +1186,21 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx))
+
+        // First, send all queued fragments to WriteHalf
+        while this.fragment_layer.has_outgoing_fragments() {
+            // We need to call `poll_ready` before calling `start_send` since the user
+            // might be under certain backpressure constraints
+            ready!(this.streaming.poll_ready_unpin(cx))?;
+            let fragment = this
+                .fragment_layer
+                .pop_outgoing_fragment()
+                .expect("fragment");
+            this.streaming.start_send_unpin(fragment)?;
+        }
+
+        // Then flush WriteHalf
+        this.streaming.poll_flush_unpin(cx)
     }
 
     fn poll_close(
@@ -1234,9 +1208,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
-        this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| this.write_half.poll_close(&mut this.stream, cx))
+        this.streaming.poll_close_unpin(cx)
     }
 }
 
@@ -1290,8 +1262,7 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
-        fragment_timeout: options.fragment_timeout,
-        max_payload_write_size: options.max_payload_write_size,
+        fragmentation: options.fragmentation.clone(),
         max_backpressure_write_boundary: options.max_backpressure_write_boundary,
     })
 }
@@ -1343,8 +1314,7 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         max_payload_read: options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ),
         max_read_buffer,
         utf8: options.check_utf8,
-        fragment_timeout: options.fragment_timeout,
-        max_payload_write_size: options.max_payload_write_size,
+        fragmentation: options.fragmentation.clone(),
         max_backpressure_write_boundary: options.max_backpressure_write_boundary,
     })
 }
@@ -1397,6 +1367,8 @@ Either:
 
 #[cfg(test)]
 mod tests {
+    use crate::close::{self, CloseCode};
+
     use super::*;
     use futures::SinkExt;
     use std::pin::Pin;
@@ -1451,7 +1423,7 @@ mod tests {
 
     fn create_websocket_pair_with_config(
         buffer_size: usize,
-        max_payload_write_size: Option<usize>,
+        fragment_size: Option<usize>,
         compression_level: Option<CompressionLevel>,
     ) -> (WebSocket<MockStream>, WebSocket<MockStream>) {
         let (client_stream, server_stream) = MockStream::pair(buffer_size);
@@ -1469,8 +1441,10 @@ mod tests {
             max_payload_read: MAX_PAYLOAD_READ,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
-            fragment_timeout: None,
-            max_payload_write_size,
+            fragmentation: fragment_size.map(|size| options::Fragmentation {
+                timeout: None,
+                fragment_size: Some(size),
+            }),
             max_backpressure_write_boundary: None,
         };
 
@@ -1570,7 +1544,7 @@ mod tests {
         let (mut client, mut server) = create_websocket_pair(1024);
 
         client
-            .send(Frame::close(close::CloseCode::Normal, b"Goodbye"))
+            .send(Frame::close(CloseCode::Normal, b"Goodbye"))
             .await
             .expect("Failed to send close frame");
 
@@ -1902,7 +1876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_automatic_fragmentation_large_messages() {
-        // Create WebSocket pair with max_payload_write_size set to 100 bytes
+        // Create WebSocket pair with fragment_size set to 100 bytes
         let (client_stream, server_stream) = MockStream::pair(8192);
 
         let negotiation = Negotiation {
@@ -1911,8 +1885,10 @@ mod tests {
             max_payload_read: MAX_PAYLOAD_READ,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
-            fragment_timeout: None,
-            max_payload_write_size: Some(100),
+            fragmentation: Some(options::Fragmentation {
+                timeout: None,
+                fragment_size: Some(100),
+            }),
             max_backpressure_write_boundary: None,
         };
 
@@ -1940,7 +1916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_automatic_fragmentation_small_messages() {
-        // Create WebSocket pair with max_payload_write_size set to 100 bytes
+        // Create WebSocket pair with fragment_size set to 100 bytes
         let (client_stream, server_stream) = MockStream::pair(8192);
 
         let negotiation = Negotiation {
@@ -1949,8 +1925,10 @@ mod tests {
             max_payload_read: MAX_PAYLOAD_READ,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
-            fragment_timeout: None,
-            max_payload_write_size: Some(100),
+            fragmentation: Some(options::Fragmentation {
+                timeout: None,
+                fragment_size: Some(100),
+            }),
             max_backpressure_write_boundary: None,
         };
 
@@ -1978,7 +1956,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_fragmentation_when_not_configured() {
-        // Create WebSocket pair WITHOUT max_payload_write_size
+        // Create WebSocket pair WITHOUT fragment_size
         let (client_stream, server_stream) = MockStream::pair(8192);
 
         let negotiation = Negotiation {
@@ -1987,8 +1965,7 @@ mod tests {
             max_payload_read: MAX_PAYLOAD_READ,
             max_read_buffer: MAX_READ_BUFFER,
             utf8: false,
-            fragment_timeout: None,
-            max_payload_write_size: None,
+            fragmentation: None,
             max_backpressure_write_boundary: None,
         };
 
@@ -2126,6 +2103,15 @@ mod tests {
             PAYLOAD_SIZE, total_fragments, FRAGMENT_SIZE
         );
 
+        // Spawn server task to receive the message concurrently
+        let server_task = tokio::spawn(async move {
+            server
+                .next_frame()
+                .await
+                .expect("Failed to receive large payload")
+        });
+
+        // Send all fragments from client
         let mut offset = 0;
         let mut fragment_num = 0;
 
@@ -2146,10 +2132,11 @@ mod tests {
             frame.set_fin(is_final);
 
             println!(
-                "Sending fragment {}/{}: {} bytes, FIN={}",
+                "Sending fragment {}/{}: {} bytes, OpCode={:?} FIN={}",
                 fragment_num + 1,
                 total_fragments,
                 frame.payload().len(),
+                frame.opcode(),
                 is_final
             );
 
@@ -2162,11 +2149,8 @@ mod tests {
             fragment_num += 1;
         }
 
-        // Server receives the reassembled payload
-        let received_frame = server
-            .next_frame()
-            .await
-            .expect("Failed to receive large payload");
+        // Wait for server to receive the complete message
+        let received_frame = server_task.await.expect("Server task failed");
 
         // Verify the payload was reassembled correctly
         assert_eq!(received_frame.opcode(), OpCode::Binary);

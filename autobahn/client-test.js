@@ -58,9 +58,6 @@ if (await containerExists(CONTAINER_NAME)) {
     -p ${PORT}:9001 \
     --rm ${AUTOBAHN_TESTSUITE_DOCKER} \
     wstest -m fuzzingserver -s fuzzingserver.json`.spawn();
-
-  // sleep long because it might take a while to pull the files
-  await sleep(30);
 }
 
 await ensureClientBuilt();

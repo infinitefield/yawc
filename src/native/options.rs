@@ -12,8 +12,61 @@ pub type CompressionLevel = flate2::Compression;
 
 /// Configuration options for a WebSocket connection.
 ///
-/// `Options` allows users to set parameters that govern the behavior of a WebSocket connection,
-/// including payload size limits, compression settings, and UTF-8 validation requirements.
+/// `Options` allows comprehensive control over WebSocket connection behavior, including:
+/// - **Payload size limits**: Control memory usage and prevent abuse
+/// - **Compression**: Reduce bandwidth using permessage-deflate (RFC 7692)
+/// - **Fragmentation**: Handle large messages and streaming data
+/// - **UTF-8 validation**: Ensure text frame compliance
+/// - **TCP options**: Fine-tune network behavior
+///
+/// # Protocol Layers
+///
+/// The WebSocket implementation is organized into distinct processing layers:
+///
+/// ## 1. Fragmentation Layer
+/// Handles splitting and reassembling messages across multiple frames. Controlled by
+/// [`Options::fragmentation`] (see [`Fragmentation`] for details).
+///
+/// - **Outgoing**: Automatically fragments large messages when [`Fragmentation::fragment_size`] is set
+/// - **Incoming**: Reassembles fragments by default, or delivers them as-is in streaming mode
+///   (enabled via [`Fragmentation::streaming`])
+///
+/// ## 2. Compression Layer
+/// Applies permessage-deflate compression to reduce bandwidth. Controlled by
+/// [`Options::compression`] (see [`DeflateOptions`] for details).
+///
+/// - Operates on complete messages (after fragmentation/before defragmentation)
+/// - Can be configured with different compression levels and context takeover modes
+/// - Negotiated during the WebSocket handshake
+///
+/// # Common Patterns
+///
+/// ## Basic Configuration
+/// ```rust
+/// use yawc::Options;
+///
+/// let options = Options::default()
+///     .with_max_payload_read(1024 * 1024)  // 1 MiB max incoming
+///     .with_utf8();                         // Validate text frames
+/// ```
+///
+/// ## High-Performance Streaming
+/// ```rust
+/// use yawc::Options;
+///
+/// let options = Options::default()
+///     .with_low_latency_compression()
+///     .with_no_delay();  // Disable Nagle's algorithm
+/// ```
+///
+/// ## CPU and Memory-Constrained Environment
+/// ```rust
+/// use yawc::Options;
+///
+/// let options = Options::default()
+///     .with_limits(128 * 1024, 256 * 1024)  // Small payload/buffer limits
+///     .without_compression();                 // Avoid compression overhead
+/// ```
 #[derive(Clone, Default)]
 pub struct Options {
     /// Maximum allowed payload size for incoming messages, in bytes.
@@ -41,6 +94,15 @@ pub struct Options {
     /// through [`DeflateOptions`] for finer control over the compression strategy.
     pub compression: Option<DeflateOptions>,
 
+    /// Configuration for message fragmentation behavior.
+    ///
+    /// Controls how the WebSocket handles fragmented messages, including whether to
+    /// reassemble fragments, timeouts for receiving fragments, and automatic fragmentation
+    /// of outgoing messages.
+    ///
+    /// See [`Fragmentation`] for available options.
+    pub fragmentation: Option<Fragmentation>,
+
     /// Flag to determine whether incoming messages should be validated for UTF-8 encoding.
     ///
     /// If `true`, the [`super::ReadHalf`] will validate that received text frames contain valid UTF-8
@@ -57,6 +119,51 @@ pub struct Options {
     /// Default: `false`
     pub no_delay: bool,
 
+    /// Backpressure boundary for the write buffer in bytes.
+    ///
+    /// When the write buffer exceeds this size, backpressure is applied to
+    /// prevent unbounded memory growth. This helps with flow control when
+    /// sending large amounts of data.
+    ///
+    /// Default: `None` (uses tokio-util default)
+    pub max_backpressure_write_boundary: Option<usize>,
+}
+
+/// Configuration for WebSocket message fragmentation.
+///
+/// The WebSocket protocol allows large messages to be split into multiple fragments
+/// for transmission. This struct controls how both incoming and outgoing fragmented
+/// messages are handled.
+///
+/// # Fragmentation Modes
+///
+/// ## Standard Mode (default)
+/// By default, incoming fragments are automatically reassembled into complete messages
+/// before being returned to the application. This provides a simple interface where
+/// applications always receive complete messages.
+///
+/// # Automatic Fragmentation
+/// For outgoing messages, the `fragment_size` option enables automatic fragmentation
+/// of large messages. This is useful for:
+/// - Preventing large messages from blocking the send queue
+/// - Ensuring fair interleaving of multiple concurrent messages
+/// - Working with size constraints imposed by intermediaries
+///
+/// # Fragment Timeout
+/// The `timeout` option protects against incomplete messages by setting a maximum
+/// duration to wait for all fragments to arrive.
+///
+/// # Example
+/// ```
+/// use std::time::Duration;
+/// use yawc::Options;
+///
+/// let options = Options::default()
+///     .with_fragment_timeout(Duration::from_secs(30))
+///     .with_max_fragment_size(64 * 1024); // 64 KiB fragments
+/// ```
+#[derive(Clone, Default, Debug)]
+pub struct Fragmentation {
     /// Maximum time allowed to receive all fragments of a fragmented message.
     ///
     /// When receiving a fragmented WebSocket message, this timeout limits how long
@@ -68,25 +175,21 @@ pub struct Options {
     /// very slowly to hold resources.
     ///
     /// Default: `None` (no timeout)
-    pub fragment_timeout: Option<Duration>,
+    pub timeout: Option<Duration>,
 
-    /// Maximum payload size for outgoing messages, in bytes.
+    /// Maximum size for each fragment when automatically splitting outgoing messages.
     ///
-    /// When set, messages exceeding this size will be automatically fragmented
-    /// into multiple frames. Each fragment will have a payload size at or below
-    /// this limit.
+    /// When set, outgoing messages that exceed this size will be automatically
+    /// fragmented into multiple frames. Each fragment will have a payload size
+    /// at or below this limit.
+    ///
+    /// This is useful for:
+    /// - Preventing large messages from blocking smaller ones
+    /// - Working with intermediaries that have message size limits
+    /// - Controlling memory usage in the send buffer
     ///
     /// Default: `None` (no automatic fragmentation)
-    pub max_payload_write_size: Option<usize>,
-
-    /// Backpressure boundary for the write buffer in bytes.
-    ///
-    /// When the write buffer exceeds this size, backpressure is applied to
-    /// prevent unbounded memory growth. This helps with flow control when
-    /// sending large amounts of data.
-    ///
-    /// Default: `None` (uses tokio-util default)
-    pub max_backpressure_write_boundary: Option<usize>,
+    pub fragment_size: Option<usize>,
 }
 
 impl Options {
@@ -315,34 +418,38 @@ impl Options {
     ///     .with_fragment_timeout(Duration::from_secs(30));
     /// ```
     pub fn with_fragment_timeout(self, timeout: Duration) -> Self {
+        let mut fragmentation = self.fragmentation.unwrap_or_default();
+        fragmentation.timeout = Some(timeout);
         Self {
-            fragment_timeout: Some(timeout),
+            fragmentation: Some(fragmentation),
             ..self
         }
     }
 
-    /// Sets the maximum payload size for outgoing messages.
+    /// Sets the maximum fragment size for automatic fragmentation of outgoing messages.
     ///
     /// When set, outgoing messages that exceed this size will be automatically
     /// fragmented into multiple frames. Each fragment will have a payload size
     /// at or below this limit.
     ///
     /// # Parameters
-    /// - `size`: Maximum payload size in bytes for a single frame
+    /// - `size`: Maximum fragment size in bytes
     ///
     /// # Returns
-    /// A modified `Options` instance with the specified max payload write size.
+    /// A modified `Options` instance with the specified fragment size.
     ///
     /// # Example
     /// ```rust
     /// use yawc::Options;
     ///
     /// let options = Options::default()
-    ///     .with_max_payload_write_size(64 * 1024); // 64 KiB max per frame
+    ///     .with_max_fragment_size(64 * 1024); // 64 KiB max per fragment
     /// ```
-    pub fn with_max_payload_write_size(self, size: usize) -> Self {
+    pub fn with_max_fragment_size(self, size: usize) -> Self {
+        let mut fragmentation = self.fragmentation.unwrap_or_default();
+        fragmentation.fragment_size = Some(size);
         Self {
-            max_payload_write_size: Some(size),
+            fragmentation: Some(fragmentation),
             ..self
         }
     }
@@ -558,8 +665,8 @@ impl DeflateOptions {
             server_max_window_bits: Some(9), // Minimal window
             #[cfg(feature = "zlib")]
             client_max_window_bits: None,
-            server_no_context_takeover: true,
-            client_no_context_takeover: true,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
         }
     }
 
@@ -597,8 +704,8 @@ impl DeflateOptions {
             server_max_window_bits: Some(12),
             #[cfg(feature = "zlib")]
             client_max_window_bits: None,
-            server_no_context_takeover: true,
-            client_no_context_takeover: true,
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
         }
     }
 
