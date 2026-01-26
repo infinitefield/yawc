@@ -10,7 +10,7 @@ const pwd = new URL(".", import.meta.url).pathname;
 const FEATURE_FLAG = Deno.args[0] || "";
 const FEATURE_SUFFIX = FEATURE_FLAG ? `_${FEATURE_FLAG}` : "";
 const CONTAINER_NAME = `fuzzingclient${FEATURE_SUFFIX}`;
-const PORT = FEATURE_FLAG === "zlib" ? 9003 : 9002;
+const PORT = FEATURE_FLAG === "zlib" ? 9004 : 9003;
 const ECHO_SERVER_EXE = "target/release/examples/autobahn_server";
 
 const isMac = Deno.build.os === "darwin";
