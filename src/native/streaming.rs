@@ -50,6 +50,7 @@
 
 use std::{
     collections::VecDeque,
+    future::poll_fn,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -190,6 +191,11 @@ where
             deflate: negotiated.compressor(role),
             inflate: negotiated.decompressor(role),
         }
+    }
+
+    /// Asynchronously retrieves the next frame from the WebSocket stream.
+    pub async fn next_frame(&mut self) -> Result<Frame> {
+        poll_fn(|cx| self.poll_next_frame(cx)).await
     }
 
     /// Splits the `Streaming` connection into its low-level components for advanced usage.
