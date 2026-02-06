@@ -6,7 +6,7 @@ yawc is the **only Rust WebSocket library** that provides both high-level automa
 
 [![Crates.io](https://img.shields.io/crates/v/yawc.svg)](https://crates.io/crates/yawc)
 [![Documentation](https://docs.rs/yawc/badge.svg)](https://docs.rs/yawc)
-[![License](https://img.shields.io/badge/license-AGPL%20v3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MPL%202.0-blue.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 
 ## Why yawc?
@@ -508,10 +508,10 @@ For major changes, please open an issue first to discuss what you would like to 
 
 ## License
 
-This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
-Under the terms of this license, you may use, modify, and distribute the code as part of a larger work without requiring the entire work to be licensed under the LGPL.
-However, any modifications to the library itself must be made available under the LGPL.
-For more details, see ([LICENSE](LICENSE) or https://www.gnu.org/licenses/lgpl-3.0.en.html)
+This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).
+Under the terms of this license, you may use, modify, and distribute the code as part of a larger work.
+Modifications to files covered by the MPL must be made available under the MPL, but you can combine the code with proprietary code in a larger work.
+For more details, see ([LICENSE](LICENSE) or https://www.mozilla.org/en-US/MPL/2.0/)
 
 ## About us
 
