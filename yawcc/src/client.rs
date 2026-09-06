@@ -12,7 +12,7 @@ use tokio::{
 use url::Url;
 use yawc::{
     frame::{Frame, OpCode},
-    CompressionLevel, HttpRequest, HttpRequestBuilder, Options, TcpWebSocket, WebSocket,
+    CompressionLevel, HttpRequest, HttpRequestBuilder, Options, Proxy, TcpWebSocket, WebSocket,
 };
 
 /// Command to connect and interact with a WebSocket server.
@@ -47,6 +47,12 @@ pub struct Cmd {
     #[arg(long)]
     tcp_host: Option<String>,
 
+    /// Dial through a SOCKS5 proxy, for example
+    /// "socks5h://127.0.0.1:1080" or "socks5h://user:pass@127.0.0.1:1080".
+    /// socks5h:// lets the proxy resolve the host, socks5:// resolves it here.
+    #[arg(long)]
+    proxy: Option<Url>,
+
     /// The WebSocket URL to connect to (ws:// or wss://)
     url: Url,
 }
@@ -68,6 +74,7 @@ async fn connect_with_tcp_host(
     url: &Url,
     tcp_host: &str,
     headers: &[String],
+    proxy: Option<&Proxy>,
     timeout_duration: Duration,
 ) -> anyhow::Result<TcpWebSocket> {
     // Resolve the TCP host to socket addresses
@@ -91,15 +98,15 @@ async fn connect_with_tcp_host(
         // Build a new request for each attempt since HttpRequestBuilder is not Clone
         let request = build_request(headers)?;
 
-        match timeout(
-            timeout_duration,
-            WebSocket::connect(url.clone())
-                .with_tcp_address(*addr)
-                .with_request(request)
-                .with_options(Options::default().with_compression_level(CompressionLevel::best())),
-        )
-        .await
-        {
+        let mut builder = WebSocket::connect(url.clone())
+            .with_tcp_address(*addr)
+            .with_request(request)
+            .with_options(Options::default().with_compression_level(CompressionLevel::best()));
+        if let Some(proxy) = proxy {
+            builder = builder.with_proxy(proxy.clone());
+        }
+
+        match timeout(timeout_duration, builder).await {
             Ok(Ok(ws)) => {
                 println!("Successfully connected via {}", addr);
                 return Ok(ws);
@@ -138,6 +145,7 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     let printer = rl.create_external_printer().unwrap();
 
     let request_builder = build_request(&cmd.headers)?;
+    let proxy = cmd.proxy.clone().map(Proxy::socks5).transpose()?;
 
     let runtime = runtime::Builder::new_current_thread()
         .enable_all()
@@ -152,15 +160,18 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
             &cmd.url,
             tcp_host,
             &cmd.headers,
+            proxy.as_ref(),
             cmd.timeout,
         ))?
     } else {
-        runtime.block_on(timeout(
-            cmd.timeout,
-            WebSocket::connect(cmd.url.clone())
-                .with_request(request_builder)
-                .with_options(Options::default().with_compression_level(CompressionLevel::best())),
-        ))??
+        let mut builder = WebSocket::connect(cmd.url.clone())
+            .with_request(request_builder)
+            .with_options(Options::default().with_compression_level(CompressionLevel::best()));
+        if let Some(proxy) = proxy {
+            builder = builder.with_proxy(proxy);
+        }
+
+        runtime.block_on(timeout(cmd.timeout, builder))??
     };
 
     let url_string = cmd.url.to_string();

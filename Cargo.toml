@@ -103,6 +103,10 @@ test = false
 name = "proxy"
 test = false
 
+[[example]]
+name = "socks5"
+test = false
+
 # ==============================================================================
 # Common dependencies (shared across all targets)
 # ==============================================================================

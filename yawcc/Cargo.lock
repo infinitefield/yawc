@@ -1624,6 +1624,7 @@ dependencies = [
  "js-sys",
  "log",
  "nom",
+ "percent-encoding",
  "pin-project",
  "rand",
  "send_wrapper",

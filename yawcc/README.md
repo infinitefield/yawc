@@ -7,6 +7,7 @@ A command-line interface tool for WebSocket communication that supports both sec
 - Interactive WebSocket client with command history
 - Simple WebSocket server implementation
 - Support for both ws:// and wss:// connections
+- SOCKS5 proxy support, with optional username/password authentication
 - JSON validation and pretty-printing
 - Command history with search capabilities (Ctrl+R)
 - Inline comments support using // for quick search and documentation
@@ -39,6 +40,16 @@ yawcc c --input-as-json wss://fstream.binance.com/ws/btcusdt@aggTrade
 ```bash
 yawcc c https://echo.websocket.org --tcp-host 127.0.0.1:8080
 ```
+
+#### Through a SOCKS5 Proxy
+
+```bash
+yawcc c wss://echo.websocket.org --proxy socks5h://127.0.0.1:1080
+yawcc c wss://echo.websocket.org --proxy socks5h://user:pass@127.0.0.1:1080
+```
+
+`socks5h://` leaves the hostname for the proxy to resolve, `socks5://` resolves it
+locally. TLS runs end to end through the tunnel.
 
 ### Server Mode
 
@@ -74,6 +85,7 @@ Options:
   -H, --header <Headers>     Custom headers to send to the server in "Key: Value" format For example: --header "Authorization: Bearer token123"
       --input-as-json        When enabled, validates and pretty-prints received messages as JSON. Invalid JSON messages will result in an error
       --tcp-host <TCP_HOST>  Connect directly to a TCP host instead of using WebSocket URL. Format: host:port (e.g., "127.0.0.1:8080")
+      --proxy <PROXY>        Dial through a SOCKS5 proxy, for example "socks5h://127.0.0.1:1080" or "socks5h://user:pass@127.0.0.1:1080". socks5h:// lets the proxy resolve the host, socks5:// resolves it here
   -h, --help                 Print help (see more with '--help')
 ```
 
