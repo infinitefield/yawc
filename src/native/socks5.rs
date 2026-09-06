@@ -140,6 +140,11 @@ impl Proxy {
     /// Credentials come from the URL's userinfo and are percent-decoded, so a password
     /// containing `@` or `:` can be written as `%40` and `%3A`. A URL without a port uses
     /// 1080.
+    ///
+    /// Prefer `socks5h://` unless the proxy cannot resolve the target itself. A `CONNECT`
+    /// request carries a single address, so `socks5://` sends only the first one the
+    /// resolver returns, and on a dual-stack host that can be an address the proxy has no
+    /// route to.
     pub fn socks5(url: Url) -> Result<Self> {
         let remote_dns = match url.scheme() {
             "socks5" => false,
