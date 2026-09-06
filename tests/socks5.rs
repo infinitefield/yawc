@@ -337,3 +337,41 @@ async fn a_refused_tunnel_surfaces_as_a_typed_error() {
         "{err:?}"
     );
 }
+
+/// The HTTP/2 handshake dials through the same path, so the proxy applies there too.
+#[cfg(feature = "http2")]
+#[tokio::test]
+async fn the_http2_handshake_also_goes_through_the_proxy() {
+    use hyper::server::conn::http2;
+    use hyper_util::rt::TokioExecutor;
+    use yawc::HttpVersion;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = http2::Builder::new(TokioExecutor::new())
+                    .enable_connect_protocol()
+                    .serve_connection(TokioIo::new(stream), service_fn(handle))
+                    .await;
+            });
+        }
+    });
+
+    let (proxy, mut requested) = MockProxy::default().spawn().await;
+
+    let mut ws = WebSocket::connect(format!("ws://{echo}/chat").parse().unwrap())
+        .http_version(HttpVersion::Http2)
+        .with_proxy(Proxy::socks5(format!("socks5h://{proxy}").parse().unwrap()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(requested.recv().await.unwrap(), Requested::Addr(echo));
+
+    ws.send(Frame::text("over h2 and socks5")).await.unwrap();
+    assert_eq!(
+        ws.next().await.unwrap().payload().as_ref(),
+        b"over h2 and socks5"
+    );
+}
