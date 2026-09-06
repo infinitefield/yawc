@@ -248,6 +248,11 @@ pub enum WebSocketError {
     #[cfg(not(target_arch = "wasm32"))]
     CompressionNotSupported,
 
+    /// The SOCKS5 proxy refused or could not complete the connection.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(transparent)]
+    Socks5(#[from] Socks5Error),
+
     /// URL parsing error.
     #[error(transparent)]
     UrlParseError(#[from] url::ParseError),
