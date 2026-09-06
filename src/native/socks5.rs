@@ -20,6 +20,15 @@ use url::{Host, Url};
 
 use crate::Result;
 
+/// The protocol version this module speaks.
+const VERSION: u8 = 5;
+
+/// `CONNECT`, the only command a WebSocket client needs.
+const CMD_CONNECT: u8 = 1;
+
+/// The username/password sub-negotiation is versioned separately (RFC 1929).
+const AUTH_VERSION: u8 = 1;
+
 /// The port a SOCKS5 proxy is assumed to listen on when the URL does not say.
 const DEFAULT_PORT: u16 = 1080;
 
@@ -27,6 +36,57 @@ const DEFAULT_PORT: u16 = 1080;
 /// request gives the hostname one too.
 const MAX_CREDENTIAL_LEN: usize = 255;
 const MAX_HOSTNAME_LEN: usize = 255;
+
+/// An authentication method, as offered in the greeting and picked by the proxy.
+///
+/// Only the two this client can actually run are named; anything else the proxy answers
+/// with is reported as unsupported rather than mapped to a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Method {
+    /// No authentication.
+    None = 0x00,
+    /// Username and password, as defined by RFC 1929.
+    UserPass = 0x02,
+    /// The proxy's answer when it accepts none of the offered methods.
+    Unacceptable = 0xFF,
+}
+
+impl Method {
+    /// Reads back a method the proxy selected, if it is one this client offered.
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0x00 => Some(Self::None),
+            0x02 => Some(Self::UserPass),
+            0xFF => Some(Self::Unacceptable),
+            _ => None,
+        }
+    }
+}
+
+/// The address types a request and a reply can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum AddressType {
+    /// Four bytes of IPv4 address.
+    Ipv4 = 1,
+    /// A length byte followed by that many bytes of hostname.
+    Domain = 3,
+    /// Sixteen bytes of IPv6 address.
+    Ipv6 = 4,
+}
+
+impl AddressType {
+    /// Reads back an address type, if it is one the protocol defines.
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Ipv4),
+            3 => Some(Self::Domain),
+            4 => Some(Self::Ipv6),
+            _ => None,
+        }
+    }
+}
 
 /// A SOCKS5 proxy to dial through.
 ///
@@ -133,23 +193,6 @@ fn decode(value: &str) -> Result<String> {
         .map_err(|_| Socks5Error::InvalidCredentials.into())
 }
 
-/// The protocol version this module speaks.
-const VERSION: u8 = 5;
-
-/// `CONNECT`, the only command a WebSocket client needs.
-const CMD_CONNECT: u8 = 1;
-
-const METHOD_NONE: u8 = 0x00;
-const METHOD_USERPASS: u8 = 0x02;
-const METHOD_UNACCEPTABLE: u8 = 0xFF;
-
-/// The username/password sub-negotiation is versioned separately (RFC 1929).
-const AUTH_VERSION: u8 = 1;
-
-const ATYP_IPV4: u8 = 1;
-const ATYP_DOMAIN: u8 = 3;
-const ATYP_IPV6: u8 = 4;
-
 /// Where the proxy is asked to connect to.
 ///
 /// A hostname is what `socks5h://` sends, leaving resolution to the proxy. An address is
@@ -188,8 +231,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let greeting: &[u8] = match proxy.auth {
-        Some(_) => &[VERSION, 2, METHOD_NONE, METHOD_USERPASS],
-        None => &[VERSION, 1, METHOD_NONE],
+        Some(_) => &[VERSION, 2, Method::None as u8, Method::UserPass as u8],
+        None => &[VERSION, 1, Method::None as u8],
     };
     stream.write_all(greeting).await?;
     stream.flush().await?;
@@ -201,11 +244,13 @@ where
         return Err(Socks5Error::UnsupportedVersion(chosen[0]).into());
     }
 
-    match (chosen[1], proxy.auth.as_ref()) {
-        (METHOD_NONE, _) => Ok(()),
-        (METHOD_USERPASS, Some(auth)) => authenticate(stream, auth).await,
-        (METHOD_UNACCEPTABLE, _) => Err(Socks5Error::NoAcceptableAuth.into()),
-        (method, _) => Err(Socks5Error::UnsupportedMethod(method).into()),
+    match (Method::from_code(chosen[1]), proxy.auth.as_ref()) {
+        (Some(Method::None), _) => Ok(()),
+        (Some(Method::UserPass), Some(auth)) => authenticate(stream, auth).await,
+        (Some(Method::Unacceptable), _) => Err(Socks5Error::NoAcceptableAuth.into()),
+        // Either a method that was never offered, or username/password without any
+        // credentials to send.
+        _ => Err(Socks5Error::UnsupportedMethod(chosen[1]).into()),
     }
 }
 
@@ -249,18 +294,18 @@ where
 
     match target {
         Target::Domain { host, port } => {
-            request.push(ATYP_DOMAIN);
+            request.push(AddressType::Domain as u8);
             request.push(host.len() as u8);
             request.extend_from_slice(host.as_bytes());
             request.extend_from_slice(&port.to_be_bytes());
         }
         Target::Addr(SocketAddr::V4(addr)) => {
-            request.push(ATYP_IPV4);
+            request.push(AddressType::Ipv4 as u8);
             request.extend_from_slice(&addr.ip().octets());
             request.extend_from_slice(&addr.port().to_be_bytes());
         }
         Target::Addr(SocketAddr::V6(addr)) => {
-            request.push(ATYP_IPV6);
+            request.push(AddressType::Ipv6 as u8);
             request.extend_from_slice(&addr.ip().octets());
             request.extend_from_slice(&addr.port().to_be_bytes());
         }
@@ -288,15 +333,15 @@ where
         return Err(Socks5Error::Rejected(ReplyCode::from(head[1])).into());
     }
 
-    let address_len = match head[3] {
-        ATYP_IPV4 => 4,
-        ATYP_IPV6 => 16,
-        ATYP_DOMAIN => {
+    let address_len = match AddressType::from_code(head[3]) {
+        Some(AddressType::Ipv4) => 4,
+        Some(AddressType::Ipv6) => 16,
+        Some(AddressType::Domain) => {
             let mut len = [0; 1];
             stream.read_exact(&mut len).await?;
             usize::from(len[0])
         }
-        atyp => return Err(Socks5Error::InvalidAddressType(atyp).into()),
+        None => return Err(Socks5Error::InvalidAddressType(head[3]).into()),
     };
 
     // The bound address and port are of no use to a client that only wanted a tunnel, but

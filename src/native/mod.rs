@@ -180,6 +180,9 @@ pub type HttpWebSocket = WebSocket<HttpStream>;
 #[cfg(feature = "axum")]
 pub use upgrade::IncomingUpgrade;
 
+/// The only ALPN protocol the RFC 6455 handshake can run over.
+const HTTP1_ALPN: &[&[u8]] = &[b"http/1.1"];
+
 /// The maximum allowed payload size for reading, set to 1 MiB.
 ///
 /// Frames with a payload size larger than this limit will be rejected to ensure memory safety
@@ -1540,9 +1543,6 @@ fn alpn_for(version: HttpVersion) -> &'static [&'static [u8]] {
         HttpVersion::Http2 => &[b"h2"],
     }
 }
-
-/// The only ALPN protocol the RFC 6455 handshake can run over.
-const HTTP1_ALPN: &[&[u8]] = &[b"http/1.1"];
 
 /// Creates a TLS connector offering the given ALPN protocols.
 fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
