@@ -42,6 +42,27 @@
 //! }
 //! ```
 //!
+//! # SOCKS5 Proxy
+//!
+//! A client connection can be dialled through a SOCKS5 proxy (RFC 1928) by handing the
+//! builder a [`Proxy`]:
+//!
+//! ```no_run
+//! use yawc::{Proxy, WebSocket};
+//!
+//! # async fn example() -> yawc::Result<()> {
+//! let ws = WebSocket::connect("wss://echo.websocket.org".parse()?)
+//!     .with_proxy(Proxy::socks5("socks5h://user:pass@127.0.0.1:1080".parse()?)?)
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! `socks5h://` leaves the target hostname for the proxy to resolve, `socks5://` resolves
+//! it locally, and credentials in the URL turn on RFC 1929 username/password
+//! authentication. TLS runs end to end through the tunnel, so the proxy sees only
+//! ciphertext on a `wss://` connection.
+//!
 //! # Protocol Handling
 //!
 //! yawc automatically handles WebSocket control frames:
