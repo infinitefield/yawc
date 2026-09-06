@@ -161,7 +161,7 @@ pub use builder::HttpVersion;
 pub use builder::{HttpRequest, HttpRequestBuilder, WebSocketBuilder};
 pub use frame::{Frame, OpCode};
 pub use options::{CompressionLevel, DeflateOptions, Fragmentation, Options};
-pub use socks5::{Proxy, Socks5Error};
+pub use socks5::{Proxy, ReplyCode, Socks5Error};
 pub use split::{ReadHalf, WriteHalf};
 pub use upgrade::UpgradeFut;
 
