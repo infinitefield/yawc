@@ -172,6 +172,7 @@ sha1 = "0.10"
 
 # Utilities
 nom = "8"
+percent-encoding = "2"
 pin-project = "1"
 log = "0.4"
 
