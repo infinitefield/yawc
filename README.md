@@ -46,6 +46,7 @@ yawc stands apart as the **most flexible and feature-complete WebSocket library*
 - **Autobahn Test Suite**: Passes all test cases for both client and server modes
 - **WebAssembly Support**: Works seamlessly in WASM environments for browser-based applications (both text and binary modes supported)
 - **HTTP/2 (RFC 8441)**: Optional extended CONNECT handshake for client and server, behind the `http2` feature
+- **SOCKS5 Proxy**: Client connections can be dialled through a SOCKS5 proxy (RFC 1928), with username/password authentication
 
 ## About compression
 
@@ -144,6 +145,28 @@ yawc = { version = "0.3" }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 ```
+
+### Connecting Through a SOCKS5 Proxy
+
+```rust
+use yawc::{Proxy, Result, WebSocket};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // socks5h:// leaves the hostname for the proxy to resolve; socks5:// resolves it
+    // locally and sends an address. Credentials are optional.
+    let proxy = Proxy::socks5("socks5h://user:pass@127.0.0.1:1080".parse()?)?;
+
+    let ws = WebSocket::connect("wss://echo.websocket.org".parse()?)
+        .with_proxy(proxy)
+        .await?;
+
+    Ok(())
+}
+```
+
+TLS runs end to end through the tunnel, so a `wss://` connection is negotiated with the
+target and the proxy only ever sees ciphertext.
 
 ### Server Example
 

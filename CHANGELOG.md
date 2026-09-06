@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### SOCKS5 proxy support (RFC 1928)
+
+- **`WebSocket::connect(url).with_proxy(proxy)`**: Dials a SOCKS5 proxy and asks it to
+  tunnel to the WebSocket host. Everything above the tunnel is unchanged, so a `wss://`
+  connection still negotiates TLS with the target and the proxy sees only ciphertext.
+  Works with the HTTP/1.1 and the HTTP/2 handshake alike.
+- **`Proxy::socks5(url)`**: Builds the proxy from a URL. `socks5h://` sends the target
+  hostname for the proxy to resolve, `socks5://` resolves it locally and sends an
+  address, and `user:pass@` in the URL turns on RFC 1929 username/password
+  authentication. A URL without a port uses 1080.
+- **`WebSocketError::Socks5`**: A refusal from the proxy arrives as a typed
+  `Socks5Error`, with the RFC 1928 reply code in `ReplyCode`, rather than as an opaque
+  I/O error.
+- No new feature flag and no new runtime dependency: the handshake is part of the native
+  client.
+
 #### WebSockets over HTTP/2 (RFC 8441)
 
 - **New `http2` feature**: Carries WebSocket connections over a single HTTP/2 stream
