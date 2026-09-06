@@ -7,7 +7,10 @@
 // The wasm build compiles integration tests too, and none of this exists there.
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::{convert::Infallible, net::SocketAddr};
+use std::{
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+};
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -16,7 +19,7 @@ use hyper::{body::Incoming, server::conn::http1, service::service_fn, Request, R
 use hyper_util::rt::TokioIo;
 use tokio::{
     io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{lookup_host, TcpListener, TcpStream},
     sync::mpsc,
 };
 use yawc::{
@@ -116,6 +119,13 @@ impl MockProxy {
                     port: u16::from_be_bytes(port),
                 }
             }
+            4 => {
+                let mut ip = [0; 16];
+                client.read_exact(&mut ip).await.unwrap();
+                let mut port = [0; 2];
+                client.read_exact(&mut port).await.unwrap();
+                Requested::Addr(SocketAddr::from((ip, u16::from_be_bytes(port))))
+            }
             atyp => panic!("unexpected address type {atyp}"),
         };
 
@@ -149,9 +159,27 @@ async fn read_prefixed(stream: &mut TcpStream) -> String {
     String::from_utf8(value).unwrap()
 }
 
-/// Starts an HTTP/1.1 WebSocket echo server and returns the address it listens on.
+/// Starts an HTTP/1.1 WebSocket echo server on loopback.
 async fn spawn_echo_server() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    spawn_echo_server_at("127.0.0.1".parse().unwrap()).await
+}
+
+/// The address `localhost` resolves to first.
+///
+/// A client resolving the target itself can only send the proxy one address, so this is
+/// the one it picks, and on a dual-stack host it is not always IPv4.
+async fn first_localhost_address() -> IpAddr {
+    lookup_host(("localhost", 0))
+        .await
+        .unwrap()
+        .next()
+        .unwrap()
+        .ip()
+}
+
+/// Starts an HTTP/1.1 WebSocket echo server on `ip` and returns the address it listens on.
+async fn spawn_echo_server_at(ip: IpAddr) -> SocketAddr {
+    let listener = TcpListener::bind(SocketAddr::new(ip, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
@@ -225,7 +253,9 @@ async fn socks5h_leaves_the_hostname_for_the_proxy_to_resolve() {
 
 #[tokio::test]
 async fn socks5_resolves_the_hostname_before_asking_the_proxy() {
-    let echo = spawn_echo_server().await;
+    // The echo server listens on whichever loopback address the client will resolve
+    // `localhost` to, since the request can only carry one of them.
+    let echo = spawn_echo_server_at(first_localhost_address().await).await;
     let (proxy, mut requested) = MockProxy::default().spawn().await;
 
     let url = format!("ws://localhost:{}/chat", echo.port());
@@ -234,13 +264,8 @@ async fn socks5_resolves_the_hostname_before_asking_the_proxy() {
         .await
         .unwrap();
 
-    // Which loopback address `localhost` resolves to is the host's business; that it was
-    // resolved here rather than passed on as a name is the point.
-    let Requested::Addr(addr) = requested.recv().await.unwrap() else {
-        panic!("the hostname was left for the proxy to resolve")
-    };
-    assert!(addr.ip().is_loopback(), "{addr}");
-    assert_eq!(addr.port(), echo.port());
+    // That the hostname was resolved here rather than passed on as a name is the point.
+    assert_eq!(requested.recv().await.unwrap(), Requested::Addr(echo));
 }
 
 #[tokio::test]
