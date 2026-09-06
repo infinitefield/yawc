@@ -6,13 +6,16 @@
 //! proxy sees only ciphertext for a `wss://` URL.
 
 use std::{
-    fmt,
+    fmt, io,
     net::{IpAddr, SocketAddr},
 };
 
 use percent_encoding::percent_decode_str;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{lookup_host, TcpStream},
+};
 use url::{Host, Url};
 
 use crate::Result;
@@ -355,6 +358,48 @@ impl fmt::Display for ReplyCode {
             Self::CommandNotSupported => f.write_str("command not supported"),
             Self::AddressTypeNotSupported => f.write_str("address type not supported"),
             Self::Unassigned(code) => write!(f, "unassigned reply code {code}"),
+        }
+    }
+}
+
+impl Proxy {
+    /// Connects to the proxy itself.
+    pub(crate) async fn dial(&self) -> Result<TcpStream> {
+        let stream = match &self.host {
+            Host::Domain(domain) => TcpStream::connect((domain.as_str(), self.port)).await?,
+            Host::Ipv4(ip) => TcpStream::connect(SocketAddr::from((*ip, self.port))).await?,
+            Host::Ipv6(ip) => TcpStream::connect(SocketAddr::from((*ip, self.port))).await?,
+        };
+
+        Ok(stream)
+    }
+
+    /// Works out what the proxy should be asked to connect to.
+    ///
+    /// An address the caller pinned is used as it stands. Otherwise a hostname is either
+    /// passed on for the proxy to resolve, which is what `socks5h://` means, or resolved
+    /// here first.
+    pub(crate) async fn target(&self, url: &Url, pinned: Option<SocketAddr>) -> Result<Target> {
+        if let Some(addr) = pinned {
+            return Ok(Target::Addr(addr));
+        }
+
+        let port = url.port_or_known_default().expect("port");
+
+        match url.host().expect("hostname") {
+            Host::Ipv4(ip) => Ok(Target::Addr(SocketAddr::from((ip, port)))),
+            Host::Ipv6(ip) => Ok(Target::Addr(SocketAddr::from((ip, port)))),
+            Host::Domain(domain) if self.remote_dns => Ok(Target::Domain {
+                host: domain.to_string(),
+                port,
+            }),
+            Host::Domain(domain) => lookup_host((domain, port))
+                .await?
+                .next()
+                .map(Target::Addr)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "no address for host").into()
+                }),
         }
     }
 }

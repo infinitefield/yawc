@@ -11,7 +11,7 @@ use futures::{future::BoxFuture, FutureExt};
 use tokio_rustls::TlsConnector;
 use url::Url;
 
-use super::{Options, WebSocket};
+use super::{Options, Proxy, WebSocket};
 use crate::{stream::MaybeTlsStream, Result};
 use tokio::net::TcpStream;
 
@@ -81,10 +81,11 @@ pub struct WebSocketBuilder<S = MaybeTlsStream<TcpStream>> {
 ///
 /// Holds all the configuration options needed to establish a WebSocket connection,
 /// including the target URL, TLS connector, connection options, and HTTP request builder.
-pub(super) struct WsBuilderOpts {
+pub(crate) struct WsBuilderOpts {
     pub(super) url: Url,
     pub(super) tcp_address: Option<SocketAddr>,
     pub(super) connector: Option<TlsConnector>,
+    pub(super) proxy: Option<Proxy>,
     pub(super) establish_options: Option<Options>,
     pub(super) http_builder: Option<HttpRequestBuilder>,
     #[cfg(feature = "http2")]
@@ -105,6 +106,7 @@ impl<S> WebSocketBuilder<S> {
                 url,
                 tcp_address: None,
                 connector: None,
+                proxy: None,
                 establish_options: None,
                 http_builder: None,
                 #[cfg(feature = "http2")]
@@ -150,6 +152,39 @@ impl<S> WebSocketBuilder<S> {
             unreachable!()
         };
         opts.tcp_address = Some(address);
+        self
+    }
+
+    /// Dials through a SOCKS5 proxy instead of connecting to the host directly.
+    ///
+    /// The proxy is asked to open a tunnel to the URL's host, and everything above that
+    /// runs through the tunnel unchanged, so a `wss://` connection still negotiates TLS
+    /// end to end and the proxy sees only ciphertext.
+    ///
+    /// # Parameters
+    /// - `proxy`: The proxy to dial through, from [`Proxy::socks5`]
+    ///
+    /// # Returns
+    /// The builder for method chaining
+    ///
+    /// # Example
+    /// ```no_run
+    /// use yawc::{Proxy, WebSocket};
+    ///
+    /// async fn connect() -> yawc::Result<()> {
+    ///     let ws = WebSocket::connect("wss://example.com/socket".parse()?)
+    ///         .with_proxy(Proxy::socks5("socks5h://127.0.0.1:1080".parse()?)?)
+    ///         .await?;
+    ///
+    ///     // Use WebSocket...
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn with_proxy(mut self, proxy: Proxy) -> Self {
+        let Some(opts) = &mut self.opts else {
+            unreachable!()
+        };
+        opts.proxy = Some(proxy);
         self
     }
 
@@ -321,14 +356,7 @@ impl Future for WebSocketBuilder<super::HttpStream> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if let Some(opts) = this.opts.take() {
-            let future = super::connect_versioned(
-                opts.url,
-                opts.tcp_address,
-                opts.connector,
-                opts.establish_options.unwrap_or_default(),
-                opts.http_builder.unwrap_or_else(HttpRequest::builder),
-                opts.version,
-            );
+            let future = super::connect_versioned(opts);
             this.future = Some(Box::pin(future));
         }
 
@@ -355,13 +383,7 @@ impl Future for WebSocketBuilder {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if let Some(opts) = this.opts.take() {
-            let future = WebSocket::connect_priv(
-                opts.url,
-                opts.tcp_address,
-                opts.connector,
-                opts.establish_options.unwrap_or_default(),
-                opts.http_builder.unwrap_or_else(HttpRequest::builder),
-            );
+            let future = WebSocket::connect_priv(opts);
             this.future = Some(Box::pin(future));
         }
 

@@ -138,7 +138,6 @@ use std::{
     collections::VecDeque,
     future::poll_fn,
     io,
-    net::SocketAddr,
     pin::{pin, Pin},
     str::FromStr,
     sync::Arc,
@@ -147,6 +146,7 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use builder::WsBuilderOpts;
 use codec::Codec;
 use compression::{CompressionConfig, Compressor, Decompressor, WebSocketExtensions};
 use futures::{task::AtomicWaker, SinkExt};
@@ -727,37 +727,16 @@ impl WebSocket<MaybeTlsStream<TcpStream>> {
         WebSocketBuilder::new(url)
     }
 
-    pub(crate) async fn connect_priv(
-        url: Url,
-        tcp_address: Option<SocketAddr>,
-        connector: Option<TlsConnector>,
-        options: Options,
-        builder: HttpRequestBuilder,
-    ) -> Result<TcpWebSocket> {
-        let host = url.host().expect("hostname").to_string();
+    pub(crate) async fn connect_priv(mut opts: WsBuilderOpts) -> Result<TcpWebSocket> {
+        let options = opts.establish_options.take().unwrap_or_default();
+        let builder = opts
+            .http_builder
+            .take()
+            .unwrap_or_else(HttpRequest::builder);
 
-        let tcp_stream = if let Some(tcp_address) = tcp_address {
-            TcpStream::connect(tcp_address).await?
-        } else {
-            let port = url.port_or_known_default().expect("port");
-            TcpStream::connect(format!("{host}:{port}")).await?
-        };
+        let stream = connect_stream(&opts, &options, HTTP1_ALPN).await?;
 
-        let _ = tcp_stream.set_nodelay(options.no_delay);
-
-        let stream = match url.scheme() {
-            "ws" => MaybeTlsStream::Plain(tcp_stream),
-            "wss" => {
-                let connector = connector.unwrap_or_else(tls_connector);
-                let domain = ServerName::try_from(host)
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
-
-                MaybeTlsStream::Tls(connector.connect(domain, tcp_stream).await?)
-            }
-            _ => return Err(WebSocketError::InvalidHttpScheme),
-        };
-
-        WebSocket::handshake_with_request(url, stream, options, builder).await
+        WebSocket::handshake_with_request(opts.url, stream, options, builder).await
     }
 }
 
@@ -1450,46 +1429,82 @@ fn generate_key() -> String {
 /// because an HTTP/2 WebSocket is one stream of a multiplexed connection and there is no
 /// socket to hand back. Both versions therefore produce the same type.
 #[cfg(feature = "http2")]
-async fn connect_versioned(
-    url: Url,
-    tcp_address: Option<SocketAddr>,
-    connector: Option<TlsConnector>,
-    options: Options,
-    builder: HttpRequestBuilder,
-    version: HttpVersion,
-) -> Result<HttpWebSocket> {
-    let host = url.host().expect("hostname").to_string();
-
-    let tcp_stream = if let Some(tcp_address) = tcp_address {
-        TcpStream::connect(tcp_address).await?
-    } else {
-        let port = url.port_or_known_default().expect("port");
-        TcpStream::connect(format!("{host}:{port}")).await?
-    };
-
-    let _ = tcp_stream.set_nodelay(options.no_delay);
+async fn connect_versioned(mut opts: WsBuilderOpts) -> Result<HttpWebSocket> {
+    let options = opts.establish_options.take().unwrap_or_default();
+    let builder = opts
+        .http_builder
+        .take()
+        .unwrap_or_else(HttpRequest::builder);
+    let version = opts.version;
 
     // Over plaintext there is no ALPN to negotiate with, so HTTP/2 means prior knowledge.
-    let stream = match url.scheme() {
-        "ws" => MaybeTlsStream::Plain(tcp_stream),
-        "wss" => {
-            let connector = connector.unwrap_or_else(|| tls_connector_with_alpn(alpn_for(version)));
-            let domain = ServerName::try_from(host)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
-
-            MaybeTlsStream::Tls(connector.connect(domain, tcp_stream).await?)
-        }
-        _ => return Err(WebSocketError::InvalidHttpScheme),
-    };
+    let stream = connect_stream(&opts, &options, alpn_for(version)).await?;
 
     // Whatever the caller asked for is what runs. There is nothing to negotiate: a peer
     // that speaks h2 usually still wants WebSockets over HTTP/1.1, so picking HTTP/2 on
     // the strength of ALPN alone would be wrong more often than right. That is why the
     // HTTP/2 handshake is opt-in and why it fails here rather than quietly downgrading.
     match version {
-        HttpVersion::Http2 => http2::handshake(url, stream, options, builder).await,
-        HttpVersion::Http1 => handshake_http1_upgraded(url, stream, options, builder).await,
+        HttpVersion::Http2 => http2::handshake(opts.url, stream, options, builder).await,
+        HttpVersion::Http1 => handshake_http1_upgraded(opts.url, stream, options, builder).await,
     }
+}
+
+#[cfg_attr(not(feature = "http2"), allow(dead_code))]
+/// Opens the transport the handshake runs over.
+///
+/// This is the whole of what the two client entry points share: a TCP connection, dialled
+/// through a SOCKS5 proxy when one is configured, wrapped in TLS for a `wss://` URL. The
+/// tunnel is transparent by then, so TLS is negotiated with the target either way and the
+/// proxy never sees inside it.
+async fn connect_stream(
+    opts: &WsBuilderOpts,
+    options: &Options,
+    alpn: &[&[u8]],
+) -> Result<MaybeTlsStream<TcpStream>> {
+    let tcp_stream = dial(opts).await?;
+    let _ = tcp_stream.set_nodelay(options.no_delay);
+
+    match opts.url.scheme() {
+        "ws" => Ok(MaybeTlsStream::Plain(tcp_stream)),
+        "wss" => {
+            let host = opts.url.host().expect("hostname").to_string();
+            let connector = opts
+                .connector
+                .clone()
+                .unwrap_or_else(|| tls_connector_with_alpn(alpn));
+            let domain = ServerName::try_from(host)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
+
+            Ok(MaybeTlsStream::Tls(
+                connector.connect(domain, tcp_stream).await?,
+            ))
+        }
+        _ => Err(WebSocketError::InvalidHttpScheme),
+    }
+}
+
+/// Opens the TCP connection, either straight to the target or to a SOCKS5 proxy that is
+/// then asked to tunnel to it.
+async fn dial(opts: &WsBuilderOpts) -> Result<TcpStream> {
+    let Some(proxy) = opts.proxy.as_ref() else {
+        let stream = match opts.tcp_address {
+            Some(address) => TcpStream::connect(address).await?,
+            None => {
+                let host = opts.url.host().expect("hostname").to_string();
+                let port = opts.url.port_or_known_default().expect("port");
+                TcpStream::connect(format!("{host}:{port}")).await?
+            }
+        };
+
+        return Ok(stream);
+    };
+
+    let target = proxy.target(&opts.url, opts.tcp_address).await?;
+    let mut stream = proxy.dial().await?;
+    socks5::connect(&mut stream, proxy, &target).await?;
+
+    Ok(stream)
 }
 
 /// Runs the HTTP/1.1 handshake but keeps hyper's upgraded stream instead of downcasting.
@@ -1519,20 +1534,18 @@ where
 
 /// Returns the ALPN protocols to offer for a given HTTP version preference.
 #[cfg(feature = "http2")]
-fn alpn_for(version: HttpVersion) -> Vec<Vec<u8>> {
+fn alpn_for(version: HttpVersion) -> &'static [&'static [u8]] {
     match version {
-        HttpVersion::Http1 => vec![b"http/1.1".to_vec()],
-        HttpVersion::Http2 => vec![b"h2".to_vec()],
+        HttpVersion::Http1 => HTTP1_ALPN,
+        HttpVersion::Http2 => &[b"h2"],
     }
 }
 
-/// Creates a TLS connector with root certificates for secure WebSocket connections.
-fn tls_connector() -> TlsConnector {
-    tls_connector_with_alpn(vec![b"http/1.1".to_vec()])
-}
+/// The only ALPN protocol the RFC 6455 handshake can run over.
+const HTTP1_ALPN: &[&[u8]] = &[b"http/1.1"];
 
 /// Creates a TLS connector offering the given ALPN protocols.
-fn tls_connector_with_alpn(alpn_protocols: Vec<Vec<u8>>) -> TlsConnector {
+fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
     let mut root_cert_store = rustls::RootCertStore::empty();
     root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
         subject: ta.subject.clone(),
@@ -1569,7 +1582,7 @@ Either:
         .expect("versions")
         .with_root_certificates(root_cert_store)
         .with_no_client_auth();
-    config.alpn_protocols = alpn_protocols;
+    config.alpn_protocols = alpn_protocols.iter().map(|proto| proto.to_vec()).collect();
 
     TlsConnector::from(Arc::new(config))
 }
