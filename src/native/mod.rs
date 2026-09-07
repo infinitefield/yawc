@@ -1503,11 +1503,7 @@ async fn dial(opts: &WsBuilderOpts) -> Result<TcpStream> {
         return Ok(stream);
     };
 
-    let target = proxy.target(&opts.url, opts.tcp_address).await?;
-    let mut stream = proxy.dial().await?;
-    socks5::connect(&mut stream, proxy, &target).await?;
-
-    Ok(stream)
+    proxy.connect(&opts.url, opts.tcp_address).await
 }
 
 /// Runs the HTTP/1.1 handshake but keeps hyper's upgraded stream instead of downcasting.

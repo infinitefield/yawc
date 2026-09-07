@@ -181,6 +181,31 @@ impl Proxy {
             remote_dns,
         })
     }
+
+    /// Opens a TCP tunnel to a WebSocket URL through this proxy.
+    ///
+    /// This performs SOCKS5 negotiation and authentication, but leaves TLS and the
+    /// WebSocket handshake to the caller. Use it when inspecting the HTTP response
+    /// or following redirects requires a custom handshake. The optional address
+    /// overrides the tunnel destination, just like `with_tcp_address` on the
+    /// WebSocket builder. Without it, the proxy's DNS mode determines where the
+    /// URL's hostname is resolved.
+    ///
+    /// Apply a timeout around this future to bound DNS and proxy negotiation.
+    pub async fn connect(&self, url: &Url, address: Option<SocketAddr>) -> Result<TcpStream> {
+        if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") {
+            return Err(crate::WebSocketError::InvalidHttpScheme);
+        }
+        if url.host().is_none() {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "target URL has no host").into(),
+            );
+        }
+        let target = self.target(url, address).await?;
+        let mut stream = self.dial().await?;
+        connect(&mut stream, self, &target).await?;
+        Ok(stream)
+    }
 }
 
 /// Percent-decodes one half of a URL's userinfo.
