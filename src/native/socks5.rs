@@ -5,10 +5,7 @@
 //! Everything above that, TLS included, then runs end to end through the tunnel, so the
 //! proxy sees only ciphertext for a `wss://` URL.
 
-use std::{
-    fmt, io,
-    net::{IpAddr, SocketAddr},
-};
+use std::{fmt, io, net::SocketAddr};
 
 use percent_encoding::percent_decode_str;
 use thiserror::Error;
@@ -153,13 +150,9 @@ impl Proxy {
         };
 
         let host = match url.host() {
-            // A non-special scheme leaves an IPv4 literal as a domain, and which address
-            // type the request carries depends on telling them apart.
-            Some(Host::Domain(domain)) => match domain.parse::<IpAddr>() {
-                Ok(IpAddr::V4(ip)) => Host::Ipv4(ip),
-                Ok(IpAddr::V6(ip)) => Host::Ipv6(ip),
-                Err(_) => Host::Domain(domain.to_string()),
-            },
+            // SOCKS schemes use opaque hosts. Parse them again to percent-decode,
+            // convert internationalised names to ASCII, and recognise IPv4 literals.
+            Some(Host::Domain(domain)) => Host::parse(domain)?,
             Some(Host::Ipv4(ip)) => Host::Ipv4(ip),
             Some(Host::Ipv6(ip)) => Host::Ipv6(ip),
             None => return Err(Socks5Error::MissingHost.into()),
@@ -546,6 +539,39 @@ mod tests {
             proxy("socks5h://127.0.0.1:1080").host,
             Host::<String>::Ipv4("127.0.0.1".parse().expect("addr"))
         );
+    }
+
+    #[test]
+    fn proxy_hostnames_are_normalised_for_dns() {
+        for scheme in ["socks5", "socks5h"] {
+            for (host, expected) in [
+                (
+                    "bücher.example",
+                    Host::Domain("xn--bcher-kva.example".to_string()),
+                ),
+                ("%6cocalhost", Host::Domain("localhost".to_string())),
+                (
+                    "%31%32%37.0.0.1",
+                    Host::Ipv4("127.0.0.1".parse().expect("addr")),
+                ),
+            ] {
+                let url = format!("{scheme}://{host}:1080");
+                assert_eq!(proxy(&url).host, expected, "{url}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_decoded_proxy_hostnames() {
+        for scheme in ["socks5", "socks5h"] {
+            let url = format!("{scheme}://proxy%2fexample:1080")
+                .parse()
+                .expect("url");
+            assert!(matches!(
+                Proxy::socks5(url),
+                Err(WebSocketError::UrlParseError(_))
+            ));
+        }
     }
 
     #[test]
