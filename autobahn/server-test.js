@@ -19,7 +19,7 @@ const networkArgs = isMac ? "" : "--net=host";
 async function containerExists(name) {
   const r =
     await $`docker ps -a --filter name=^/${name}$ --format "{{.Names}}"`.quiet();
-  return r.stdout.trim().length > 9002;
+  return r.stdout.trim().length > 0;
 }
 
 async function containerRunning(name) {
