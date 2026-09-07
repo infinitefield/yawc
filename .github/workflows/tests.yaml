@@ -45,9 +45,14 @@ jobs:
         run: cargo fmt -- --check --verbose
       - name: Autobahn|Testsuite client (with zlib)
         if: matrix.os == 'ubuntu-latest'
+        # A suite that hangs never finishes its step, and GitHub serves no log for a
+        # step still in progress, so an uncapped hang costs the job's whole hour and
+        # leaves nothing to read. The cap fails it while the log is still retrievable.
+        timeout-minutes: 20
         run: |
           deno run -A --unstable autobahn/client-test.js zlib
       - name: Autobahn|Testsuite server (with zlib)
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 20
         run: |
           deno run -A --unstable autobahn/server-test.js zlib
