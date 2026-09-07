@@ -53,6 +53,8 @@ jobs:
           deno run -A --unstable autobahn/client-test.js zlib
       - name: Autobahn|Testsuite server (with zlib)
         if: matrix.os == 'ubuntu-latest'
-        timeout-minutes: 20
+        # The full server suite can still be progressing after 20 minutes on
+        # slower runners. Allow headroom while keeping hangs bounded.
+        timeout-minutes: 40
         run: |
           deno run -A --unstable autobahn/server-test.js zlib
