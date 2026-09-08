@@ -749,6 +749,16 @@ async fn remote_close_restores_terminal_while_readline_is_blocked() {
         .unwrap()
         .unwrap()
         .success());
-    assert_eq!(tcgetattr(&pty.slave).unwrap(), original);
+    let restored = tcgetattr(&pty.slave).unwrap();
+    // macOS sets PENDIN when restoring ICANON so queued input can be
+    // reprocessed. Ignore that kernel-managed flag, but compare every setting.
+    #[cfg(target_os = "macos")]
+    let [restored, original] = [restored, original].map(|mode| {
+        // Normalize the underlying struct as nix also compares its cached copy.
+        let mut mode: nix::libc::termios = mode.into();
+        mode.c_lflag &= !nix::libc::PENDIN;
+        nix::sys::termios::Termios::from(mode)
+    });
+    assert_eq!(restored, original);
     peer.await.unwrap();
 }
