@@ -124,13 +124,15 @@ mod upgrade;
 
 use crate::{codec, compression, frame, streaming::Streaming, Result, WebSocketError};
 
+#[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
+use tokio_rustls::TlsConnector;
 use {
     bytes::Bytes,
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
     tokio::net::TcpStream,
-    tokio_rustls::{rustls::pki_types::ServerName, TlsConnector},
+    tokio_rustls::rustls::pki_types::ServerName,
 };
 
 use std::{
@@ -150,6 +152,7 @@ use builder::WsBuilderOpts;
 use codec::Codec;
 use compression::{CompressionConfig, Compressor, Decompressor, WebSocketExtensions};
 use futures::{task::AtomicWaker, SinkExt};
+#[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
 use url::Url;
@@ -1472,10 +1475,22 @@ async fn connect_stream(
         "ws" => Ok(MaybeTlsStream::Plain(tcp_stream)),
         "wss" => {
             let host = opts.url.host().expect("hostname").to_string();
-            let connector = opts
-                .connector
-                .clone()
-                .unwrap_or_else(|| tls_connector_with_alpn(alpn));
+            let connector = match opts.connector.clone() {
+                Some(connector) => connector,
+                #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
+                None => tls_connector_with_alpn(alpn),
+                #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+                None => {
+                    let _ = alpn;
+                    panic!(
+                        r#"No Rustls crypto provider was enabled for yawc to connect to a `wss://` endpoint!
+
+Either:
+    - provide a `connector` in the WebSocketBuilder options
+    - enable one of the following features: `rustls-ring`, `rustls-aws-lc-rs`"#
+                    )
+                }
+            };
             let domain = ServerName::try_from(host)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
 
@@ -1541,6 +1556,7 @@ fn alpn_for(version: HttpVersion) -> &'static [&'static [u8]] {
 }
 
 /// Creates a TLS connector offering the given ALPN protocols.
+#[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
     let mut root_cert_store = rustls::RootCertStore::empty();
     root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| TrustAnchor {
@@ -1551,7 +1567,6 @@ fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
 
     let maybe_provider = rustls::crypto::CryptoProvider::get_default().cloned();
 
-    #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
     let provider = maybe_provider.unwrap_or_else(|| {
         // Use ring as default if both are enabled, user can override with custom connector
         #[cfg(all(feature = "rustls-ring", not(feature = "rustls-aws-lc-rs")))]
@@ -1563,15 +1578,6 @@ fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
         #[cfg(all(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
         return Arc::new(rustls::crypto::ring::default_provider());
     });
-
-    #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
-    let provider = maybe_provider.expect(
-        r#"No Rustls crypto provider was enabled for yawc to connect to a `wss://` endpoint!
-
-Either:
-    - provide a `connector` in the WebSocketBuilder options
-    - enable one of the following features: `rustls-ring`, `rustls-aws-lc-rs`"#,
-    );
 
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::ALL_VERSIONS)
