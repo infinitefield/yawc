@@ -2,6 +2,8 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
+use url::Url;
 use yawc::{close::CloseCode, frame::OpCode, Frame, Options, TcpWebSocket, WebSocket};
 
 async fn get_case_info(case: u32) -> String {
@@ -93,11 +95,23 @@ fn get_options_for_case_id(case_id: &str) -> Options {
 
 async fn connect(path: &str, case_id: Option<&str>) -> Result<TcpWebSocket> {
     let options = case_id.map(get_options_for_case_id).unwrap_or_default();
+    let url: Url = format!("ws://localhost:9001/{path}").parse()?;
 
-    let client = WebSocket::connect(format!("ws://localhost:9001/{path}").parse().unwrap())
-        .with_options(options)
-        .await?;
-    Ok(client)
+    for attempt in 1..=3 {
+        match WebSocket::connect(url.clone())
+            .with_options(options.clone())
+            .await
+        {
+            Ok(client) => return Ok(client),
+            Err(error) if attempt < 3 => {
+                log::warn!("Connection failed (attempt {attempt}): {error}");
+                tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    unreachable!()
 }
 
 async fn get_case_count() -> Result<u32> {
