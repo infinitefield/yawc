@@ -916,12 +916,13 @@ where
 
     let target_url = &url[url::Position::BeforePath..];
 
+    let key = generate_key();
     let mut req = builder
         .method("GET")
         .uri(target_url)
         .header(header::UPGRADE, "websocket")
         .header(header::CONNECTION, "upgrade")
-        .header(header::SEC_WEBSOCKET_KEY, generate_key())
+        .header(header::SEC_WEBSOCKET_KEY, key.as_str())
         .header(header::SEC_WEBSOCKET_VERSION, "13")
         .body(Empty::<Bytes>::new())
         .expect("request build");
@@ -942,7 +943,7 @@ where
     });
 
     let mut response = sender.send_request(req).await?;
-    let negotiated = verify(&response, options)?;
+    let negotiated = verify(&response, &key, options)?;
 
     let upgraded = hyper::upgrade::on(&mut response).await?;
 
@@ -1007,12 +1008,13 @@ impl WebSocket<HttpStream> {
             _ => {}
         }
 
+        let key = generate_key();
         let req = client
             .get(url.as_str())
             .header(reqwest::header::HOST, host_header.as_str())
             .header(reqwest::header::UPGRADE, "websocket")
             .header(reqwest::header::CONNECTION, "upgrade")
-            .header(reqwest::header::SEC_WEBSOCKET_KEY, generate_key())
+            .header(reqwest::header::SEC_WEBSOCKET_KEY, key.as_str())
             .header(reqwest::header::SEC_WEBSOCKET_VERSION, "13");
 
         let req = if let Some(compression) = options.compression.as_ref() {
@@ -1026,7 +1028,7 @@ impl WebSocket<HttpStream> {
         };
 
         let response = req.send().await?;
-        let negotiated = verify_reqwest(&response, options)?;
+        let negotiated = verify_reqwest(&response, &key, options)?;
 
         let upgraded = response.upgrade().await?;
 
@@ -1361,7 +1363,11 @@ where
 // ================ Helper functions ====================
 
 #[cfg(feature = "reqwest")]
-fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Negotiation> {
+fn verify_reqwest(
+    response: &reqwest::Response,
+    key: &str,
+    options: Options,
+) -> Result<Negotiation> {
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
         return Err(WebSocketError::InvalidStatusCode(
             response.status().as_u16(),
@@ -1388,12 +1394,19 @@ fn verify_reqwest(response: &reqwest::Response, options: Options) -> Result<Nego
         return Err(WebSocketError::InvalidConnectionHeader);
     }
 
+    verify_accept(
+        headers
+            .get(header::SEC_WEBSOCKET_ACCEPT)
+            .map(|value| value.as_bytes()),
+        key,
+    )?;
+
     let extensions = WebSocketExtensions::from_headers(headers);
 
     Negotiation::new(extensions, &options, Role::Client)
 }
 
-fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation> {
+fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<Negotiation> {
     // Detect HTTP redirects before checking for 101.
     if response.status().is_redirection() {
         let location = response
@@ -1434,9 +1447,37 @@ fn verify(response: &Response<Incoming>, options: Options) -> Result<Negotiation
         return Err(WebSocketError::InvalidConnectionHeader);
     }
 
+    verify_accept(
+        headers
+            .get(header::SEC_WEBSOCKET_ACCEPT)
+            .map(|value| value.as_bytes()),
+        key,
+    )?;
+
     let extensions = WebSocketExtensions::from_headers(headers);
 
     Negotiation::new(extensions, &options, Role::Client)
+}
+
+/// Checks the server's `Sec-WebSocket-Accept` against the key we sent.
+///
+/// RFC 6455 4.1 requires the client to verify this.
+fn verify_accept(accept: Option<&[u8]>, key: &str) -> Result<()> {
+    let expected = upgrade::sec_websocket_protocol(key.as_bytes());
+    match accept {
+        Some(value) if value == expected.as_bytes() => Ok(()),
+        Some(value) => {
+            log::error!(
+                "invalid Sec-WebSocket-Accept: expected {expected:?}, got {:?}",
+                String::from_utf8_lossy(value)
+            );
+            Err(WebSocketError::InvalidUpgradeHeader)
+        }
+        None => {
+            log::error!("missing Sec-WebSocket-Accept header");
+            Err(WebSocketError::InvalidUpgradeHeader)
+        }
+    }
 }
 
 fn generate_key() -> String {
@@ -1608,6 +1649,40 @@ fn tls_connector_with_alpn(alpn_protocols: &[&[u8]]) -> TlsConnector {
 #[cfg(test)]
 mod tests {
     use crate::close::{self, CloseCode};
+
+    /// Key/accept pair from RFC 6455 1.3.
+    const RFC_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+    const RFC_ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+    #[test]
+    fn accept_matching_the_key_is_verified() {
+        super::verify_accept(Some(RFC_ACCEPT.as_bytes()), RFC_KEY).expect("rfc vector");
+    }
+
+    #[test]
+    fn accept_is_rejected_when_wrong_or_absent() {
+        // hash of a different key: what a 101 replayed from elsewhere looks like
+        let other = super::upgrade::sec_websocket_protocol(b"AAAAAAAAAAAAAAAAAAAAAA==");
+        assert!(super::verify_accept(Some(other.as_bytes()), RFC_KEY).is_err());
+
+        // right length, wrong bytes
+        assert!(super::verify_accept(Some(&[b'x'; 28]), RFC_KEY).is_err());
+        // header omitted entirely
+        assert!(super::verify_accept(None, RFC_KEY).is_err());
+        // empty value
+        assert!(super::verify_accept(Some(b""), RFC_KEY).is_err());
+    }
+
+    #[test]
+    fn generated_keys_round_trip_through_the_accept_hash() {
+        for _ in 0..16 {
+            let key = super::generate_key();
+            let accept = super::upgrade::sec_websocket_protocol(key.as_bytes());
+            super::verify_accept(Some(accept.as_bytes()), &key).expect("round trip");
+            // and the same accept must not validate a different key
+            assert!(super::verify_accept(Some(accept.as_bytes()), RFC_KEY).is_err());
+        }
+    }
 
     use super::*;
     use futures::SinkExt;
@@ -2540,13 +2615,6 @@ mod tests {
     async fn test_unoffered_compression_fails_handshake() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        const HANDSHAKE: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\n\
-            upgrade: websocket\r\n\
-            connection: upgrade\r\n\
-            sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
-            sec-websocket-extensions: permessage-deflate\r\n\
-            \r\n";
-
         let (client_io, mut peer) = tokio::io::duplex(4096);
         tokio::spawn(async move {
             let mut request = Vec::new();
@@ -2557,7 +2625,23 @@ mod tests {
                     Ok(_) => request.push(byte[0]),
                 }
             }
-            let _ = peer.write_all(HANDSHAKE).await;
+
+            let request = String::from_utf8_lossy(&request);
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("sec-websocket-key: "))
+                .expect("client sent a key");
+            let accept = super::upgrade::sec_websocket_protocol(key.as_bytes());
+
+            let handshake = format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 upgrade: websocket\r\n\
+                 connection: upgrade\r\n\
+                 sec-websocket-accept: {accept}\r\n\
+                 sec-websocket-extensions: permessage-deflate\r\n\
+                 \r\n"
+            );
+            let _ = peer.write_all(handshake.as_bytes()).await;
             // Hold the connection open so the failure comes from the negotiation.
             std::future::pending::<()>().await;
         });
