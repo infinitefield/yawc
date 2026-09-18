@@ -965,7 +965,23 @@ where
 }
 
 impl WebSocket<HttpStream> {
-    /// Performs a WebSocket handshake when using the `reqwest` HTTP client.
+    /// Performs a WebSocket handshake over a caller-supplied `reqwest` client.
+    ///
+    /// **The client must be HTTP/1.1.** An RFC 6455 upgrade only exists there:
+    /// over HTTP/2 the `Connection` and `Upgrade` headers sent below are
+    /// forbidden (RFC 9113 8.2.2) and get dropped, so the server answers an
+    /// ordinary `GET` and the handshake fails with a puzzling
+    /// [`WebSocketError::InvalidStatusCode`] carrying `200`.
+    ///
+    /// Build the client with [`reqwest::ClientBuilder::http1_only`]. If you also
+    /// pass a preconfigured TLS config, set its ALPN to `http/1.1` as well —
+    /// `http1_only` does not override ALPN, so the connection would still
+    /// negotiate h2.
+    ///
+    /// WebSockets over HTTP/2 use RFC 8441 extended CONNECT, which this entry
+    /// point cannot perform: it needs a `Protocol` request extension that
+    /// `reqwest` does not expose. Use [`WebSocket::connect`] with
+    /// [`WebSocketBuilder::http_version`] for that.
     #[cfg(feature = "reqwest")]
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
     pub async fn reqwest(
