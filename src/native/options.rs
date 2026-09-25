@@ -78,6 +78,15 @@ pub struct Options {
     /// configured `max_payload_read` value if that is set.
     pub max_read_buffer: Option<usize>,
 
+    /// Maximum decompressed size allowed for one incoming message, in bytes.
+    ///
+    /// Compressed input can expand substantially during decompression. This limit is
+    /// enforced across all fragments of a compressed message before the message is
+    /// delivered to the application.
+    ///
+    /// Default: 100 times the resolved maximum compressed payload size.
+    pub max_decoded_payload_buffer: Option<usize>,
+
     /// Compression settings for the WebSocket connection.
     ///
     /// Compression is based on the Deflate algorithm, with additional configuration available
@@ -354,6 +363,17 @@ impl Options {
     pub fn with_max_read_buffer(self, size: usize) -> Self {
         Self {
             max_read_buffer: Some(size),
+            ..self
+        }
+    }
+
+    /// Sets the maximum decompressed size of an incoming message.
+    ///
+    /// The limit applies to the complete message, including messages received in
+    /// multiple WebSocket fragments.
+    pub fn with_max_decoded_payload_buffer(self, size: usize) -> Self {
+        Self {
+            max_decoded_payload_buffer: Some(size),
             ..self
         }
     }

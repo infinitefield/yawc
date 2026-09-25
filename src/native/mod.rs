@@ -225,6 +225,7 @@ pub(crate) struct Negotiation {
     pub(crate) compression: Option<CompressionConfig>,
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
+    pub(crate) max_decoded_payload_buffer: usize,
     pub(crate) utf8: bool,
     pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
@@ -257,14 +258,19 @@ impl Negotiation {
         let max_read_buffer = options.max_read_buffer.unwrap_or(
             options
                 .max_payload_read
-                .map(|payload_read| payload_read * 2)
+                .map(|payload_read| payload_read.saturating_mul(2))
                 .unwrap_or(MAX_READ_BUFFER),
         );
+
+        let max_decoded_payload_buffer = options
+            .max_decoded_payload_buffer
+            .unwrap_or_else(|| max_payload_read.saturating_mul(100));
 
         Ok(Self {
             compression,
             max_payload_read,
             max_read_buffer,
+            max_decoded_payload_buffer,
             utf8: options.check_utf8,
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
@@ -278,7 +284,7 @@ impl Negotiation {
     pub(crate) fn decompressor(&self) -> Option<Decompressor> {
         self.compression
             .as_ref()
-            .map(CompressionConfig::decompressor)
+            .map(|compression| compression.decompressor(self.max_decoded_payload_buffer))
     }
 }
 
@@ -1690,6 +1696,27 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 
+    #[test]
+    fn negotiation_resolves_decompressed_message_limit() {
+        let options = Options::default().with_max_payload_read(4096);
+        let negotiation =
+            Negotiation::new(None, &options, Role::Server).expect("negotiation should succeed");
+        assert_eq!(negotiation.max_decoded_payload_buffer, 409_600);
+
+        let options = options.with_max_decoded_payload_buffer(2048);
+        let negotiation =
+            Negotiation::new(None, &options, Role::Server).expect("negotiation should succeed");
+        assert_eq!(negotiation.max_decoded_payload_buffer, 2048);
+    }
+
+    #[test]
+    fn default_decompressed_message_limit_does_not_overflow() {
+        let options = Options::default().with_max_payload_read(usize::MAX);
+        let negotiation =
+            Negotiation::new(None, &options, Role::Server).expect("negotiation should succeed");
+        assert_eq!(negotiation.max_decoded_payload_buffer, usize::MAX);
+    }
+
     /// A mock duplex stream that wraps tokio's DuplexStream for testing.
     struct MockStream {
         inner: DuplexStream,
@@ -2453,6 +2480,43 @@ mod tests {
             "Successfully sent {} manual fragments, compressed, decompressed, and reassembled {} bytes",
             total_fragments, PAYLOAD_SIZE
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_decompressed_message_returns_frame_too_large() {
+        let (client_stream, server_stream) = MockStream::pair(16 * 1024);
+        let extensions = Some(WebSocketExtensions::default());
+        let options = Options::default()
+            .with_compression_level(CompressionLevel::default())
+            .with_max_decoded_payload_buffer(1024);
+
+        let client_negotiation = Negotiation::new(extensions.clone(), &options, Role::Client)
+            .expect("client negotiation should succeed");
+        let server_negotiation = Negotiation::new(extensions, &options, Role::Server)
+            .expect("server negotiation should succeed");
+        let mut client = WebSocket::new(
+            Role::Client,
+            client_stream,
+            Bytes::new(),
+            client_negotiation,
+        );
+        let mut server = WebSocket::new(
+            Role::Server,
+            server_stream,
+            Bytes::new(),
+            server_negotiation,
+        );
+
+        client
+            .send(Frame::binary(vec![b'a'; 4096]))
+            .await
+            .expect("client should send the compressed message");
+
+        match server.next_frame().await {
+            Err(WebSocketError::FrameTooLarge) => {}
+            Err(error) => panic!("unexpected receive error: {error}"),
+            Ok(_) => panic!("server should reject the decompressed message"),
+        }
     }
 
     #[tokio::test]

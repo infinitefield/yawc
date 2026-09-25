@@ -64,7 +64,7 @@ use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
     codec::Codec,
-    compression::{Compressor, Decompressor},
+    compression::{is_decompressed_message_too_large, Compressor, Decompressor},
     native::{ContextKind, WakeProxy},
     Frame, ReadHalf, WebSocketError, WriteHalf,
 };
@@ -306,7 +306,16 @@ where
         if frame.is_compressed {
             if let Some(inflate) = self.inflate.as_mut() {
                 // This payload could be empty, which is fine if we are dealing with fragmented frames.
-                let payload = inflate.decompress(&frame.payload, frame.is_fin())?;
+                let payload =
+                    inflate
+                        .decompress(&frame.payload, frame.is_fin())
+                        .map_err(|error| {
+                            if is_decompressed_message_too_large(&error) {
+                                WebSocketError::FrameTooLarge
+                            } else {
+                                error.into()
+                            }
+                        })?;
                 // Remove the compression flag
                 frame.is_compressed = false;
                 frame.payload = payload;
