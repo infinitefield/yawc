@@ -2,16 +2,16 @@
 
 Fast, secure, and RFC-compliant WebSocket implementation for Rust with advanced compression support.
 
-yawc is the **only Rust WebSocket library** that provides both high-level automatic APIs and low-level streaming control with full compression support, making it suitable for everything from simple chat applications to high-performance data streaming systems.
+yawc combines a high-level WebSocket API with low-level streaming control and compression support, for applications ranging from chat services to data streaming systems.
 
 [![Crates.io](https://img.shields.io/crates/v/yawc.svg)](https://crates.io/crates/yawc)
 [![Documentation](https://docs.rs/yawc/badge.svg)](https://docs.rs/yawc)
 [![License](https://img.shields.io/badge/license-MPL%202.0-blue.svg)](LICENSE)
-[![Rust Version](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.82%2B-blue.svg)](https://www.rust-lang.org)
 
 ## Why yawc?
 
-yawc stands apart as the **most flexible and feature-complete WebSocket library** in the Rust ecosystem:
+yawc provides a flexible WebSocket API for Rust:
 
 ### Unique Features
 
@@ -22,7 +22,7 @@ yawc stands apart as the **most flexible and feature-complete WebSocket library*
 - Compact memory layout (16-byte frame state vs 24+ bytes in other libraries)
 - Powers 24/7 high-frequency trading systems
 
-**Only library with streaming compression support**
+**Streaming compression support**
 
 - Compress data incrementally without buffering entire messages in memory
 - Partial flush support for real-time compression
@@ -30,8 +30,8 @@ yawc stands apart as the **most flexible and feature-complete WebSocket library*
 
 **Dual-level API design**
 
-- **High-level [`WebSocket`]**: Automatic fragment assembly, compression, UTF-8 validation
-- **Low-level [`Streaming`]**: Manual fragment control, streaming compression, direct frame access
+- **High-level [`WebSocket`](https://docs.rs/yawc/latest/yawc/struct.WebSocket.html)**: Automatic fragment assembly and compression, with optional UTF-8 validation
+- **Low-level `Streaming`**: Manual fragment control, streaming compression, direct frame access
 - Seamlessly convert between both as needed: `ws.into_streaming()`
 
 ## Features
@@ -54,10 +54,19 @@ yawc supports WebSocket compression through the [Options](https://docs.rs/yawc/l
 
 ### Basic Compression
 
+Run the Hyper server example below before running this client.
+
 ```rust
-let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwrap())
-    .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
-    .await;
+use yawc::{CompressionLevel, Options, Result, WebSocket};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let client = WebSocket::connect("ws://127.0.0.1:9002".parse()?)
+        .with_options(Options::default().with_compression_level(CompressionLevel::fast()))
+        .await?;
+    drop(client);
+    Ok(())
+}
 ```
 
 ### Advanced Compression Features
@@ -69,10 +78,14 @@ let mut client = WebSocket::connect("wss://my-websocket-server.com".parse().unwr
 
 ```rust
 // Example: Memory-optimized compression for long-lived connections
-let options = Options::default()
-    .with_compression_level(CompressionLevel::fast())
-    .server_no_context_takeover()  // Reset context after each message
-    .client_no_context_takeover(); // Prevent client-side memory growth
+use yawc::{CompressionLevel, Options};
+
+fn main() {
+    let _options = Options::default()
+        .with_compression_level(CompressionLevel::fast())
+        .server_no_context_takeover()  // Reset context after each message
+        .client_no_context_takeover(); // Prevent client-side memory growth
+}
 ```
 
 The `zlib` feature is NOT mandatory to enable compression. `zlib` is only required for the [window bits](https://docs.rs/yawc/latest/yawc/struct.Options.html#method.with_client_max_window_bits) configuration parameters.
@@ -80,7 +93,7 @@ By default yawc uses [flate2](https://docs.rs/flate2/) with the miniz_oxide back
 
 ## Upgrading or Migrating?
 
-- **Upgrading from yawc 0.2.x to 0.3.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for step-by-step migration instructions.
+- **Migrating from yawc 0.2.x to 0.3.x?** See the [Upgrade Guide](UPGRADE_GUIDE.md) for the version-specific steps.
 - **Migrating from tokio-tungstenite?** See the [Migration Guide](MIGRATION.md) for a comprehensive comparison and migration steps.
 
 ## Which crate should I use?
@@ -90,8 +103,9 @@ As the most stable and widely-used crate in the ecosystem, it provides excellent
 WebSocket protocol through its [WebSocketStream](https://docs.rs/tokio-tungstenite/latest/tokio_tungstenite/struct.WebSocketStream.html) type,
 which allows projects to implement custom protocols via its generic `<S>` parameter.
 
-While yawc doesn't expose the underlying stream directly,
-it provides access to `poll` methods via [futures::Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html)
+yawc also accepts custom async transports through [`WebSocket::from_stream`](https://docs.rs/yawc/latest/yawc/struct.WebSocket.html#method.from_stream)
+after the WebSocket handshake has completed, and exposes WebSocket frames through
+[futures::Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html)
 and [futures::Sink](https://docs.rs/futures/latest/futures/prelude/trait.Sink.html) implementations.
 Key features include built-in compression support, zero-copy operations where possible, and first-class WebAssembly support for UI development.
 Beyond passing comprehensive test suites including Autobahn,
@@ -109,20 +123,23 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-yawc = "0.3"
+yawc = "0.4"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
 ```
 
 ### Client Example
 
+Run the Hyper server example below in one terminal, then run this client in another.
+
 ```rust
-use futures::SinkExt;
-use futures::StreamExt;
-use yawc::{frame::Frame, frame::OpCode, Options, Result, WebSocket};
+use futures::{SinkExt, StreamExt};
+use yawc::{frame::Frame, frame::OpCode, Result, WebSocket};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Connect with default options
-    let mut ws = WebSocket::connect("wss://echo.websocket.org".parse()?).await?;
+    let mut ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?).await?;
 
     // Send and receive messages
     ws.send(Frame::text("Hello WebSocket!")).await?;
@@ -133,6 +150,7 @@ async fn main() -> Result<()> {
             OpCode::Binary => println!("Received binary: {} bytes", frame.payload().len()),
             _ => {} // Handle control frames automatically
         }
+        break;
     }
 
     Ok(())
@@ -141,9 +159,9 @@ async fn main() -> Result<()> {
 
 ```toml
 [dependencies]
-yawc = { version = "0.3" }
+yawc = { version = "0.4" }
 futures = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
 ```
 
 ### Connecting Through a SOCKS5 Proxy
@@ -155,9 +173,9 @@ use yawc::{Proxy, Result, WebSocket};
 async fn main() -> Result<()> {
     // socks5h:// leaves the hostname for the proxy to resolve; socks5:// resolves it
     // locally and sends an address. Credentials are optional.
-    let proxy = Proxy::socks5("socks5h://user:pass@127.0.0.1:1080".parse()?)?;
+    let proxy = Proxy::socks5("socks5h://127.0.0.1:1080".parse()?)?;
 
-    let ws = WebSocket::connect("wss://echo.websocket.org".parse()?)
+    let ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?)
         .with_proxy(proxy)
         .await?;
 
@@ -165,48 +183,65 @@ async fn main() -> Result<()> {
 }
 ```
 
+Run the Hyper server example, then replace the proxy address with a running SOCKS5 proxy.
+
 TLS runs end to end through the tunnel, so a `wss://` connection is negotiated with the
 target and the proxy only ever sees ciphertext.
 
 ### Server Example
 
 ```rust
-use hyper::{Request, Response, body::Incoming};
-use futures::StreamExt;
-use futures::SinkExt;
-use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
-use yawc::{WebSocket, Result};
+use hyper::{
+    body::{Bytes, Incoming},
+    server::conn::http1,
+    service::service_fn,
+    Request, Response,
+};
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
+use yawc::{CompressionLevel, Options, Result, WebSocket};
 
-async fn handle_upgrade(req: Request<Incoming>) -> Result<Response<Empty<Bytes>>> {
-    // Upgrade the connection
-    let (response, upfn) = WebSocket::upgrade(req)?;
-
-    // Handle the WebSocket connection in a separate task
+async fn handle_upgrade(mut req: Request<Incoming>) -> Result<Response<Empty<Bytes>>> {
+    let options = Options::default().with_compression_level(CompressionLevel::fast());
+    let (response, upfn) = WebSocket::upgrade_with_options(&mut req, options)?;
     tokio::spawn(async move {
-        let mut ws = upfn.await.expect("upgrade");
-
+        let Ok(ws) = upfn.await else { return };
+        let mut ws = ws.into_streaming();
         while let Some(frame) = ws.next().await {
-            // Echo the received frames back to the client
-            let _ = ws.send(frame).await;
+            if ws.send(frame).await.is_err() {
+                break;
+            }
         }
     });
-
     Ok(response)
 }
 
 #[tokio::main]
-async fn main() {
-    // configure the server
+async fn main() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:9002").await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let connection = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service_fn(handle_upgrade))
+                .with_upgrades();
+            if let Err(error) = connection.await {
+                eprintln!("HTTP connection failed: {error}");
+            }
+        });
+    }
 }
 ```
 
 ```toml
 [dependencies]
-yawc = "0.3"
+yawc = "0.4"
 futures = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
 hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 ```
@@ -216,7 +251,7 @@ You can find a particularly comprehensive example in the [`axum_proxy`](https://
 
 - Building a WebSocket broadcast server that efficiently relays messages between multiple connected clients
 - Creating a reverse proxy that transparently forwards WebSocket connections to upstream servers
-- Proper connection lifecycle management and error handling Integration with the Axum web framework for robust HTTP request handling
+- Proper connection lifecycle management and error handling with the Axum web framework
 - Advanced usage patterns like connection pooling and message filtering
 
 These examples serve as practical reference implementations for common WebSocket architectural patterns and best practices using yawc.
@@ -226,7 +261,7 @@ These examples serve as practical reference implementations for common WebSocket
 - `reqwest`: Use reqwest as the HTTP client
 - `axum`: Enable integration with the Axum web framework
 - `http2`: Enable WebSockets over HTTP/2 via extended CONNECT (RFC 8441)
-- `logging`: Enable debug logging for connection events
+- `simd`: Enable SIMD-accelerated UTF-8 validation
 - `zlib`: Enable advanced compression options with zlib (not recommended unless you know what you are doing). Without this option, yawc will use miniz_oxide, a Rust deflate implementation.
 - `rustls-ring`: Enable the fallback rustls crypto provider based on `ring`
 - `rustls-aws-lc-rs`: Enable the fallback rustls crypto provider based on `aws-lc-rs`
@@ -234,14 +269,11 @@ These examples serve as practical reference implementations for common WebSocket
 ### Axum Server Example
 
 ```rust
-use axum::{
-    routing::get,
-    Router,
-};
-use futures::StreamExt;
+use axum::{response::IntoResponse, routing::get, Router};
+use futures::{SinkExt, StreamExt};
 use yawc::{IncomingUpgrade, Options, CompressionLevel};
 
-async fn websocket_handler(ws: IncomingUpgrade) -> axum::response::Response {
+async fn websocket_handler(ws: IncomingUpgrade) -> impl IntoResponse {
     let options = Options::default()
         .with_compression_level(CompressionLevel::default())
         .with_utf8();
@@ -258,7 +290,7 @@ async fn websocket_handler(ws: IncomingUpgrade) -> axum::response::Response {
         }
     });
 
-    response
+    response.into_response()
 }
 
 #[tokio::main]
@@ -266,18 +298,20 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(websocket_handler));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 ```
 
 To use the Axum integration, add this to your `Cargo.toml`:
 
+The server listens on `127.0.0.1:3000` and accepts WebSocket connections at `ws://127.0.0.1:3000/ws`.
+
 ```toml
 [dependencies]
-yawc = { version = "0.3", features = ["axum"] }
-axum = "0.7"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+yawc = { version = "0.4", features = ["axum"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 ```
 
@@ -288,25 +322,33 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 For advanced use cases requiring manual control over frame fragmentation, yawc provides a low-level `Streaming` API:
 
 ```rust
-use yawc::{WebSocket, Frame, OpCode};
 use futures::{SinkExt, StreamExt};
+use yawc::{Frame, OpCode, Result, WebSocket};
 
-// Convert WebSocket to Streaming for manual fragment control
-let ws = WebSocket::connect("wss://example.com".parse()?).await?;
-let mut streaming = ws.into_streaming();
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Convert WebSocket to Streaming for manual fragment control
+    let ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?).await?;
+    let mut streaming = ws.into_streaming();
 
-// Send a large message as multiple fragments manually
-streaming.send(Frame::text("First part").with_fin(false)).await?;
-streaming.send(Frame::continuation(" second part").with_fin(false)).await?;
-streaming.send(Frame::continuation(" final part")).await?;
+    // Send a message as multiple fragments manually
+    streaming.send(Frame::text("First part").with_fin(false)).await?;
+    streaming.send(Frame::continuation(" second part").with_fin(false)).await?;
+    streaming.send(Frame::continuation(" final part")).await?;
 
-// Receive frames without automatic reassembly
-while let Some(frame) = streaming.next().await {
-    match frame.opcode() {
-        OpCode::Text => println!("Text fragment: FIN={}", frame.is_fin()),
-        OpCode::Continuation => println!("Continuation: FIN={}", frame.is_fin()),
-        _ => {}
+    // Receive frames without automatic reassembly
+    while let Some(frame) = streaming.next().await {
+        match frame.opcode() {
+            OpCode::Text => println!("Text fragment: FIN={}", frame.is_fin()),
+            OpCode::Continuation => println!("Continuation: FIN={}", frame.is_fin()),
+            _ => {}
+        }
+        if frame.is_fin() {
+            break;
+        }
     }
+
+    Ok(())
 }
 ```
 
@@ -330,17 +372,30 @@ while let Some(frame) = streaming.next().await {
 Fine-tune compression settings for optimal performance:
 
 ```rust
-use yawc::{WebSocket, Options, CompressionLevel};
+use yawc::{CompressionLevel, Options, Result, WebSocket};
 
-let ws = WebSocket::connect("wss://example.com".parse()?)
-    .with_options(
-        Options::default()
-            .with_compression_level(CompressionLevel::default())
-            .server_no_context_takeover()  // Reset compression context after each message
-            .client_no_context_takeover()  // Optimize memory for client side
-            .with_client_max_window_bits(11)  // Control compression window (requires zlib feature)
-    )
-    .await?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?)
+        .with_options(
+            Options::default()
+                .with_compression_level(CompressionLevel::default())
+                .server_no_context_takeover()
+                .client_no_context_takeover()
+                .with_client_max_window_bits(11),
+        )
+        .await?;
+    drop(ws);
+    Ok(())
+}
+```
+
+Enable the `zlib` feature in `Cargo.toml` to configure window bits.
+
+```toml
+[dependencies]
+yawc = { version = "0.4", features = ["zlib"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
 ```
 
 **Context Takeover Options:**
@@ -356,10 +411,14 @@ The `no_context_takeover` options control how compression state is managed betwe
 
 ```rust
 // Example: Memory-optimized compression for long-lived connections
-let options = Options::default()
-    .with_compression_level(CompressionLevel::fast())
-    .server_no_context_takeover()
-    .client_no_context_takeover();
+use yawc::{CompressionLevel, Options};
+
+fn main() {
+    let _options = Options::default()
+        .with_compression_level(CompressionLevel::fast())
+        .server_no_context_takeover()
+        .client_no_context_takeover();
+}
 ```
 
 ### Automatic Fragmentation and Flow Control
@@ -367,17 +426,22 @@ let options = Options::default()
 Configure automatic fragmentation and backpressure for large messages:
 
 ```rust
-use yawc::{WebSocket, Options};
+use yawc::{Options, Result, WebSocket};
 use std::time::Duration;
 
-let ws = WebSocket::connect("wss://example.com".parse()?)
-    .with_options(
-        Options::default()
-            .with_max_fragment_size(64 * 1024)  // Auto-fragment messages > 64 KiB
-            .with_backpressure_boundary(128 * 1024)  // Apply backpressure at 128 KiB
-            .with_fragment_timeout(Duration::from_secs(30))  // Timeout incomplete fragments
-    )
-    .await?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?)
+        .with_options(
+            Options::default()
+                .with_max_fragment_size(64 * 1024)
+                .with_backpressure_boundary(128 * 1024)
+                .with_fragment_timeout(Duration::from_secs(30)),
+        )
+        .await?;
+    drop(ws);
+    Ok(())
+}
 ```
 
 **Fragmentation options:**
@@ -399,20 +463,25 @@ Split the WebSocket for independent reading and writing:
 ```rust
 use futures::{StreamExt, SinkExt};
 use yawc::frame::Frame;
+use yawc::{Result, WebSocket};
 
-let (mut write, mut read) = ws.split();
+#[tokio::main]
+async fn main() -> Result<()> {
+    let ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?).await?;
+    let (mut write, mut read) = ws.split();
 
-// Read and write concurrently
-tokio::join!(
-    async move {
-        while let Some(frame) = read.next().await {
-            // Process incoming frames
+    tokio::join!(
+        async move {
+            if let Some(frame) = read.next().await {
+                println!("Received: {:?}", frame.opcode());
+            }
+        },
+        async move {
+            let _ = write.send(Frame::text("Hello")).await;
         }
-    },
-    async move {
-        write.send(Frame::text("Hello")).await.unwrap();
-    }
-);
+    );
+    Ok(())
+}
 ```
 
 ### Custom Frame Handling
@@ -420,17 +489,30 @@ tokio::join!(
 Process frames manually when needed:
 
 ```rust
-match frame.opcode() {
-    OpCode::Ping => {
-        // Automatic pong responses
-        println!("Received ping");
+use futures::{SinkExt, StreamExt};
+use yawc::{Frame, OpCode, Result, WebSocket};
+
+fn inspect_frame(frame: Frame) {
+    match frame.opcode() {
+        OpCode::Text => println!("Received text: {}", frame.as_str()),
+        OpCode::Ping => println!("Received ping"),
+        OpCode::Close => {
+            if let Some(code) = frame.close_code() {
+                println!("Connection closing with code: {code:?}");
+            }
+        }
+        _ => {}
     }
-    OpCode::Close => {
-        // Handle close frames
-        let code = u16::from_be_bytes(frame.payload[0..2].try_into()?);
-        println!("Connection closing with code: {}", code);
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut ws = WebSocket::connect("ws://127.0.0.1:9002".parse()?).await?;
+    ws.send(Frame::text("Inspect this echoed frame")).await?;
+    if let Some(frame) = ws.next().await {
+        inspect_frame(frame);
     }
-    _ => { /* Handle data frames */ }
+    Ok(())
 }
 ```
 
