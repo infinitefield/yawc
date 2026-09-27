@@ -328,8 +328,8 @@ impl CompressionConfig {
     }
 
     /// Builds the decompressor for the direction this side reads.
-    pub(crate) fn decompressor(&self) -> Decompressor {
-        Decompressor::new(self.incoming)
+    pub(crate) fn decompressor(&self, max_decoded_message_size: usize) -> Decompressor {
+        Decompressor::new_with_limit(self.incoming, max_decoded_message_size)
     }
 }
 
@@ -513,14 +513,22 @@ pub struct Decompressor {
 
 impl Decompressor {
     /// Creates a decompressor for one direction of a connection.
+    #[cfg(test)]
     pub(crate) fn new(config: HalfConfig) -> Self {
+        Self::new_with_limit(config, usize::MAX)
+    }
+
+    /// Creates a decompressor with a maximum decompressed message size.
+    pub(crate) fn new_with_limit(config: HalfConfig, max_decoded_message_size: usize) -> Self {
         Self {
             inflate: match config.window_bits {
                 #[cfg(feature = "zlib")]
-                Some(window_bits) => Inflate::new_with_window_bits(window_bits),
+                Some(window_bits) => {
+                    Inflate::new(max_decoded_message_size).with_window_bits(window_bits)
+                }
                 #[cfg(not(feature = "zlib"))]
-                Some(_) => Inflate::default(),
-                None => Inflate::default(),
+                Some(_) => Inflate::new(max_decoded_message_size),
+                None => Inflate::new(max_decoded_message_size),
             },
             no_context_takeover: config.no_context_takeover,
         }
@@ -548,6 +556,8 @@ impl Decompressor {
 struct Inflate {
     output: BytesMut,
     decompress: flate2::Decompress,
+    max_decoded_message_size: usize,
+    decoded_message_size: usize,
     /// Set when the peer terminated the deflate stream with a final block (BFINAL=1).
     ///
     /// Once that happens the inflater cannot consume any more input, so the remaining
@@ -558,16 +568,22 @@ struct Inflate {
 impl Default for Inflate {
     /// Creates a new `Inflate` instance with a default buffer size and decompressor.
     fn default() -> Self {
-        Self {
-            output: BytesMut::with_capacity(1024),
-            decompress: flate2::Decompress::new(false),
-            stream_ended: false,
-        }
+        Self::new(usize::MAX)
     }
 }
 
 impl Inflate {
-    /// Creates a new `Inflate` instance with a specific LZ77 window size for decompression.
+    fn new(max_decoded_message_size: usize) -> Self {
+        Self {
+            output: BytesMut::with_capacity(1024.min(max_decoded_message_size)),
+            decompress: flate2::Decompress::new(false),
+            max_decoded_message_size,
+            decoded_message_size: 0,
+            stream_ended: false,
+        }
+    }
+
+    /// Configures a specific LZ77 window size for decompression.
     ///
     /// Available only when compiled with the `zlib` feature, this allows finer control over decompression by specifying the
     /// `window_bits` for the LZ77 sliding window.
@@ -575,20 +591,16 @@ impl Inflate {
     /// # Parameters
     /// - `window_bits`: The window size for LZ77, in bits.
     ///
-    /// # Returns
-    /// A `Inflate` instance configured with the specified window size.
     #[cfg(feature = "zlib")]
-    fn new_with_window_bits(window_bits: u8) -> Self {
-        Self {
-            output: BytesMut::with_capacity(1024),
-            decompress: flate2::Decompress::new_with_window_bits(false, window_bits),
-            stream_ended: false,
-        }
+    fn with_window_bits(mut self, window_bits: u8) -> Self {
+        self.decompress = flate2::Decompress::new_with_window_bits(false, window_bits);
+        self
     }
 
     /// Resets the decompression dictionary, for no-context-takeover mode.
     fn reset(&mut self) {
         self.decompress.reset(false);
+        self.decoded_message_size = 0;
         self.stream_ended = false;
     }
 
@@ -613,6 +625,8 @@ impl Inflate {
                 self.stream_ended = false;
             }
 
+            self.decoded_message_size = 0;
+
             Ok(out)
         } else {
             Ok(self.output.split().freeze())
@@ -626,7 +640,7 @@ impl Inflate {
         let mut stream_ended = false;
 
         while !input.is_empty() {
-            let dst = chunk(output);
+            let dst = inflate_chunk(output);
 
             let before_out = decompressor.total_out();
             let before_in = decompressor.total_in();
@@ -637,6 +651,13 @@ impl Inflate {
             let consumed = (decompressor.total_in() - before_in) as usize;
 
             unsafe { output.advance_mut(read) };
+            self.decoded_message_size = self
+                .decoded_message_size
+                .checked_add(read)
+                .ok_or_else(decompressed_message_too_large)?;
+            if self.decoded_message_size > self.max_decoded_message_size {
+                return Err(decompressed_message_too_large());
+            }
 
             input = &input[consumed..];
 
@@ -673,37 +694,65 @@ impl Inflate {
 
     /// Flushes the decompressed data to the output buffer.
     fn flush(&mut self) -> io::Result<Bytes> {
-        let output = &mut self.output;
-        let decompressor = &mut self.decompress;
-
-        let dst = chunk(output);
-        let before_out = decompressor.total_out();
-
-        decompressor
-            .decompress(&[], dst, flate2::FlushDecompress::Sync)
-            .map_err(inflate_error)?;
-
-        let written = (decompressor.total_out() - before_out) as usize;
-        unsafe { output.advance_mut(written) };
+        let mut flush = flate2::FlushDecompress::Sync;
 
         loop {
-            let dst = chunk(output);
+            let dst = inflate_chunk(&mut self.output);
 
-            let before_out = decompressor.total_out();
-            decompressor
-                .decompress(&[], dst, flate2::FlushDecompress::None)
+            let before_out = self.decompress.total_out();
+            self.decompress
+                .decompress(&[], dst, flush)
                 .map_err(inflate_error)?;
+            flush = flate2::FlushDecompress::None;
 
-            if before_out == decompressor.total_out() {
-                break Ok(output.split().freeze());
+            let written = (self.decompress.total_out() - before_out) as usize;
+            if written == 0 {
+                return Ok(self.output.split().freeze());
             }
 
-            let written = (decompressor.total_out() - before_out) as usize;
-            unsafe {
-                output.advance_mut(written);
+            unsafe { self.output.advance_mut(written) };
+            self.decoded_message_size = self
+                .decoded_message_size
+                .checked_add(written)
+                .ok_or_else(decompressed_message_too_large)?;
+            if self.decoded_message_size > self.max_decoded_message_size {
+                return Err(decompressed_message_too_large());
             }
         }
     }
+}
+
+#[derive(Debug)]
+struct DecompressedMessageTooLarge;
+
+impl std::fmt::Display for DecompressedMessageTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("decompressed message exceeds configured maximum")
+    }
+}
+
+impl std::error::Error for DecompressedMessageTooLarge {}
+
+fn decompressed_message_too_large() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, DecompressedMessageTooLarge)
+}
+
+pub(crate) fn is_decompressed_message_too_large(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<DecompressedMessageTooLarge>())
+        .is_some()
+}
+
+/// Returns at most 1 KiB of writable spare capacity for decompression.
+fn inflate_chunk(output: &mut BytesMut) -> &mut [u8] {
+    if output.capacity() - output.len() < 1024 {
+        output.reserve(1024);
+    }
+
+    let len = output.spare_capacity_mut().len().min(1024);
+    let uninitbuf = &mut output.spare_capacity_mut()[..len];
+    unsafe { &mut *(uninitbuf as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) }
 }
 
 #[cfg(test)]
@@ -715,7 +764,7 @@ mod tests {
     };
     use crate::{CompressionLevel, Role, WebSocketError};
 
-    use super::WebSocketExtensions;
+    use super::{is_decompressed_message_too_large, WebSocketExtensions};
 
     #[test]
     fn test_parse_extensions() {
@@ -800,7 +849,7 @@ mod tests {
     #[cfg(feature = "zlib")]
     #[test]
     fn test_inflate_with_window_bits() {
-        let inflate = Inflate::new_with_window_bits(15);
+        let inflate = Inflate::default().with_window_bits(15);
         assert_eq!(inflate.output.capacity(), 1024);
     }
 
@@ -879,6 +928,62 @@ mod tests {
             .decompress(&compressed, true)
             .expect("Decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
+    }
+
+    #[test]
+    fn decompression_accepts_the_exact_message_limit() {
+        let data = vec![b'a'; 4096];
+        let mut deflate = Deflate::new(Compression::default());
+        let compressed = deflate.compress(&data, true).expect("compression failed");
+
+        let mut inflate = Inflate::new(data.len());
+        let decompressed = inflate
+            .decompress(&compressed, true)
+            .expect("an exact-size message should be accepted");
+
+        assert_eq!(decompressed.as_ref(), data);
+        assert_eq!(inflate.decoded_message_size, 0);
+    }
+
+    #[test]
+    fn decompression_rejects_a_message_over_the_limit() {
+        let data = vec![b'a'; 4097];
+        let mut deflate = Deflate::new(Compression::default());
+        let compressed = deflate.compress(&data, true).expect("compression failed");
+
+        let mut inflate = Inflate::new(4096);
+        let error = inflate
+            .decompress(&compressed, true)
+            .expect_err("an oversized decompressed message should be rejected");
+
+        assert!(is_decompressed_message_too_large(&error));
+        assert!(inflate.output.len() <= 4096 + 1024);
+        assert!(inflate.decoded_message_size > 4096);
+        assert!(inflate.decoded_message_size <= 4096 + 1024);
+    }
+
+    #[test]
+    fn decompression_limit_is_cumulative_across_fragments() {
+        let first = vec![b'a'; 2048];
+        let second = vec![b'b'; 2048];
+        let mut deflate = Deflate::new(Compression::default());
+        let first_compressed = deflate.compress(&first, false).expect("compression failed");
+        let second_compressed = deflate.compress(&second, true).expect("compression failed");
+
+        let mut inflate = Inflate::new(3072);
+        let first_decompressed = inflate
+            .decompress(&first_compressed, false)
+            .expect("the first fragment should fit");
+        assert!(!first_decompressed.is_empty());
+        assert_eq!(inflate.decoded_message_size, first_decompressed.len());
+        assert!(inflate.decoded_message_size < 3072);
+
+        let error = inflate
+            .decompress(&second_compressed, true)
+            .expect_err("the complete fragmented message should exceed the limit");
+        assert!(is_decompressed_message_too_large(&error));
+        assert!(inflate.decoded_message_size > 3072);
+        assert!(inflate.decoded_message_size <= 3072 + 1024);
     }
 
     #[test]
@@ -1699,7 +1804,7 @@ mod tests {
 
         for bits in 9..=15u8 {
             let mut deflate = Deflate::new_with_window_bits(Compression::default(), bits);
-            let mut inflate = Inflate::new_with_window_bits(bits);
+            let mut inflate = Inflate::default().with_window_bits(bits);
 
             for message in messages {
                 let compressed = deflate.compress(message, true).expect("compression failed");
@@ -1721,7 +1826,7 @@ mod tests {
     fn test_window_bits_round_trip_no_context() {
         for bits in 9..=15u8 {
             let mut deflate = Deflate::new_with_window_bits(Compression::default(), bits);
-            let mut inflate = Inflate::new_with_window_bits(bits);
+            let mut inflate = Inflate::default().with_window_bits(bits);
 
             for i in 0..4 {
                 let message = format!("message number {i} with some repeated repeated text");
@@ -1747,7 +1852,7 @@ mod tests {
     #[cfg(feature = "zlib")]
     #[test]
     fn test_decompress_issue_40_payload_window_bits_10() {
-        let mut inflate = Inflate::new_with_window_bits(10);
+        let mut inflate = Inflate::default().with_window_bits(10);
         let decompressed = inflate
             .decompress(ISSUE_40_PAYLOAD, true)
             .expect("decompression failed");
@@ -1770,7 +1875,7 @@ mod tests {
             compressed.truncate(encoder.total_out() as usize);
             compressed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
-            let mut inflate = Inflate::new_with_window_bits(bits);
+            let mut inflate = Inflate::default().with_window_bits(bits);
             let decompressed = inflate
                 .decompress(&compressed, true)
                 .expect("decompression failed");
@@ -1887,7 +1992,7 @@ mod tests {
                 } else {
                     #[cfg(feature = "zlib")]
                     {
-                        Inflate::new_with_window_bits(9 + rng.below(7) as u8)
+                        Inflate::default().with_window_bits(9 + rng.below(7) as u8)
                     }
                     #[cfg(not(feature = "zlib"))]
                     {
@@ -1983,7 +2088,7 @@ mod tests {
                     let bits = 9 + rng.below(7) as u8;
                     (
                         Deflate::new_with_window_bits(level, bits),
-                        Inflate::new_with_window_bits(bits),
+                        Inflate::default().with_window_bits(bits),
                     )
                 }
                 _ => (Deflate::new(level), Inflate::default()),
