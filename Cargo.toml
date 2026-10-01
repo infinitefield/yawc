@@ -131,8 +131,6 @@ web-sys = { version = "0.3", default-features = false, features = [
 ] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-# Keeps the event handlers from making `WebSocket` !Send. See `src/wasm.rs`.
-send_wrapper = "0.6"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.2", features = ["js"] }
 # Tokio without net features for WASM

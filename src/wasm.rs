@@ -2,7 +2,6 @@ use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver},
     stream::StreamExt,
 };
-use send_wrapper::SendWrapper;
 use std::{
     pin::Pin,
     str::FromStr,
@@ -22,6 +21,20 @@ use crate::{
 /// richer type cast back to it; the registration they are attached to guarantees the cast.
 type EventClosure = Closure<dyn FnMut(Event)>;
 
+/// The socket's event handlers, held only so they are freed along with it.
+///
+/// `Closure` is never `Send`, which would make the whole socket `!Send` on targets where
+/// it used to be `Send`. Without `atomics` there is no shared memory and so only one
+/// thread, the same reasoning wasm-bindgen uses for its own `Send` impl on `JsValue`. On
+/// an `atomics` build these impls drop out, and the socket stays `!Send` regardless
+/// because `stream` inherits that from `JsValue`.
+struct Handlers(#[allow(dead_code)] [EventClosure; 4]);
+
+#[cfg(not(target_feature = "atomics"))]
+unsafe impl Send for Handlers {}
+#[cfg(not(target_feature = "atomics"))]
+unsafe impl Sync for Handlers {}
+
 /// A WebSocket wrapper for WASM applications that provides an async interface
 /// for WebSocket communication. This implementation wraps the browser's native
 /// WebSocket API and provides Rust-friendly methods for sending and receiving messages.
@@ -34,13 +47,7 @@ pub struct WebSocket {
     /// Channel receiver for incoming messages and errors
     receiver: UnboundedReceiver<Result<Frame>>,
     /// Event handlers, kept alive for as long as the socket is and freed with it.
-    ///
-    /// `Closure` is never `Send`, which would make the whole socket `!Send` on targets
-    /// where it used to be `Send`. The wrapper restores that: the field is only ever
-    /// dropped, never read, so the cost is one thread-id comparison per socket. On an
-    /// `atomics` build the socket stays `!Send` anyway, because wasm-bindgen drops its
-    /// `Send` impl for `JsValue` there and `stream` inherits that.
-    _handlers: SendWrapper<[EventClosure; 4]>,
+    _handlers: Handlers,
 }
 
 impl WebSocket {
@@ -149,7 +156,7 @@ impl WebSocket {
         let socket = Self {
             stream,
             receiver: rx,
-            _handlers: SendWrapper::new([onopen, onerror, onmessage, onclose]),
+            _handlers: Handlers([onopen, onerror, onmessage, onclose]),
         };
 
         Ok((socket, outcome_rx))
