@@ -68,6 +68,12 @@ connection; the library defaults are unchanged. `send()` still flushes each fram
 `yawc-buffered-128k` and `yawc-buffered-512k` change only the read capacity;
 both retain the 64 KiB write boundary.
 
+`yawc-corked-128k` uses the same buffers with
+`with_cork_writes_during_receive()`. In a `feed()` then `next_frame()` loop,
+yawc flushes queued replies when the next read has no message ready. This is
+an opt-in alternative to the manual batch loop above. Call `flush()` explicitly
+if the application stops reading after `feed()`.
+
 Use `--baseline-server` with `yawc-batched-before` to compare library changes
 under the same batching policy. The saved server must support that adapter.
 

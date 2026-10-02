@@ -150,7 +150,7 @@ def main():
     caches = [last_level_cache(path) for path in topology]
     address = "unix:" if args.unix else f"[{args.bind_ip}]:0"
     commands = {name: [str(RUST / "server"), name, address]
-                for name in ["yawc", "yawc-batched", "yawc-buffered", "yawc-buffered-128k", "yawc-buffered-512k", "tokio-tungstenite", "tokio-tungstenite-batched", "fastwebsockets"]}
+                for name in ["yawc", "yawc-batched", "yawc-buffered", "yawc-buffered-128k", "yawc-buffered-512k", "yawc-corked-128k", "tokio-tungstenite", "tokio-tungstenite-batched", "fastwebsockets"]}
     cpp_address = "unix:" if args.unix else str(args.bind_ip)
     commands.update({"uWebSockets": [str(BUILD / "uws"), cpp_address],
                      "Boost.Beast": [str(BUILD / "beast"), cpp_address]})

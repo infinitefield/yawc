@@ -229,6 +229,7 @@ pub(crate) struct Negotiation {
     pub(crate) utf8: bool,
     pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
+    pub(crate) cork_writes_during_receive: bool,
 }
 
 impl Negotiation {
@@ -270,6 +271,7 @@ impl Negotiation {
             utf8: options.check_utf8,
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
+            cork_writes_during_receive: options.cork_writes_during_receive,
         })
     }
 
@@ -1189,6 +1191,9 @@ where
 
     /// Polls for the next frame in the WebSocket stream.
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
+        if self.streaming.cork_writes_during_receive() {
+            ready!(self.poll_flush_fragments(cx))?;
+        }
         loop {
             let frame = ready!(self.streaming.poll_next_frame(cx))?;
             match self.on_frame(frame)? {
