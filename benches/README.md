@@ -28,6 +28,7 @@ UTF-8 validation. Handshakes and warmup are excluded from throughput timing.
 Cases cover 20 B to 64 KiB, 1 to 128 connections, binary and text, and windows
 of 1 or 16 messages. A window of 16 sends a batch before reading its echoes.
 Cases 8 to 10 send each binary message as two separately masked fragments.
+Cases 11 and 12 pipeline 20 B and 125 B messages across 16 connections.
 Rust adapters and Beast complete a write per echoed message. uWebSockets batches
 writes while handling incoming data, which benefits its pipelined case.
 
@@ -152,6 +153,9 @@ python3 benches/comparison/run.py --bind-ip "$BENCH_BIND_IP" \
 
 Codec, masking, in-memory echo and automatic Pong costs can be measured without sockets.
 The Pong cases use a 64-byte duplex buffer to exercise control-frame backpressure.
+Mask benchmarks align the base buffer to 64 bytes. `mask_alignment` varies offsets for
+20 B, 125 B, 126 B and 1 KiB payloads, including unaligned WebSocket payloads.
+Use the same benchmark source for both revisions when comparing these timings.
 
 ```sh
 taskset -c 2 cargo bench -p yawc --bench performance -- --save-baseline before

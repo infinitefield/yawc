@@ -78,26 +78,15 @@ fn apply_mask_fallback(buf: &mut [u8], mask: [u8; 4]) {
 #[doc(hidden)]
 #[inline(always)]
 pub fn apply_mask_fast32(buf: &mut [u8], mask: [u8; 4]) {
-    let mask_u32 = u32::from_ne_bytes(mask);
-    let (prefix, words, suffix) = unsafe { buf.align_to_mut::<u32>() };
-    apply_mask_fallback(prefix, mask);
-
-    let head = prefix.len() & 3;
-    let mask_u32 = if head > 0 {
-        if cfg!(target_endian = "big") {
-            mask_u32.rotate_left(8 * head as u32)
-        } else {
-            mask_u32.rotate_right(8 * head as u32)
-        }
-    } else {
-        mask_u32
-    };
-
-    for word in words.iter_mut() {
-        *word ^= mask_u32;
+    let mask_word = u32::from_ne_bytes(mask);
+    let mut chunks = buf.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        let word = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        chunk.copy_from_slice(&(word ^ mask_word).to_ne_bytes());
     }
-
-    apply_mask_fallback(suffix, mask_u32.to_ne_bytes());
+    for (byte, key) in chunks.into_remainder().iter_mut().zip(mask) {
+        *byte ^= key;
+    }
 }
 
 /// Even faster version using 64-bit blocks for larger buffers.

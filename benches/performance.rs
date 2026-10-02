@@ -16,10 +16,26 @@ fn performance(c: &mut Criterion) {
     let mut group = c.benchmark_group("mask");
     for size in sizes {
         group.throughput(Throughput::Bytes(size as u64));
-        let mut data = vec![0x5a; size];
+        let mut storage = vec![0x5a; size + 63];
+        let start = storage.as_ptr().align_offset(64);
+        let data = &mut storage[start..start + size];
         group.bench_function(BenchmarkId::from_parameter(size), |b| {
-            b.iter(|| apply_mask(black_box(&mut data), black_box([1, 7, 19, 31])));
+            b.iter(|| apply_mask(black_box(&mut *data), black_box([1, 7, 19, 31])));
         });
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("mask_alignment");
+    for size in [20, 125, 126, 1024] {
+        group.throughput(Throughput::Bytes(size as u64));
+        for offset in [0, 1, 2, 3, 16, 31] {
+            let mut storage = vec![0x5a; size + offset + 63];
+            let start = storage.as_ptr().align_offset(64) + offset;
+            let data = &mut storage[start..start + size];
+            group.bench_function(BenchmarkId::new(size.to_string(), offset), |b| {
+                b.iter(|| apply_mask(black_box(&mut *data), black_box([1, 7, 19, 31])));
+            });
+        }
     }
     group.finish();
 

@@ -30,6 +30,8 @@ CASES = [
     (16, 1024, 1, "fragmented-binary"),
     (16, 1024, 16, "fragmented-binary"),
     (16, 16384, 1, "fragmented-binary"),
+    (16, 20, 16, "binary"),
+    (16, 125, 16, "binary"),
 ]
 
 
