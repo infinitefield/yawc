@@ -31,7 +31,7 @@ of 1 or 16 messages. A window of 16 sends a batch before reading its echoes.
 Cases 8 to 10 send each binary message as two separately masked fragments.
 Cases 11 and 12 pipeline 20 B and 125 B messages across 16 connections.
 Cases 13 to 15 ingest telemetry batches instead of echoing them.
-The default Rust adapters and Beast complete a write per response. uWebSockets
+The unbatched Rust adapters and Beast complete a write per response. uWebSockets
 batches writes while handling incoming data, which benefits its pipelined case.
 
 ### Telemetry ingestion
@@ -67,15 +67,15 @@ up to 32 immediately available messages, then flush. They add no timer delay.
 connection; the library defaults are unchanged. `send()` still flushes each frame.
 `yawc-buffered-128k` and `yawc-buffered-512k` change only the read capacity;
 both retain the 64 KiB write boundary.
-
-`yawc-corked-128k` uses the same buffers with
-`with_cork_writes_during_receive()`. In a `feed()` then `next_frame()` loop,
-yawc flushes queued replies when the next read has no message ready. This is
-an opt-in alternative to the manual batch loop above. Call `flush()` explicitly
-if the application stops reading after `feed()`.
+The runner selects `yawc-buffered-128k` by default.
 
 Use `--baseline-server` with `yawc-batched-before` to compare library changes
 under the same batching policy. The saved server must support that adapter.
+
+Beast can run multiple Asio workers with `--beast-threads 4 --beast-cpus 0 1 2 3`.
+With multiple workers, each connection uses a strand to serialize its handlers. Choose server cores that
+do not overlap `--client-cpus`. Other adapters still use one server thread;
+the report records each adapter's thread count and CPU allocation.
 
 ## Throughput settings
 

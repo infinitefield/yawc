@@ -65,12 +65,15 @@ def last_level_cache(cpu_path):
 
 def measurement(args, name, case, commands):
     connections, size, window, kind = case
-    command = ["taskset", "-c", str(args.server_cpu), *commands[name]]
+    server_cpus = args.beast_cpus if name == "Boost.Beast" else [args.server_cpu]
+    command = ["taskset", "-c", ",".join(map(str, server_cpus)), *commands[name]]
     socket_dir = tempfile.TemporaryDirectory(prefix="s-", dir=BUILD)
     unix_address = f"unix:{socket_dir.name}/ws.sock"
     if args.unix:
         command[-1] = unix_address
-    if kind == "telemetry-binary":
+    if name == "Boost.Beast":
+        command.extend(["telemetry" if kind == "telemetry-binary" else "echo", str(args.beast_threads)])
+    elif kind == "telemetry-binary":
         command.append("telemetry")
     server = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     workers = []
@@ -104,6 +107,8 @@ def measurement(args, name, case, commands):
         return {
             "library": name, "connections": connections, "bytes": size,
             "window": window, "kind": kind,
+            "server_threads": args.beast_threads if name == "Boost.Beast" else 1,
+            "server_cpus": server_cpus,
             "messages_per_second": sum(r["messages_per_second"] for r in results),
             "server_cpu_fraction_including_warmup": cpu / wall,
             "workers": results,
@@ -121,27 +126,34 @@ def main():
     transport.add_argument("--bind-ip", type=ipaddress.IPv6Address)
     transport.add_argument("--unix", action="store_true")
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--libraries", nargs="+", default=["yawc", "tokio-tungstenite", "fastwebsockets", "uWebSockets", "Boost.Beast"])
+    parser.add_argument("--libraries", nargs="+", default=["yawc-buffered-128k", "tokio-tungstenite", "fastwebsockets", "uWebSockets", "Boost.Beast"])
     parser.add_argument("--baseline-server", type=Path)
     parser.add_argument("--load-generator", type=Path, default=RUST / "load")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmup", type=float, default=1)
     parser.add_argument("--seconds", type=float, default=3)
     parser.add_argument("--server-cpu", type=int, default=2)
+    parser.add_argument("--beast-threads", type=int, default=1)
+    parser.add_argument("--beast-cpus", type=int, nargs="+")
     parser.add_argument("--client-cpus", type=int, nargs="+", default=[4, 6])
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--case-index", type=int, nargs="+", choices=range(len(CASES)))
     args = parser.parse_args()
+    args.beast_cpus = args.beast_cpus or [args.server_cpu]
+    if not 1 <= args.beast_threads <= 64 or len(args.beast_cpus) < args.beast_threads:
+        parser.error("provide at least one Beast CPU per thread (1 to 64 threads)")
     if args.bind_ip and (args.bind_ip.is_unspecified or args.bind_ip.is_multicast):
         parser.error("an explicit unicast address is required")
     if args.repeats < 1 or args.seconds <= 0 or args.warmup < 0:
         parser.error("invalid timing parameters")
-    if args.server_cpu in args.client_cpus or len(set(args.client_cpus)) != len(args.client_cpus):
+    if set([args.server_cpu, *args.beast_cpus]) & set(args.client_cpus) or len(set(args.client_cpus)) != len(args.client_cpus):
         parser.error("server and client CPUs must be distinct")
     allowed = os.sched_getaffinity(0)
-    if not set([args.server_cpu, *args.client_cpus]).issubset(allowed):
+    if not set([args.server_cpu, *args.beast_cpus, *args.client_cpus]).issubset(allowed):
         parser.error("selected CPUs are outside this process's affinity")
-    cpus = [args.server_cpu, *args.client_cpus]
+    if len(set(args.beast_cpus)) != len(args.beast_cpus):
+        parser.error("Beast CPUs must be distinct")
+    cpus = sorted(set([args.server_cpu, *args.beast_cpus, *args.client_cpus]))
     topology = [Path(f"/sys/devices/system/cpu/cpu{cpu}") for cpu in cpus]
     physical_cores = [tuple((path / "topology" / field).read_text().strip()
                            for field in ["physical_package_id", "core_id"]) for path in topology]
@@ -150,7 +162,7 @@ def main():
     caches = [last_level_cache(path) for path in topology]
     address = "unix:" if args.unix else f"[{args.bind_ip}]:0"
     commands = {name: [str(RUST / "server"), name, address]
-                for name in ["yawc", "yawc-batched", "yawc-buffered", "yawc-buffered-128k", "yawc-buffered-512k", "yawc-corked-128k", "tokio-tungstenite", "tokio-tungstenite-batched", "fastwebsockets"]}
+                for name in ["yawc", "yawc-batched", "yawc-buffered", "yawc-buffered-128k", "yawc-buffered-512k", "tokio-tungstenite", "tokio-tungstenite-batched", "fastwebsockets"]}
     cpp_address = "unix:" if args.unix else str(args.bind_ip)
     commands.update({"uWebSockets": [str(BUILD / "uws"), cpp_address],
                      "Boost.Beast": [str(BUILD / "beast"), cpp_address]})
@@ -170,9 +182,11 @@ def main():
                 for case in cases for name in args.libraries]
     random.Random(6455).shuffle(schedule)
     report = {
-        "schema": 1, "complete": False,
+        "schema": 2, "complete": False,
         "warmup_seconds": args.warmup, "measurement_seconds": args.seconds,
-        "repeats": args.repeats, "server_threads": 1, "server_cpu": args.server_cpu,
+        "repeats": args.repeats,
+        "server_threads": {name: args.beast_threads if name == "Boost.Beast" else 1 for name in args.libraries},
+        "server_cpu": args.server_cpu, "beast_cpus": args.beast_cpus,
         "cases": cases, "libraries": args.libraries,
         "client_cpus": args.client_cpus,
         "shared_last_level_cache": len(set(caches)) == 1,

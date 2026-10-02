@@ -3,6 +3,8 @@
 #include "telemetry.h"
 #include <iostream>
 #include <memory>
+#include <thread>
+#include <vector>
 
 namespace net = boost::asio;
 namespace beast = boost::beast;
@@ -54,32 +56,52 @@ public:
 };
 
 template<class Acceptor>
-void accept(Acceptor &listener, bool telemetry) {
-    listener.async_accept([&listener, telemetry](beast::error_code ec, auto socket) {
-        if (!ec) std::make_shared<Session<decltype(socket)>>(std::move(socket), telemetry)->start();
-        accept(listener, telemetry);
-    });
+void accept(Acceptor &listener, bool telemetry, int threads) {
+    auto accepted = [&listener, telemetry, threads](beast::error_code ec, auto socket) {
+        using Socket = typename decltype(socket)::protocol_type::socket;
+        if (!ec) std::make_shared<Session<Socket>>(Socket(std::move(socket)), telemetry)->start();
+        accept(listener, telemetry, threads);
+    };
+    if (threads == 1)
+        listener.async_accept(std::move(accepted));
+    else
+        listener.async_accept(net::make_strand(listener.get_executor()), std::move(accepted));
+}
+
+void run(net::io_context &io, int threads) {
+    std::vector<std::jthread> workers;
+    for (int index = 1; index < threads; ++index)
+        workers.emplace_back([&io] { io.run(); });
+    io.run();
 }
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 2 && argc != 3) throw std::runtime_error("expected bind address");
-        bool telemetry = argc == 3 && std::string_view(argv[2]) == "telemetry";
-        if (argc == 3 && !telemetry) throw std::runtime_error("expected telemetry workload");
-        net::io_context io(1);
+        if (argc < 2 || argc > 4) throw std::runtime_error("expected bind address [echo|telemetry] [threads]");
+        bool telemetry = argc >= 3 && std::string_view(argv[2]) == "telemetry";
+        if (argc >= 3 && !telemetry && std::string_view(argv[2]) != "echo")
+            throw std::runtime_error("expected echo or telemetry workload");
+        int threads = 1;
+        if (argc == 4) {
+            std::size_t parsed;
+            threads = std::stoi(argv[3], &parsed);
+            if (parsed != std::string_view(argv[3]).size() || threads < 1 || threads > 64)
+                throw std::runtime_error("expected 1 to 64 threads");
+        }
+        net::io_context io(threads);
         if (std::string_view(argv[1]).starts_with("unix:")) {
             local::acceptor listener(io, local::endpoint(argv[1] + 5));
             std::cout << "READY unix" << std::endl;
-            accept(listener, telemetry);
-            io.run();
+            accept(listener, telemetry, threads);
+            run(io, threads);
             return 0;
         }
         auto address = net::ip::make_address(argv[1]);
         if (address.is_unspecified()) throw std::runtime_error("explicit bind IP required");
         tcp::acceptor listener(io, {address, 0});
         std::cout << "READY " << listener.local_endpoint().port() << std::endl;
-        accept(listener, telemetry);
-        io.run();
+        accept(listener, telemetry, threads);
+        run(io, threads);
     } catch (std::exception const &e) {
         std::cerr << e.what() << '\n';
         return 1;

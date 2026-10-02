@@ -29,7 +29,6 @@ enum Library {
     Yawc,
     YawcBatched,
     YawcBuffered(usize),
-    YawcCorked(usize),
     Fastwebsockets,
     Tungstenite,
     TungsteniteBatched,
@@ -52,15 +51,12 @@ async fn upgrade(
     workload: Workload,
 ) -> Result<Response<Empty<Bytes>>> {
     match library {
-        Library::Yawc | Library::YawcBatched | Library::YawcBuffered(_) | Library::YawcCorked(_) => {
+        Library::Yawc | Library::YawcBatched | Library::YawcBuffered(_) => {
             let mut options = Options::default().with_utf8().without_compression();
-            if let Library::YawcBuffered(capacity) | Library::YawcCorked(capacity) = library {
+            if let Library::YawcBuffered(capacity) = library {
                 options = options
                     .with_read_buffer_capacity(capacity)
                     .with_backpressure_boundary(64 * 1024);
-            }
-            if matches!(library, Library::YawcCorked(_)) {
-                options = options.with_cork_writes_during_receive();
             }
             let (response, future) = WebSocket::upgrade_with_options(&mut req, options)?;
             tokio::spawn(async move {
@@ -68,19 +64,6 @@ async fn upgrade(
                 let mut state = TelemetryState::default();
                 loop {
                     let mut frame = ws.next_frame().await?;
-                    if matches!(library, Library::YawcCorked(_)) {
-                        match frame.opcode() {
-                            OpCode::Text | OpCode::Binary => {
-                                ws.feed(yawc_reply(frame, workload, &mut state)?).await?
-                            }
-                            OpCode::Close => {
-                                ws.close().await?;
-                                return Ok::<_, anyhow::Error>(());
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
                     if matches!(library, Library::YawcBatched | Library::YawcBuffered(_)) {
                         for index in 0..32 {
                             match frame.opcode() {
@@ -223,7 +206,6 @@ async fn main() -> Result<()> {
         Some("yawc-batched") => Library::YawcBatched,
         Some("yawc-buffered") => Library::YawcBuffered(64 * 1024),
         Some("yawc-buffered-128k") => Library::YawcBuffered(128 * 1024),
-        Some("yawc-corked-128k") => Library::YawcCorked(128 * 1024),
         Some("yawc-buffered-512k") => Library::YawcBuffered(512 * 1024),
         Some("fastwebsockets") => Library::Fastwebsockets,
         Some("tokio-tungstenite") => Library::Tungstenite,

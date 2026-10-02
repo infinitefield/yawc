@@ -158,7 +158,6 @@ pub struct Streaming<S> {
     obligated_sends: VecDeque<Frame>,
     // flag to indicate the writer to flush sends
     flush_sends: bool,
-    cork_writes_during_receive: bool,
     // compressor
     deflate: Option<Compressor>,
     // decompressor
@@ -169,10 +168,6 @@ impl<S> Streaming<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub(super) fn cork_writes_during_receive(&self) -> bool {
-        self.cork_writes_during_receive
-    }
-
     pub(crate) fn new(role: Role, stream: S, read_buf: Bytes, negotiated: &Negotiation) -> Self {
         let decoder = codec::Decoder::new(role, negotiated.max_payload_read);
         let encoder = codec::Encoder::new(role);
@@ -198,7 +193,6 @@ where
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
-            cork_writes_during_receive: negotiated.cork_writes_during_receive,
             deflate: negotiated.compressor(),
             inflate: negotiated.decompressor(),
         }
@@ -290,13 +284,6 @@ where
                     let res = ready!(self.poll_flush_obligated(ContextKind::Read, cx));
                     if let Err(err) = res {
                         return Poll::Ready(Err(err));
-                    }
-                    if self.cork_writes_during_receive && !self.stream.write_buffer().is_empty() {
-                        ready!(self
-                            .wake_proxy
-                            .poll_with_context(ContextKind::Read, cx, |cx| {
-                                self.write_half.poll_flush(&mut self.stream, cx)
-                            }))?;
                     }
                     return Poll::Pending;
                 }
@@ -539,39 +526,7 @@ mod wake_tests {
 mod capacity_tests {
     use super::*;
     use crate::Options;
-    use futures::SinkExt;
     use tokio::io::duplex;
-    use tokio::time::{timeout, Duration};
-
-    #[tokio::test]
-    async fn corked_receive_flushes_replies_when_input_runs_out() {
-        let client_options = Options::default().with_cork_writes_during_receive();
-        let client_negotiated = Negotiation::new(None, &client_options, Role::Client).unwrap();
-        let server_negotiated = Negotiation::new(None, &Options::default(), Role::Server).unwrap();
-        let (client_io, server_io) = duplex(4096);
-        let mut client = Streaming::new(Role::Client, client_io, Bytes::new(), &client_negotiated);
-        let mut server = Streaming::new(Role::Server, server_io, Bytes::new(), &server_negotiated);
-
-        server.feed(Frame::binary("first")).await.unwrap();
-        server.feed(Frame::binary("second")).await.unwrap();
-        server.flush().await.unwrap();
-
-        for expected in [b"first".as_slice(), b"second".as_slice()] {
-            let request = client.next_frame().await.unwrap();
-            assert_eq!(request.payload().as_ref(), expected);
-            client.feed(request).await.unwrap();
-        }
-
-        let client_read = tokio::spawn(async move { client.next_frame().await });
-        for expected in [b"first".as_slice(), b"second".as_slice()] {
-            let reply = timeout(Duration::from_secs(1), server.next_frame())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(reply.payload().as_ref(), expected);
-        }
-        client_read.abort();
-    }
 
     #[tokio::test]
     async fn reservation_preserves_bytes_received_with_the_upgrade() {

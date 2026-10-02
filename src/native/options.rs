@@ -124,13 +124,6 @@ pub struct Options {
     ///
     /// Default: `None` (uses tokio-util default)
     pub max_backpressure_write_boundary: Option<usize>,
-
-    /// Flush frames queued with `feed()` when a receive runs out of ready input.
-    ///
-    /// This lets a request-response loop batch replies from one receive burst without
-    /// waiting for another request before sending them. Explicit `flush()` still works.
-    /// Default: `false`.
-    pub cork_writes_during_receive: bool,
 }
 
 /// Configuration for WebSocket message fragmentation.
@@ -491,14 +484,6 @@ impl Options {
     pub fn with_backpressure_boundary(self, size: usize) -> Self {
         Self {
             max_backpressure_write_boundary: Some(size),
-            ..self
-        }
-    }
-
-    /// Flush queued writes when receiving would otherwise wait for more input.
-    pub fn with_cork_writes_during_receive(self) -> Self {
-        Self {
-            cork_writes_during_receive: true,
             ..self
         }
     }

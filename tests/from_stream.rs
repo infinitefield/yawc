@@ -10,7 +10,6 @@
 
 use futures::{SinkExt, StreamExt};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::time::{timeout, Duration};
 use yawc::{frame::OpCode, Frame, Options, Role, WebSocket, WebSocketError};
 
 /// Builds a connected client/server pair over an in-memory duplex.
@@ -36,23 +35,6 @@ async fn round_trips_in_both_directions() {
     let frame = client.next().await.unwrap();
     assert_eq!(frame.opcode(), OpCode::Binary);
     assert_eq!(frame.payload().as_ref(), &[9, 8, 7]);
-}
-
-#[tokio::test]
-async fn receive_corking_flushes_queued_fragments() {
-    let options = Options::default()
-        .with_max_fragment_size(3)
-        .with_cork_writes_during_receive();
-    let (mut client, mut server) = pair(options);
-    client.feed(Frame::binary("abcdef")).await.unwrap();
-
-    let client_read = tokio::spawn(async move { client.next_frame().await });
-    let frame = timeout(Duration::from_secs(1), server.next_frame())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(frame.payload().as_ref(), b"abcdef");
-    client_read.abort();
 }
 
 #[tokio::test]

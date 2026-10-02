@@ -120,6 +120,20 @@ Each binary request carries a sequence number and a batch of 32-bit readings. Th
 | 1 KiB, 16 connections, window 16 | 2,086,343 | 1,636,646 | 607,637 | 2,096,138 | 275,843 |
 | 20 B, 16 connections, window 16 | 2,681,737 | 2,026,108 | 719,589 | 4,569,648 | 404,668 |
 
+### Beast thread scaling
+
+Separate runs used one or four Asio threads on one or four physical server cores,
+with 16 connections and the same client workers and timings as above. Values are
+median messages per second from five repetitions. The comparison tables above
+use one server thread for every library.
+
+| Binary workload | Beast, 1 thread | Beast, 4 threads |
+|---|---:|---:|
+| Echo, 1 KiB, window 1 | 222,215 | 616,851 |
+| Echo, 1 KiB, window 16 | 265,241 | 635,145 |
+| Telemetry, 1 KiB, window 16 | 277,105 | 646,307 |
+| Telemetry, 20 B, window 16 | 387,702 | 899,755 |
+
 The allocation benchmark reported zero allocations and reallocations after warmup in all 16 codec, echo, and fragmented echo cases from 20 B to 64 KiB. See the [benchmark instructions](https://github.com/infinitefield/yawc/blob/master/benches/README.md) for the workloads and reproduction commands. These local plaintext results exclude TLS, compression, and application dependencies; hardware and background load affect them.
 
 ## Development
