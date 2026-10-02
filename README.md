@@ -101,44 +101,34 @@ The [benchmark code](benches/comparison/) includes the [runner](benches/comparis
 
 Window 1 sends one request per connection before waiting for its reply. Window 16 sends 16 requests before reading their replies. The yawc server batches up to 32 immediately ready messages, then flushes; it adds no timer delay.
 
-On 2026-10-02, a matched run completed 210 validated samples over Unix sockets. Each server used one thread; four client workers ran on separate physical cores. Values are median messages per second from five randomized repetitions, with 0.5 seconds of warmup and 2 seconds of measurement per sample. All responses were checked. Higher is better.
+Measurements on 2026-10-02 used Unix sockets and four client workers. Values are median messages per second from five randomized repetitions, with 0.5 seconds of warmup and 2 seconds of measurement per sample. All responses were checked. Higher is better. Beast used all 32 available logical CPUs, including client CPUs; other servers used one thread on a separate physical core.
 
-yawc used a 128 KiB read buffer, a 64 KiB write backpressure threshold, and batches of up to 32 ready messages. tokio-tungstenite used its default adapter for window 1 and its batched adapter for window 16. fastwebsockets and Beast flushed each response; uWebSockets batched writes internally. The tuned buffers increase memory use per connection.
+Beast's results and yawc/uWebSockets telemetry were refreshed after the acknowledgement buffer change. Other entries retain the original matched run's measurements.
+
+yawc used a 128 KiB read buffer, a 64 KiB write backpressure threshold, and batches of up to 32 ready messages. Telemetry acknowledgements reuse a per-connection buffer. tokio-tungstenite used its default adapter for window 1 and its batched adapter for window 16. fastwebsockets and Beast completed a write per response; uWebSockets batched writes internally. The tuned buffers increase memory use per connection.
 
 ### Echo
 
 | Binary workload | yawc tuned | tokio-tungstenite | fastwebsockets | uWebSockets | Boost.Beast |
 |---|---:|---:|---:|---:|---:|
-| 20 B, 64 connections, window 1 | 299,871 | 218,543 | 319,369 | 373,675 | 236,503 |
-| 1 KiB, 16 connections, window 1 | 269,074 | 205,838 | 282,914 | 323,312 | 223,912 |
-| 1 KiB, 16 connections, window 16 | 1,838,982 | 1,466,336 | 566,137 | 2,292,540 | 276,305 |
-| 1 KiB in two fragments, 16 connections, window 16 | 1,527,572 | 1,182,136 | 506,162 | 2,200,804 | 252,129 |
+| 20 B, 64 connections, window 1 | 299,871 | 218,543 | 319,369 | 373,675 | 363,812 |
+| 1 KiB, 16 connections, window 1 | 269,074 | 205,838 | 282,914 | 323,312 | 210,303 |
+| 1 KiB, 16 connections, window 16 | 1,838,982 | 1,466,336 | 566,137 | 2,292,540 | 213,781 |
+| 1 KiB in two fragments, 16 connections, window 16 | 1,527,572 | 1,182,136 | 506,162 | 2,200,804 | 170,840 |
 
 ### Telemetry aggregation
 
 Each binary request carries a sequence number and a batch of 32-bit readings. The server sums the readings, updates a per-connection total, and returns a 24-byte acknowledgement containing the sequence, total, and message count. The client validates every acknowledgement.
 
+20 B holds an 8-byte sequence and three readings, exposing per-message overhead. The 1 KiB cases carry 254 readings per request. Reusing yawc's acknowledgement buffer raised the 20 B result from 2.60M to 2.87M messages/s in a matched before/after run.
+
 | Binary workload | yawc tuned | tokio-tungstenite | fastwebsockets | uWebSockets | Boost.Beast |
 |---|---:|---:|---:|---:|---:|
-| 1 KiB, 16 connections, window 1 | 272,277 | 207,178 | 289,386 | 313,142 | 219,811 |
-| 1 KiB, 16 connections, window 16 | 2,086,343 | 1,636,646 | 607,637 | 2,096,138 | 275,843 |
-| 20 B, 16 connections, window 16 | 2,681,737 | 2,026,108 | 719,589 | 4,569,648 | 404,668 |
+| 1 KiB, 16 connections, window 1 | 273,549 | 207,178 | 289,386 | 313,726 | 220,171 |
+| 1 KiB, 16 connections, window 16 | 2,087,904 | 1,636,646 | 607,637 | 2,096,959 | 217,654 |
+| 20 B, 16 connections, window 16 | 2,865,171 | 2,026,108 | 719,589 | 4,479,250 | 297,344 |
 
-### Beast thread scaling
-
-Separate runs used one or four Asio threads on one or four physical server cores,
-with 16 connections and the same client workers and timings as above. Values are
-median messages per second from five repetitions. The comparison tables above
-use one server thread for every library.
-
-| Binary workload | Beast, 1 thread | Beast, 4 threads |
-|---|---:|---:|
-| Echo, 1 KiB, window 1 | 222,215 | 616,851 |
-| Echo, 1 KiB, window 16 | 265,241 | 635,145 |
-| Telemetry, 1 KiB, window 16 | 277,105 | 646,307 |
-| Telemetry, 20 B, window 16 | 387,702 | 899,755 |
-
-The allocation benchmark reported zero allocations and reallocations after warmup in all 16 codec, echo, and fragmented echo cases from 20 B to 64 KiB. See the [benchmark instructions](https://github.com/infinitefield/yawc/blob/master/benches/README.md) for the workloads and reproduction commands. These local plaintext results exclude TLS, compression, and application dependencies; hardware and background load affect them.
+The allocation benchmark reported zero allocations and reallocations after warmup in all 20 cases: codec, echo, and fragmented echo from 20 B to 64 KiB, plus telemetry at 20 B and 1 KiB with windows 1 and 16. See the [benchmark instructions](https://github.com/infinitefield/yawc/blob/master/benches/README.md) for reproduction commands. These local plaintext results exclude TLS, compression, and application dependencies; hardware and background load affect them.
 
 ## Development
 

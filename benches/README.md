@@ -21,7 +21,8 @@ For a local baseline without a network listener, use `--unix` instead of
 after each sample. Compare results only within the same transport.
 Generated measurements belong in `target/comparison/` or the ignored `benches/results/` directory.
 
-By default, each server runs one event-loop thread with compression disabled and no TLS.
+Beast uses one Asio worker per available logical CPU by default; the other servers
+use one event-loop thread. Compression and TLS are disabled.
 TCP runs enable TCP_NODELAY. The common client validates the HTTP upgrade and
 every echo or application acknowledgement, uses fresh random masks, and supports
 fragmented responses. Text cases enable UTF-8 validation. Handshakes and warmup
@@ -43,11 +44,13 @@ running total, and sends a 24-byte binary acknowledgement containing the
 sequence number, total, and number of processed batches. The client checks all
 three fields on every response, including when 16 requests are pipelined.
 Cases 13 and 14 use 1 KiB requests with windows of 1 and 16; case 15 uses
-20-byte requests with a window of 16. This adds parsing, state updates, and
+20-byte requests (a sequence and three readings) with a window of 16. The small
+case measures per-message overhead; the 1 KiB cases process 254 readings per request.
+This adds parsing, state updates, and
 response construction without depending on a database or external service.
 Use `--case-index 13 --repeats 1 --seconds 1` for a quick validation run.
 
-The README tables use this matched run. Select other CPU IDs if these are not
+Run the workloads in the README tables with this command. Select other CPU IDs if these are not
 distinct physical cores on your machine:
 
 ```sh
@@ -72,22 +75,18 @@ The runner selects `yawc-buffered-128k` by default.
 Use `--baseline-server` with `yawc-batched-before` to compare library changes
 under the same batching policy. The saved server must support that adapter.
 
-Beast can run multiple Asio workers with `--beast-threads 4 --beast-cpus 0 1 2 3`.
-With multiple workers, each connection uses a strand to serialize its handlers.
-Choose server cores that do not overlap `--client-cpus`. Other adapters still use one server thread;
-the report records each adapter's thread count and CPU allocation.
+Beast defaults to all available logical CPUs, including those used by the client.
+Each connection uses a strand to serialize its handlers. Override the allocation
+with `--beast-threads` and `--beast-cpus`; the report records both.
 
-Reproduce the four-thread Beast table with:
+Refresh Beast's README entries with:
 
 ```sh
 python3 benches/comparison/run.py --unix --libraries Boost.Beast \
-  --beast-threads 4 --beast-cpus 0 1 2 3 --client-cpus 4 6 8 10 \
-  --case-index 2 5 14 15 --warmup 0.5 --seconds 2 --repeats 5 \
-  --output target/comparison/beast-four-threads.json
+  --client-cpus 4 6 8 10 --case-index 1 2 5 9 13 14 15 \
+  --warmup 0.5 --seconds 2 --repeats 5 \
+  --output target/comparison/beast-all-threads.json
 ```
-
-For the one-thread control, omit `--beast-threads` and `--beast-cpus`, and choose
-a different output filename.
 
 ## Throughput settings
 
@@ -156,7 +155,9 @@ cargo bench -p yawc --bench allocations -- --assert-zero
 
 Counts allocations and reallocations after 1,024 warmup iterations, including both
 peers and the in-memory transport. Cases cover codec roundtrips, echo windows of
-1 and 16, and two-fragment messages from 20 B to 64 KiB. Payloads are consumed
+1 and 16, and two-fragment messages from 20 B to 64 KiB. Telemetry also covers
+20 B and 1 KiB requests with both windows, using the comparison server's reusable
+acknowledgement buffer. Payloads are consumed
 before the next iteration. Connection setup, buffer growth, retained messages,
 TLS and compression are outside this check. Fragment assembly retains its buffer
 for reuse; retaining a returned message can require another allocation.

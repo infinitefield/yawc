@@ -1,19 +1,30 @@
 use anyhow::{ensure, Result};
+use bytes::{Bytes, BytesMut};
 
 #[derive(Default)]
 pub struct TelemetryState {
     messages: u64,
     total: u64,
+    reply_buffer: BytesMut,
 }
 
 impl TelemetryState {
+    pub fn acknowledge_buffered(&mut self, payload: &[u8]) -> Result<Bytes> {
+        let reply = self.acknowledge(payload)?;
+        // The encoder drops each reply before the next feed, allowing buffer reuse.
+        self.reply_buffer.extend_from_slice(&reply);
+        Ok(self.reply_buffer.split().freeze())
+    }
+
+    // Shared with the allocation benchmark, which supports Rust 1.82.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn acknowledge(&mut self, payload: &[u8]) -> Result<[u8; 24]> {
         ensure!(payload.len() >= 12, "invalid telemetry batch");
-        let (readings, remainder) = payload[8..].as_chunks::<4>();
-        ensure!(remainder.is_empty(), "invalid telemetry batch");
+        let readings = payload[8..].chunks_exact(4);
+        ensure!(readings.remainder().is_empty(), "invalid telemetry batch");
         let sequence = u64::from_le_bytes(payload[..8].try_into()?);
         for reading in readings {
-            self.total += u32::from_le_bytes(*reading) as u64;
+            self.total += u32::from_le_bytes(reading.try_into()?) as u64;
         }
         self.messages += 1;
 
@@ -27,11 +38,9 @@ impl TelemetryState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn tracks_readings_across_batches() {
-        let mut state = TelemetryState::default();
+        let mut state = super::TelemetryState::default();
         let mut request = Vec::new();
         request.extend_from_slice(&7_u64.to_le_bytes());
         request.extend_from_slice(&11_u32.to_le_bytes());
@@ -64,7 +73,7 @@ mod tests {
 
     #[test]
     fn rejects_incomplete_readings() {
-        let mut state = TelemetryState::default();
+        let mut state = super::TelemetryState::default();
         assert!(state.acknowledge(&[0; 11]).is_err());
         assert!(state.acknowledge(&[0; 13]).is_err());
     }

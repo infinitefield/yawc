@@ -42,7 +42,7 @@ fn yawc_reply(frame: Frame, workload: Workload, state: &mut TelemetryState) -> R
         frame.opcode() == OpCode::Binary,
         "telemetry requires binary frames"
     );
-    Ok(Frame::binary(state.acknowledge(frame.payload())?.to_vec()))
+    Ok(Frame::binary(state.acknowledge_buffered(frame.payload())?))
 }
 
 async fn upgrade(

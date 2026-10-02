@@ -15,6 +15,10 @@ use yawc::{
     Frame, Options, Role, WebSocket,
 };
 
+#[path = "comparison/src/bin/server/telemetry.rs"]
+mod telemetry;
+use telemetry::TelemetryState;
+
 struct CountingAllocator;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
@@ -181,5 +185,52 @@ fn main() {
             }
         });
         report("fragmented_echo", size, 1, assert_zero);
+    }
+
+    for size in [20, 1024] {
+        let mut payload = vec![0; size];
+        payload[..8].copy_from_slice(&7_u64.to_le_bytes());
+        for reading in payload[8..].chunks_exact_mut(4) {
+            reading.copy_from_slice(&1_u32.to_le_bytes());
+        }
+        let payload = Bytes::from(payload);
+        for window in [1, 16] {
+            let (client, server) = duplex((size + 32) * window * 2);
+            let options = Options::default()
+                .with_read_buffer_capacity(128 * 1024)
+                .with_backpressure_boundary(64 * 1024);
+            let mut client = WebSocket::from_stream(client, Role::Client, options.clone()).unwrap();
+            let mut server = WebSocket::from_stream(server, Role::Server, options).unwrap();
+            let mut state = TelemetryState::default();
+            let mut count = 0_u64;
+            runtime.block_on(async {
+                for iteration in 0..WARMUP + ITERATIONS {
+                    if iteration == WARMUP {
+                        start_counting();
+                    }
+                    for _ in 0..window {
+                        client.feed(Frame::binary(payload.clone())).await.unwrap();
+                    }
+                    client.flush().await.unwrap();
+                    for _ in 0..window {
+                        let frame = server.next_frame().await.unwrap();
+                        let reply = state.acknowledge_buffered(frame.payload()).unwrap();
+                        server.feed(Frame::binary(reply)).await.unwrap();
+                    }
+                    server.flush().await.unwrap();
+                    for _ in 0..window {
+                        count += 1;
+                        let frame = client.next_frame().await.unwrap();
+                        let mut expected = [0; 24];
+                        expected[..8].copy_from_slice(&7_u64.to_le_bytes());
+                        let total = count * ((size - 8) / 4) as u64;
+                        expected[8..16].copy_from_slice(&total.to_le_bytes());
+                        expected[16..].copy_from_slice(&count.to_le_bytes());
+                        assert_eq!(frame.payload().as_ref(), &expected);
+                    }
+                }
+            });
+            report("telemetry", size, window, assert_zero);
+        }
     }
 }
