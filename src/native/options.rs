@@ -78,6 +78,13 @@ pub struct Options {
     /// configured `max_payload_read` value if that is set.
     pub max_read_buffer: Option<usize>,
 
+    /// Initial capacity of the socket read buffer, in bytes.
+    ///
+    /// Larger buffers can reduce reads for bursts of messages, at the cost of memory
+    /// per connection. The buffer can grow beyond this capacity for large frames.
+    /// This does not change message size limits. Tokio's minimum is 8 KiB.
+    pub read_buffer_capacity: Option<usize>,
+
     /// Compression settings for the WebSocket connection.
     ///
     /// Compression is based on the Deflate algorithm, with additional configuration available
@@ -354,6 +361,17 @@ impl Options {
     pub fn with_max_read_buffer(self, size: usize) -> Self {
         Self {
             max_read_buffer: Some(size),
+            ..self
+        }
+    }
+
+    /// Reserve at least `capacity` bytes initially for socket reads (minimum 8 KiB).
+    ///
+    /// Use a larger value for bursts of small messages when the extra memory per
+    /// connection is acceptable. Fragment assembly limits are configured separately.
+    pub fn with_read_buffer_capacity(self, capacity: usize) -> Self {
+        Self {
+            read_buffer_capacity: Some(capacity),
             ..self
         }
     }

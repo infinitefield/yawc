@@ -91,7 +91,7 @@
 //! For more details on the WebSocket protocol and frame handling, see [RFC 6455 Section 5](https://datatracker.ietf.org/doc/html/rfc6455#section-5).
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))] // Silence dead code warning for WASM
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::{close::CloseCode, WebSocketError};
 
@@ -659,7 +659,7 @@ impl Frame {
     /// ```
     #[inline(always)]
     pub fn set_random_mask(&mut self) {
-        self.mask = Some(rand::random());
+        self.mask = Some(rand::random::<u32>().to_ne_bytes());
     }
 
     /// Sets a randomly generated masking key for this frame (builder pattern).
@@ -674,7 +674,7 @@ impl Frame {
     /// ```
     #[inline(always)]
     pub fn with_random_mask(mut self) -> Self {
-        self.mask = Some(rand::random());
+        self.mask = Some(rand::random::<u32>().to_ne_bytes());
         self
     }
 
@@ -756,15 +756,14 @@ impl Frame {
     #[inline]
     pub(super) fn set_random_mask_if_not_set(&mut self) {
         if self.mask.is_none() {
-            let mask: [u8; 4] = rand::random();
+            let mask = rand::random::<u32>().to_ne_bytes();
             self.mask = Some(mask);
         }
     }
 
-    /// Write frame header directly into BytesMut without intermediate buffer.
-    /// This is faster than fmt_head as it eliminates an extra copy.
+    /// Append the frame header to the output buffer.
     #[inline]
-    pub(super) fn write_head(&self, dst: &mut bytes::BytesMut) {
+    pub(super) fn write_head(&self, dst: &mut BytesMut) {
         use bytes::BufMut;
 
         let compression = u8::from(self.is_compressed);

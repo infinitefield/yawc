@@ -1,4 +1,5 @@
 /target
+/.worktrees/
 /yawcc/target
 /Cargo.lock
 tags*
@@ -10,6 +11,12 @@ tags*
 !/benches/README.md
 !/benches/load_test.c
 !/benches/Makefile
+!/benches/comparison/
+/benches/comparison/target/
+/benches/comparison/__pycache__/
+!/benches/performance.rs
+!/benches/allocations.rs
+/benches/results/
 
 # cargo-fuzz
 fuzz/Cargo.lock

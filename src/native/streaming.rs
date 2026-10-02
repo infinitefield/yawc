@@ -175,6 +175,11 @@ where
 
         let mut parts = FramedParts::new(stream, codec);
         parts.read_buf = read_buf.into();
+        if let Some(capacity) = negotiated.read_buffer_capacity {
+            parts
+                .read_buf
+                .reserve(capacity.saturating_sub(parts.read_buf.len()));
+        }
 
         let mut framed = Framed::from_parts(parts);
         if let Some(boundary) = negotiated.max_backpressure_write_boundary {
@@ -239,18 +244,24 @@ where
     /// - Middle fragments: `OpCode::Continuation` with `FIN=false`
     /// - Final fragment: `OpCode::Continuation` with `FIN=true`
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
-        let wake_proxy = Arc::clone(&self.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Read, cx.waker());
-
         loop {
-            let res = wake_proxy.with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx));
+            let res = if self.stream.read_buffer().is_empty() {
+                self.wake_proxy.set_waker(ContextKind::Read, cx.waker());
+                self.wake_proxy
+                    .with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx))
+            } else {
+                self.wake_proxy
+                    .poll_with_context(ContextKind::Read, cx, |cx| {
+                        self.read_half.poll_frame(&mut self.stream, cx)
+                    })
+            };
             match res {
                 Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
                     Some(frame) => return Poll::Ready(Ok(frame)),
                     None => continue,
                 },
                 Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
-                    ready!(wake_proxy.with_context(|cx| self.try_flush_obligated(cx)))?;
+                    ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
                     return Poll::Ready(Err(WebSocketError::ConnectionClosed));
                 }
                 Poll::Ready(Err(err)) => {
@@ -270,7 +281,7 @@ where
                     return Poll::Ready(Err(err));
                 }
                 Poll::Pending => {
-                    let res = ready!(wake_proxy.with_context(|cx| self.try_flush_obligated(cx)));
+                    let res = ready!(self.poll_flush_obligated(ContextKind::Read, cx));
                     if let Err(err) = res {
                         return Poll::Ready(Err(err));
                     }
@@ -349,21 +360,30 @@ where
         self.read_half.is_closed = true;
     }
 
-    fn try_flush_obligated(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        while !self.obligated_sends.is_empty() {
-            ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
-
-            let next = self.obligated_sends.pop_front().expect("obligated send");
-            self.write_half.start_send(&mut self.stream, next)?;
-            self.flush_sends = true;
+    fn poll_flush_obligated(
+        &mut self,
+        kind: ContextKind,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<()>> {
+        if self.obligated_sends.is_empty() && !self.flush_sends {
+            return Poll::Ready(Ok(()));
         }
+        self.wake_proxy.poll_with_context(kind, cx, |cx| {
+            while !self.obligated_sends.is_empty() {
+                ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
 
-        if self.flush_sends {
-            ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
-            self.flush_sends = false;
-        }
+                let next = self.obligated_sends.pop_front().expect("obligated send");
+                self.write_half.start_send(&mut self.stream, next)?;
+                self.flush_sends = true;
+            }
 
-        Poll::Ready(Ok(()))
+            if self.flush_sends {
+                ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
+                self.flush_sends = false;
+            }
+
+            Poll::Ready(Ok(()))
+        })
     }
 }
 
@@ -393,12 +413,17 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| {
-            ready!(this.try_flush_obligated(cx))?;
-            this.write_half.poll_ready(&mut this.stream, cx)
-        })
+        if this.obligated_sends.is_empty()
+            && !this.flush_sends
+            && this.stream.write_buffer().len() < this.stream.backpressure_boundary()
+        {
+            // Framed can accept another frame without polling the transport.
+            return this.write_half.poll_ready(&mut this.stream, cx);
+        }
+        this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
+        ready!(this.poll_flush_obligated(ContextKind::Write, cx))?;
+        this.wake_proxy
+            .with_context(|cx| this.write_half.poll_ready(&mut this.stream, cx))
     }
 
     fn start_send(self: Pin<&mut Self>, mut item: Frame) -> std::result::Result<(), Self::Error> {
@@ -430,9 +455,9 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
-        wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx))
+        this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
+        this.wake_proxy
+            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx))
     }
 
     fn poll_close(
@@ -440,8 +465,103 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        let wake_proxy = Arc::clone(&this.wake_proxy);
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        wake_proxy.with_context(|cx| this.write_half.poll_close(&mut this.stream, cx))
+        this.wake_proxy
+            .with_context(|cx| this.write_half.poll_close(&mut this.stream, cx))
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use crate::Options;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+    use tokio::io::{duplex, AsyncWriteExt};
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn two_buffered_header_bytes_register_a_waker_when_payload_is_missing() {
+        let negotiated = Negotiation::new(None, &Options::default(), Role::Client).unwrap();
+        let (io, mut peer) = duplex(16);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03"),
+            &negotiated,
+        );
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(stream.stream.read_buffer().len(), 2);
+        assert!(stream.poll_next_frame(&mut cx).is_pending());
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+
+        peer.write_all(b"abc").await.unwrap();
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        let Poll::Ready(Ok(frame)) = stream.poll_next_frame(&mut cx) else {
+            panic!("the completed frame must be ready after its payload arrives");
+        };
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload().as_ref(), b"abc");
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::Options;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn reservation_preserves_bytes_received_with_the_upgrade() {
+        let options = Options::default().with_read_buffer_capacity(64 * 1024);
+        let negotiated = Negotiation::new(None, &options, Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03abc"),
+            &negotiated,
+        );
+        assert!(stream.stream.read_buffer().capacity() >= 64 * 1024);
+        assert_eq!(
+            stream.next_frame().await.unwrap().payload().as_ref(),
+            b"abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_does_not_relax_the_payload_limit() {
+        let options = Options::default()
+            .with_read_buffer_capacity(64 * 1024)
+            .with_max_payload_read(2);
+        let negotiated = Negotiation::new(None, &options, Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03abc"),
+            &negotiated,
+        );
+        assert!(matches!(
+            stream.next_frame().await,
+            Err(WebSocketError::FrameTooLarge)
+        ));
     }
 }

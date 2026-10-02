@@ -583,6 +583,10 @@ This architecture ensures:
 
 ## Performance Considerations
 
+- For pipelined traffic, use `feed()` with bounded batches and explicit `flush()`.
+  `send()` flushes every message. The [buffer settings and echo example](benches/README.md#throughput-settings)
+  show the configuration used in the throughput benchmarks. Larger buffers cost memory
+  per connection; the measured rates are for local plaintext echo, without compression.
 - Uses zero-copy frame processing where possible
 - Efficient handling of fragmented messages
 - Configurable compression levels for bandwidth/CPU tradeoffs

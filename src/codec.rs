@@ -397,12 +397,40 @@ impl codec::Encoder<Frame> for Encoder {
         frame.write_head(dst);
 
         let index = dst.len();
-        dst.extend_from_slice(&frame.payload);
-
         if let Some(mask) = frame.mask {
-            crate::mask::apply_mask(&mut dst[index..], mask);
+            crate::mask::copy_mask(
+                &frame.payload,
+                &mut dst.spare_capacity_mut()[..payload_len],
+                mask,
+            );
+            // SAFETY: copy_mask initialized every payload byte in the reserved capacity.
+            unsafe { dst.set_len(index + payload_len) };
+        } else {
+            dst.extend_from_slice(&frame.payload);
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::codec::Encoder as _;
+
+    #[test]
+    fn encodes_the_rfc6455_masked_hello_example() {
+        let mut encoder = Encoder::new(Role::Client);
+        let mut output = BytesMut::new();
+        encoder
+            .encode(
+                Frame::text("Hello").with_mask([0x37, 0xfa, 0x21, 0x3d]),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            output.as_ref(),
+            &[0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58]
+        );
     }
 }
