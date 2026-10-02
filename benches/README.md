@@ -65,7 +65,8 @@ python3 benches/comparison/run.py --bind-ip "$BENCH_BIND_IP" \
   --libraries yawc-before yawc --output target/comparison/paired.json
 ```
 
-Codec, masking and in-memory echo costs can be measured without sockets:
+Codec, masking, in-memory echo and automatic Pong costs can be measured without sockets.
+The Pong cases use a 64-byte duplex buffer to exercise control-frame backpressure.
 
 ```sh
 taskset -c 2 cargo bench -p yawc --bench performance -- --save-baseline before

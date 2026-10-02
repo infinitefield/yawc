@@ -368,25 +368,22 @@ where
         if self.obligated_sends.is_empty() && !self.flush_sends {
             return Poll::Ready(Ok(()));
         }
-        let wake_proxy = Arc::clone(&self.wake_proxy);
-        wake_proxy.poll_with_context(kind, cx, |cx| self.try_flush_obligated(cx))
-    }
+        self.wake_proxy.poll_with_context(kind, cx, |cx| {
+            while !self.obligated_sends.is_empty() {
+                ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
 
-    fn try_flush_obligated(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        while !self.obligated_sends.is_empty() {
-            ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
+                let next = self.obligated_sends.pop_front().expect("obligated send");
+                self.write_half.start_send(&mut self.stream, next)?;
+                self.flush_sends = true;
+            }
 
-            let next = self.obligated_sends.pop_front().expect("obligated send");
-            self.write_half.start_send(&mut self.stream, next)?;
-            self.flush_sends = true;
-        }
+            if self.flush_sends {
+                ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
+                self.flush_sends = false;
+            }
 
-        if self.flush_sends {
-            ready!(self.write_half.poll_flush(&mut self.stream, cx))?;
-            self.flush_sends = false;
-        }
-
-        Poll::Ready(Ok(()))
+            Poll::Ready(Ok(()))
+        })
     }
 }
 

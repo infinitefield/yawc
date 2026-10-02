@@ -326,8 +326,17 @@ struct WakeProxy {
 
 impl futures::task::ArcWake for WakeProxy {
     fn wake_by_ref(this: &Arc<Self>) {
-        this.read_waker.wake();
-        this.write_waker.wake();
+        match (this.read_waker.take(), this.write_waker.take()) {
+            (Some(read), Some(write)) => {
+                // A single task may be waiting for both directions.
+                if !read.will_wake(&write) {
+                    write.wake();
+                }
+                read.wake();
+            }
+            (Some(waker), None) | (None, Some(waker)) => waker.wake(),
+            (None, None) => {}
+        }
     }
 }
 
@@ -2749,6 +2758,33 @@ mod wake_tests {
         WakeProxy::wake_by_ref(&proxy);
         assert_eq!(read.0.load(Ordering::Relaxed), 1);
         assert_eq!(write.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_shared_task_is_woken_once_and_can_register_again() {
+        let proxy = Arc::new(WakeProxy::default());
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        for expected in 1..=3 {
+            proxy.set_waker(ContextKind::Read, &waker);
+            proxy.set_waker(ContextKind::Write, &waker);
+            WakeProxy::wake_by_ref(&proxy);
+            assert_eq!(count.0.load(Ordering::Relaxed), expected);
+            WakeProxy::wake_by_ref(&proxy);
+            assert_eq!(count.0.load(Ordering::Relaxed), expected);
+        }
+    }
+
+    #[test]
+    fn either_direction_can_wake_on_its_own() {
+        let proxy = Arc::new(WakeProxy::default());
+        for kind in [ContextKind::Read, ContextKind::Write] {
+            let count = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&count));
+            proxy.set_waker(kind, &waker);
+            WakeProxy::wake_by_ref(&proxy);
+            assert_eq!(count.0.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[test]

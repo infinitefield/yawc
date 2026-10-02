@@ -85,3 +85,4 @@ The isolated 20-byte client codec changed by +12.4% in time.
 The full JSON retains all codec and masking results, including regressions.
 
 Further measurements and tuning: [second performance pass](round2.md).
+Control-frame and wakeup measurements: [wake proxy follow-up](wake-proxy.md).
