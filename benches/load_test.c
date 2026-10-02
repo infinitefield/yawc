@@ -281,11 +281,6 @@ int main(int argc, char **argv) {
   /* Create a socket context for HTTP */
   struct us_socket_context_options_t options = {};
 
-  //	    options.key_file_name =
-  //"/Users/divy/gh/fastwebsockets/examples/localhost.key",
-  //	    options.cert_file_name =
-  //"/Users/divy/gh/fastwebsockets/examples/localhost.crt",
-  // options.passphrase = "1234";
   struct us_socket_context_t *http_context =
       us_create_socket_context(SSL, loop, 0, options);
 
