@@ -1,0 +1,134 @@
+{
+  "case": {
+    "connections": 1,
+    "bytes": 1024,
+    "window": 16
+  },
+  "warmup_seconds": 0,
+  "measurement_seconds": 1,
+  "note": "Tracing changes timing; use counts only. Includes startup and handshake calls.",
+  "measurements": [
+    {
+      "library": "yawc",
+      "messages": 43616,
+      "syscalls": {
+        "sendto": {
+          "calls": 43616,
+          "errors": 0
+        },
+        "recvfrom": {
+          "calls": 8958,
+          "errors": 0
+        },
+        "write": {
+          "calls": 1,
+          "errors": 0
+        },
+        "writev": {
+          "calls": 1,
+          "errors": 0
+        },
+        "read": {
+          "calls": 5,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "library": "yawc-batched",
+      "messages": 134352,
+      "syscalls": {
+        "recvfrom": {
+          "calls": 27592,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 16794,
+          "errors": 0
+        },
+        "read": {
+          "calls": 5,
+          "errors": 0
+        },
+        "write": {
+          "calls": 1,
+          "errors": 0
+        },
+        "writev": {
+          "calls": 1,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "library": "yawc-buffered",
+      "messages": 252528,
+      "syscalls": {
+        "recvfrom": {
+          "calls": 19793,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 15783,
+          "errors": 0
+        },
+        "read": {
+          "calls": 5,
+          "errors": 0
+        },
+        "writev": {
+          "calls": 1,
+          "errors": 0
+        },
+        "write": {
+          "calls": 1,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "library": "tokio-tungstenite-batched",
+      "messages": 243520,
+      "syscalls": {
+        "recvfrom": {
+          "calls": 17396,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 15221,
+          "errors": 0
+        },
+        "read": {
+          "calls": 5,
+          "errors": 0
+        },
+        "write": {
+          "calls": 1,
+          "errors": 0
+        }
+      }
+    },
+    {
+      "library": "uWebSockets",
+      "messages": 288192,
+      "syscalls": {
+        "recvfrom": {
+          "calls": 18013,
+          "errors": 0
+        },
+        "sendto": {
+          "calls": 18013,
+          "errors": 0
+        },
+        "read": {
+          "calls": 8,
+          "errors": 0
+        },
+        "write": {
+          "calls": 1,
+          "errors": 0
+        }
+      }
+    }
+  ]
+}

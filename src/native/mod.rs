@@ -225,6 +225,7 @@ pub(crate) struct Negotiation {
     pub(crate) compression: Option<CompressionConfig>,
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
+    pub(crate) read_buffer_capacity: Option<usize>,
     pub(crate) utf8: bool,
     pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
@@ -265,6 +266,7 @@ impl Negotiation {
             compression,
             max_payload_read,
             max_read_buffer,
+            read_buffer_capacity: options.read_buffer_capacity,
             utf8: options.check_utf8,
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
@@ -340,6 +342,23 @@ impl WakeProxy {
                 self.write_waker.register(waker);
             }
         }
+    }
+
+    /// Register only when an operation needs a wakeup, then recheck readiness.
+    #[inline]
+    fn poll_with_context<T>(
+        self: &Arc<Self>,
+        kind: ContextKind,
+        cx: &mut Context<'_>,
+        mut poll: impl FnMut(&mut Context<'_>) -> Poll<T>,
+    ) -> Poll<T> {
+        if let Poll::Ready(value) = self.with_context(&mut poll) {
+            return Poll::Ready(value);
+        }
+        self.set_waker(kind, cx.waker());
+        // A wake may have arrived before registration. Poll again so that readiness
+        // cannot be lost between the first poll and installing the caller's waker.
+        self.with_context(poll)
     }
 
     #[inline(always)]
@@ -1320,11 +1339,15 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
+        ready!(this.poll_flush_fragments(cx))?;
         this.streaming.poll_ready_unpin(cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: Frame) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
+        if this.fragment_layer.fragment_size.is_none() {
+            return this.streaming.start_send_unpin(item);
+        }
         this.fragment_layer.fragment_outgoing(item);
         Ok(())
     }
@@ -1335,19 +1358,7 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
 
-        // First, send all queued fragments to WriteHalf
-        while this.fragment_layer.has_outgoing_fragments() {
-            // We need to call `poll_ready` before calling `start_send` since the user
-            // might be under certain backpressure constraints
-            ready!(this.streaming.poll_ready_unpin(cx))?;
-            let fragment = this
-                .fragment_layer
-                .pop_outgoing_fragment()
-                .expect("fragment");
-            this.streaming.start_send_unpin(fragment)?;
-        }
-
-        // Then flush WriteHalf
+        ready!(this.poll_flush_fragments(cx))?;
         this.streaming.poll_flush_unpin(cx)
     }
 
@@ -1357,6 +1368,21 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
         this.streaming.poll_close_unpin(cx)
+    }
+}
+
+impl<S> WebSocket<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_flush_fragments(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        while self.fragment_layer.has_outgoing_fragments() {
+            ready!(self.streaming.poll_ready_unpin(cx))?;
+            if let Some(fragment) = self.fragment_layer.pop_outgoing_fragment() {
+                self.streaming.start_send_unpin(fragment)?;
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -2657,5 +2683,88 @@ mod tests {
             matches!(result, Err(WebSocketError::CompressionNotSupported)),
             "expected the handshake to fail, got a different outcome"
         );
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::{ContextKind, WakeProxy};
+    use futures::task::ArcWake;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        task::{Context, Poll, Wake, Waker},
+    };
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn readiness_during_registration_is_rechecked() {
+        let proxy = Arc::new(WakeProxy::default());
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(count);
+        let mut cx = Context::from_waker(&waker);
+        for kind in [ContextKind::Read, ContextKind::Write] {
+            let mut ready = false;
+            assert_eq!(
+                proxy.poll_with_context(kind, &mut cx, |cx| {
+                    if ready {
+                        Poll::Ready(42)
+                    } else {
+                        ready = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }),
+                Poll::Ready(42)
+            );
+        }
+    }
+
+    #[test]
+    fn pending_operations_wake_both_tasks() {
+        let proxy = Arc::new(WakeProxy::default());
+        let read = Arc::new(WakeCount::default());
+        let write = Arc::new(WakeCount::default());
+        for (kind, count) in [(ContextKind::Read, &read), (ContextKind::Write, &write)] {
+            let waker = Waker::from(Arc::clone(count));
+            let mut cx = Context::from_waker(&waker);
+            assert!(proxy
+                .poll_with_context(kind, &mut cx, |_| Poll::<()>::Pending)
+                .is_pending());
+        }
+        WakeProxy::wake_by_ref(&proxy);
+        assert_eq!(read.0.load(Ordering::Relaxed), 1);
+        assert_eq!(write.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_new_pending_caller_replaces_the_previous_waker() {
+        let proxy = Arc::new(WakeProxy::default());
+        let old = Arc::new(WakeCount::default());
+        let new = Arc::new(WakeCount::default());
+        for count in [&old, &new] {
+            let waker = Waker::from(Arc::clone(count));
+            let mut cx = Context::from_waker(&waker);
+            assert!(proxy
+                .poll_with_context(ContextKind::Read, &mut cx, |_| Poll::<()>::Pending)
+                .is_pending());
+        }
+        WakeProxy::wake_by_ref(&proxy);
+        assert_eq!(old.0.load(Ordering::Relaxed), 0);
+        assert_eq!(new.0.load(Ordering::Relaxed), 1);
     }
 }

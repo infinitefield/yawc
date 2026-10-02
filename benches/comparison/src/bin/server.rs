@@ -1,0 +1,179 @@
+use std::{env, net::SocketAddr};
+
+use anyhow::{bail, Result};
+use bytes::Bytes;
+use futures::{FutureExt, SinkExt, StreamExt};
+use http_body_util::Empty;
+use hyper::{body::Incoming, server::conn::http1, service::service_fn, Request, Response};
+use hyper_util::rt::TokioIo;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::{TcpListener, UnixListener},
+};
+use yawc::{OpCode, Options, WebSocket};
+
+#[derive(Clone, Copy)]
+enum Library {
+    Yawc,
+    YawcBatched,
+    YawcBuffered(usize),
+    Fastwebsockets,
+    Tungstenite,
+    TungsteniteBatched,
+}
+
+async fn upgrade(mut req: Request<Incoming>, library: Library) -> Result<Response<Empty<Bytes>>> {
+    match library {
+        Library::Yawc | Library::YawcBatched | Library::YawcBuffered(_) => {
+            let mut options = Options::default().with_utf8().without_compression();
+            if let Library::YawcBuffered(capacity) = library {
+                options = options
+                    .with_read_buffer_capacity(capacity)
+                    .with_backpressure_boundary(64 * 1024);
+            }
+            let (response, future) = WebSocket::upgrade_with_options(&mut req, options)?;
+            tokio::spawn(async move {
+                let mut ws = future.await?;
+                loop {
+                    let mut frame = ws.next_frame().await?;
+                    if matches!(library, Library::YawcBatched | Library::YawcBuffered(_)) {
+                        for index in 0..32 {
+                            match frame.opcode() {
+                                OpCode::Text | OpCode::Binary => ws.feed(frame).await?,
+                                OpCode::Close => {
+                                    ws.close().await?;
+                                    return Ok::<_, anyhow::Error>(());
+                                }
+                                _ => {}
+                            }
+                            if index == 31 {
+                                break;
+                            }
+                            match ws.next_frame().now_or_never() {
+                                Some(next) => frame = next?,
+                                None => break,
+                            }
+                        }
+                        ws.flush().await?;
+                        continue;
+                    }
+                    match frame.opcode() {
+                        OpCode::Text | OpCode::Binary => ws.send(frame).await?,
+                        OpCode::Close => break,
+                        _ => {}
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+            Ok(response)
+        }
+        Library::Fastwebsockets => {
+            let (response, future) = fastwebsockets::upgrade::upgrade(&mut req)?;
+            tokio::spawn(async move {
+                let mut ws = fastwebsockets::FragmentCollector::new(future.await?);
+                loop {
+                    let frame = ws.read_frame().await?;
+                    match frame.opcode {
+                        fastwebsockets::OpCode::Text | fastwebsockets::OpCode::Binary => {
+                            ws.write_frame(frame).await?;
+                        }
+                        fastwebsockets::OpCode::Close => break,
+                        _ => {}
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+            Ok(response)
+        }
+        Library::Tungstenite | Library::TungsteniteBatched => {
+            unreachable!("tungstenite handles its own upgrade")
+        }
+    }
+}
+
+async fn connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: S,
+    library: Library,
+) -> Result<()> {
+    if matches!(library, Library::Tungstenite | Library::TungsteniteBatched) {
+        let mut ws = tokio_tungstenite::accept_async(stream).await?;
+        while let Some(message) = ws.next().await {
+            let mut message = message?;
+            if matches!(library, Library::TungsteniteBatched) {
+                for index in 0..32 {
+                    if message.is_close() {
+                        ws.flush().await?;
+                        return Ok(());
+                    }
+                    if message.is_text() || message.is_binary() {
+                        ws.feed(message).await?;
+                    }
+                    if index == 31 {
+                        break;
+                    }
+                    match ws.next().now_or_never() {
+                        Some(Some(next)) => message = next?,
+                        Some(None) => return Ok(()),
+                        None => break,
+                    }
+                }
+                ws.flush().await?;
+                continue;
+            }
+            if message.is_close() {
+                break;
+            }
+            if message.is_text() || message.is_binary() {
+                ws.send(message).await?;
+            }
+        }
+    } else {
+        http1::Builder::new()
+            .serve_connection(
+                TokioIo::new(stream),
+                service_fn(move |req| upgrade(req, library)),
+            )
+            .with_upgrades()
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let mut args = env::args().skip(1);
+    let library = match args.next().as_deref() {
+        Some("yawc") => Library::Yawc,
+        Some("yawc-batched") => Library::YawcBatched,
+        Some("yawc-buffered") => Library::YawcBuffered(64 * 1024),
+        Some("yawc-buffered-128k") => Library::YawcBuffered(128 * 1024),
+        Some("yawc-buffered-512k") => Library::YawcBuffered(512 * 1024),
+        Some("fastwebsockets") => Library::Fastwebsockets,
+        Some("tokio-tungstenite") => Library::Tungstenite,
+        Some("tokio-tungstenite-batched") => Library::TungsteniteBatched,
+        _ => bail!("expected a library name"),
+    };
+    let address = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("expected bind address"))?;
+    if let Some(path) = address.strip_prefix("unix:") {
+        let listener = UnixListener::bind(path)?;
+        println!("READY unix");
+        loop {
+            let (stream, _) = listener.accept().await?;
+            tokio::spawn(connection(stream, library));
+        }
+    }
+    let address: SocketAddr = address.parse()?;
+    anyhow::ensure!(
+        !address.ip().is_unspecified(),
+        "an explicit bind address is required"
+    );
+    let listener = TcpListener::bind(address).await?;
+    println!("READY {}", listener.local_addr()?.port());
+    loop {
+        let (stream, _) = listener.accept().await?;
+        stream.set_nodelay(true)?;
+        tokio::spawn(connection(stream, library));
+    }
+}

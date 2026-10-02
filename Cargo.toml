@@ -17,6 +17,7 @@ categories = [
 ]
 readme = "README.md"
 rust-version = "1.82.0"
+autobenches = false
 
 # [profile.release]
 # debug = true
@@ -220,3 +221,7 @@ futures-rustls = "0.26"
 rustls-native-certs = "0.8"
 rustls-pki-types = "1.0"
 smol = "2.0.2"
+
+[[bench]]
+name = "performance"
+harness = false

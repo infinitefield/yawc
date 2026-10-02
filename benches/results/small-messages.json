@@ -1,0 +1,652 @@
+{
+  "schema": 1,
+  "complete": true,
+  "warmup_seconds": 1.0,
+  "measurement_seconds": 3.0,
+  "repeats": 10,
+  "server_threads": 1,
+  "server_cpu": 2,
+  "cases": [
+    [
+      64,
+      20,
+      1,
+      "binary"
+    ]
+  ],
+  "libraries": [
+    "yawc-before",
+    "yawc"
+  ],
+  "client_cpus": [
+    4,
+    6
+  ],
+  "shared_last_level_cache": true,
+  "transport": "Unix sockets",
+  "tls": false,
+  "compression": false,
+  "build": {
+    "uWebSockets": "2cb3a77d89045b9e39ca8c85e37f614d2b3afa2b",
+    "uSockets": "182b7e4fe7211f98682772be3df89c71dc4884fa",
+    "rust_lock_sha256": "e1b95fe3a6745801cf2f8dc506e28908daa4af56def8a49094f905f1157a85e3",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "custom_rust_flags": false,
+    "cpp_flags": "-O3 -DNDEBUG -std=c++20 -pthread; uSockets WITH_LTO=0",
+    "g++": "15.2.0",
+    "boost": "1_90"
+  },
+  "binary_sha256": {
+    "yawc-before": "df3be2c03132c639cbde4be8cab2c1a16142b6fd1120bd965832f8505b430118",
+    "yawc": "187558e7dbf5db91e410a3dc936f7fc1f78b31521b5e4c7f62f67f32213b222c"
+  },
+  "load_sha256": "70dd38afab02ca24c7de1a7e42b572f31582295e348e51e6d7c8e122fc18fc44",
+  "source_revision": "f192a5932539056f397a41d0d8cef04689197ff9",
+  "source_sha256": "9e400fe807104a4f234e767aacbd9844dc46de7a731c3d73174d094dec06cb85",
+  "measurements": [
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 338073.02415596624,
+      "server_cpu_fraction_including_warmup": 0.9902522946236558,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 178.155,
+          "batch_rtt_p99_us": 351.219,
+          "client_cpu_fraction": 0.7211135781960544,
+          "latency_samples": 7904,
+          "messages": 505563,
+          "messages_per_second": 168510.30790862298,
+          "seconds": 3.000190352
+        },
+        {
+          "batch_rtt_p50_us": 177.704,
+          "batch_rtt_p99_us": 328.447,
+          "client_cpu_fraction": 0.7246887152623375,
+          "latency_samples": 7968,
+          "messages": 508719,
+          "messages_per_second": 169562.71624734323,
+          "seconds": 3.000181946
+        }
+      ],
+      "repeat": 9
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 344254.4863567387,
+      "server_cpu_fraction_including_warmup": 0.9906179885110031,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 174.378,
+          "batch_rtt_p99_us": 250.761,
+          "client_cpu_fraction": 0.749843510493488,
+          "latency_samples": 8096,
+          "messages": 517038,
+          "messages_per_second": 172335.54520670488,
+          "seconds": 3.000181996
+        },
+        {
+          "batch_rtt_p50_us": 174.027,
+          "batch_rtt_p99_us": 306.205,
+          "client_cpu_fraction": 0.7395997959318238,
+          "latency_samples": 8064,
+          "messages": 515783,
+          "messages_per_second": 171918.94115003385,
+          "seconds": 3.000152261
+        }
+      ],
+      "repeat": 6
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 352779.5670582028,
+      "server_cpu_fraction_including_warmup": 0.9930005891868497,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 169.398,
+          "batch_rtt_p99_us": 253.135,
+          "client_cpu_fraction": 0.7528598855991928,
+          "latency_samples": 8320,
+          "messages": 530779,
+          "messages_per_second": 176917.22003246742,
+          "seconds": 3.000154535
+        },
+        {
+          "batch_rtt_p50_us": 169.549,
+          "batch_rtt_p99_us": 293.141,
+          "client_cpu_fraction": 0.7480849482440127,
+          "latency_samples": 8256,
+          "messages": 527608,
+          "messages_per_second": 175862.3470257354,
+          "seconds": 3.000119178
+        }
+      ],
+      "repeat": 2
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 347719.10263120977,
+      "server_cpu_fraction_including_warmup": 0.9929981167373508,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 171.271,
+          "batch_rtt_p99_us": 343.385,
+          "client_cpu_fraction": 0.7209505204347757,
+          "latency_samples": 8160,
+          "messages": 521531,
+          "messages_per_second": 173837.3622229425,
+          "seconds": 3.000108799
+        },
+        {
+          "batch_rtt_p50_us": 170.531,
+          "batch_rtt_p99_us": 362.811,
+          "client_cpu_fraction": 0.7236458879113777,
+          "latency_samples": 8160,
+          "messages": 521795,
+          "messages_per_second": 173881.7404082673,
+          "seconds": 3.000861383
+        }
+      ],
+      "repeat": 8
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 344093.52983326395,
+      "server_cpu_fraction_including_warmup": 0.9903558187078745,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 173.967,
+          "batch_rtt_p99_us": 267.362,
+          "client_cpu_fraction": 0.7261685257418731,
+          "latency_samples": 8096,
+          "messages": 516456,
+          "messages_per_second": 172139.08681426354,
+          "seconds": 3.000225048
+        },
+        {
+          "batch_rtt_p50_us": 173.496,
+          "batch_rtt_p99_us": 269.857,
+          "client_cpu_fraction": 0.7291936527118035,
+          "latency_samples": 8064,
+          "messages": 515923,
+          "messages_per_second": 171954.44301900044,
+          "seconds": 3.000347016
+        }
+      ],
+      "repeat": 7
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 353095.75243421237,
+      "server_cpu_fraction_including_warmup": 0.988135379632131,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 168.476,
+          "batch_rtt_p99_us": 250.591,
+          "client_cpu_fraction": 0.7297529655500276,
+          "latency_samples": 8256,
+          "messages": 527576,
+          "messages_per_second": 175847.01158535446,
+          "seconds": 3.000198839
+        },
+        {
+          "batch_rtt_p50_us": 167.986,
+          "batch_rtt_p99_us": 301.276,
+          "client_cpu_fraction": 0.7355366446027882,
+          "latency_samples": 8320,
+          "messages": 531786,
+          "messages_per_second": 177248.74084885788,
+          "seconds": 3.000224416
+        }
+      ],
+      "repeat": 4
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 353934.2176041396,
+      "server_cpu_fraction_including_warmup": 0.9927520638743478,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 168.246,
+          "batch_rtt_p99_us": 323.528,
+          "client_cpu_fraction": 0.7438229123315145,
+          "latency_samples": 8384,
+          "messages": 535714,
+          "messages_per_second": 178563.15020080697,
+          "seconds": 3.000137483
+        },
+        {
+          "batch_rtt_p50_us": 168.106,
+          "batch_rtt_p99_us": 281.539,
+          "client_cpu_fraction": 0.7361162423153687,
+          "latency_samples": 8224,
+          "messages": 526144,
+          "messages_per_second": 175371.06740333265,
+          "seconds": 3.000175615
+        }
+      ],
+      "repeat": 9
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 353148.9254169361,
+      "server_cpu_fraction_including_warmup": 0.9930372175151149,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 170.29,
+          "batch_rtt_p99_us": 324.199,
+          "client_cpu_fraction": 0.7590892489557047,
+          "latency_samples": 8320,
+          "messages": 531551,
+          "messages_per_second": 177169.79870067336,
+          "seconds": 3.000234825
+        },
+        {
+          "batch_rtt_p50_us": 170.48,
+          "batch_rtt_p99_us": 342.714,
+          "client_cpu_fraction": 0.7618825998434287,
+          "latency_samples": 8256,
+          "messages": 527976,
+          "messages_per_second": 175979.12671626275,
+          "seconds": 3.000219457
+        }
+      ],
+      "repeat": 1
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 343254.68204164633,
+      "server_cpu_fraction_including_warmup": 0.9905218179657986,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 175.099,
+          "batch_rtt_p99_us": 305.414,
+          "client_cpu_fraction": 0.7196225061433111,
+          "latency_samples": 8064,
+          "messages": 514782,
+          "messages_per_second": 171572.1065985282,
+          "seconds": 3.000382814
+        },
+        {
+          "batch_rtt_p50_us": 173.977,
+          "batch_rtt_p99_us": 323.738,
+          "client_cpu_fraction": 0.7183042428456368,
+          "latency_samples": 8064,
+          "messages": 515065,
+          "messages_per_second": 171682.5754431181,
+          "seconds": 3.000100614
+        }
+      ],
+      "repeat": 2
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 336076.4085128127,
+      "server_cpu_fraction_including_warmup": 0.9905099753553185,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 176.652,
+          "batch_rtt_p99_us": 303.48,
+          "client_cpu_fraction": 0.7246525850715997,
+          "latency_samples": 7904,
+          "messages": 505273,
+          "messages_per_second": 168411.22235126205,
+          "seconds": 3.000233553
+        },
+        {
+          "batch_rtt_p50_us": 178.836,
+          "batch_rtt_p99_us": 341.892,
+          "client_cpu_fraction": 0.7233747450387291,
+          "latency_samples": 7872,
+          "messages": 503021,
+          "messages_per_second": 167665.1861615506,
+          "seconds": 3.00015174
+        }
+      ],
+      "repeat": 1
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 341279.34829751274,
+      "server_cpu_fraction_including_warmup": 0.9905263864003779,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 178.385,
+          "batch_rtt_p99_us": 297.148,
+          "client_cpu_fraction": 0.7131522921087018,
+          "latency_samples": 8032,
+          "messages": 513752,
+          "messages_per_second": 171237.29046572195,
+          "seconds": 3.000234345
+        },
+        {
+          "batch_rtt_p50_us": 178.746,
+          "batch_rtt_p99_us": 409.529,
+          "client_cpu_fraction": 0.70867933673669,
+          "latency_samples": 8000,
+          "messages": 510172,
+          "messages_per_second": 170042.05783179076,
+          "seconds": 3.000269501
+        }
+      ],
+      "repeat": 6
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 326526.6802074875,
+      "server_cpu_fraction_including_warmup": 0.9957671401924262,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 185.749,
+          "batch_rtt_p99_us": 312.447,
+          "client_cpu_fraction": 0.6958875693770187,
+          "latency_samples": 7680,
+          "messages": 489743,
+          "messages_per_second": 163238.65175771047,
+          "seconds": 3.000165676
+        },
+        {
+          "batch_rtt_p50_us": 185.468,
+          "batch_rtt_p99_us": 288.643,
+          "client_cpu_fraction": 0.6964562446699107,
+          "latency_samples": 7680,
+          "messages": 489889,
+          "messages_per_second": 163288.02844977702,
+          "seconds": 3.000152581
+        }
+      ],
+      "repeat": 3
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 338989.3686698008,
+      "server_cpu_fraction_including_warmup": 0.9929835119890204,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 176.111,
+          "batch_rtt_p99_us": 342.634,
+          "client_cpu_fraction": 0.722035858755433,
+          "latency_samples": 7872,
+          "messages": 502626,
+          "messages_per_second": 167533.84618355086,
+          "seconds": 3.000146009
+        },
+        {
+          "batch_rtt_p50_us": 175.48,
+          "batch_rtt_p99_us": 352.493,
+          "client_cpu_fraction": 0.7382030742965173,
+          "latency_samples": 8064,
+          "messages": 514406,
+          "messages_per_second": 171455.52248624997,
+          "seconds": 3.000229987
+        }
+      ],
+      "repeat": 7
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 344527.73935361416,
+      "server_cpu_fraction_including_warmup": 0.9930822495832622,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 173.305,
+          "batch_rtt_p99_us": 372.69,
+          "client_cpu_fraction": 0.7274372256010869,
+          "latency_samples": 8128,
+          "messages": 518585,
+          "messages_per_second": 172854.4332271994,
+          "seconds": 3.000125541
+        },
+        {
+          "batch_rtt_p50_us": 174.658,
+          "batch_rtt_p99_us": 293.331,
+          "client_cpu_fraction": 0.7228609715443607,
+          "latency_samples": 8064,
+          "messages": 515052,
+          "messages_per_second": 171673.30612641477,
+          "seconds": 3.000186876
+        }
+      ],
+      "repeat": 3
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 348596.76143819746,
+      "server_cpu_fraction_including_warmup": 0.9933334038628026,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 170.831,
+          "batch_rtt_p99_us": 496.783,
+          "client_cpu_fraction": 0.725200292991663,
+          "latency_samples": 8192,
+          "messages": 523840,
+          "messages_per_second": 174602.08796945628,
+          "seconds": 3.000193217
+        },
+        {
+          "batch_rtt_p50_us": 170.34,
+          "batch_rtt_p99_us": 339.658,
+          "client_cpu_fraction": 0.7206004244075056,
+          "latency_samples": 8160,
+          "messages": 522018,
+          "messages_per_second": 173994.6734687412,
+          "seconds": 3.000195291
+        }
+      ],
+      "repeat": 8
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 350871.883773213,
+      "server_cpu_fraction_including_warmup": 0.9930297876573517,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 171.512,
+          "batch_rtt_p99_us": 295.365,
+          "client_cpu_fraction": 0.7262630886126077,
+          "latency_samples": 8256,
+          "messages": 526504,
+          "messages_per_second": 175494.1055500982,
+          "seconds": 3.000123556
+        },
+        {
+          "batch_rtt_p50_us": 170.25,
+          "batch_rtt_p99_us": 278.163,
+          "client_cpu_fraction": 0.7297224686123988,
+          "latency_samples": 8224,
+          "messages": 526164,
+          "messages_per_second": 175377.7782231148,
+          "seconds": 3.000174853
+        }
+      ],
+      "repeat": 5
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 344762.9623727147,
+      "server_cpu_fraction_including_warmup": 0.9958577387862136,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 173.266,
+          "batch_rtt_p99_us": 285.998,
+          "client_cpu_fraction": 0.7185874960286681,
+          "latency_samples": 8128,
+          "messages": 518837,
+          "messages_per_second": 172935.43765081992,
+          "seconds": 3.000177448
+        },
+        {
+          "batch_rtt_p50_us": 171.452,
+          "batch_rtt_p99_us": 351.871,
+          "client_cpu_fraction": 0.7139111201432731,
+          "latency_samples": 8064,
+          "messages": 515508,
+          "messages_per_second": 171827.5247218948,
+          "seconds": 3.000147973
+        }
+      ],
+      "repeat": 5
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 338129.4337125668,
+      "server_cpu_fraction_including_warmup": 0.9957687935035429,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 180.039,
+          "batch_rtt_p99_us": 296.076,
+          "client_cpu_fraction": 0.7166636451938962,
+          "latency_samples": 7904,
+          "messages": 504443,
+          "messages_per_second": 168137.49513285278,
+          "seconds": 3.000181486
+        },
+        {
+          "batch_rtt_p50_us": 178.646,
+          "batch_rtt_p99_us": 404.58,
+          "client_cpu_fraction": 0.7245230459657015,
+          "latency_samples": 7992,
+          "messages": 510003,
+          "messages_per_second": 169991.938579714,
+          "seconds": 3.000159915
+        }
+      ],
+      "repeat": 0
+    },
+    {
+      "library": "yawc-before",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 345281.49031221645,
+      "server_cpu_fraction_including_warmup": 0.9908715951041617,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 172.845,
+          "batch_rtt_p99_us": 341.011,
+          "client_cpu_fraction": 0.7195952171809314,
+          "latency_samples": 8128,
+          "messages": 519517,
+          "messages_per_second": 173162.51940526688,
+          "seconds": 3.000170024
+        },
+        {
+          "batch_rtt_p50_us": 172.183,
+          "batch_rtt_p99_us": 309.121,
+          "client_cpu_fraction": 0.7192766362843602,
+          "latency_samples": 8096,
+          "messages": 516389,
+          "messages_per_second": 172118.97090694957,
+          "seconds": 3.000186425
+        }
+      ],
+      "repeat": 4
+    },
+    {
+      "library": "yawc",
+      "connections": 64,
+      "bytes": 20,
+      "window": 1,
+      "kind": "binary",
+      "messages_per_second": 352555.9077257173,
+      "server_cpu_fraction_including_warmup": 0.9908509522688584,
+      "workers": [
+        {
+          "batch_rtt_p50_us": 170.52,
+          "batch_rtt_p99_us": 348.484,
+          "client_cpu_fraction": 0.731002210545613,
+          "latency_samples": 8224,
+          "messages": 525598,
+          "messages_per_second": 175189.15846380254,
+          "seconds": 3.000174238
+        },
+        {
+          "batch_rtt_p50_us": 170.18,
+          "batch_rtt_p99_us": 299.202,
+          "client_cpu_fraction": 0.7470149681305254,
+          "latency_samples": 8320,
+          "messages": 532129,
+          "messages_per_second": 177366.74926191472,
+          "seconds": 3.000162106
+        }
+      ],
+      "repeat": 0
+    }
+  ],
+  "baseline_build": {
+    "source_revision": "f192a59",
+    "source_sha256": "b65eb6796f4033dcc2e8f9544e9044f7fe4a75ea5c53bfd88fd7f9156c76905a"
+  }
+}

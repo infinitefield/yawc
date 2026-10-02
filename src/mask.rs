@@ -1,40 +1,68 @@
 // Optimized masking implementation with SIMD support
 
+use std::mem::MaybeUninit;
+
 /// Mask/unmask a frame with optimal strategy selection.
 ///
 /// This function automatically selects the fastest masking implementation based on:
 /// - Buffer size
 /// - CPU features (AVX2, NEON when available)
 /// - Architecture alignment
-#[inline]
+#[inline(always)]
 pub fn apply_mask(buf: &mut [u8], mask: [u8; 4]) {
-    // Try SIMD implementations first for larger buffers
-    #[cfg(all(
-        any(target_arch = "x86_64", target_arch = "x86"),
-        target_feature = "avx2"
-    ))]
-    if buf.len() >= 32 {
-        // SAFETY: AVX2 is guaranteed by target_feature
-        unsafe {
-            return apply_mask_avx2(buf, mask);
-        }
-    }
-
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     if buf.len() >= 16 {
-        // SAFETY: NEON is guaranteed by target_feature
+        // SAFETY: NEON is guaranteed by target_feature.
         unsafe {
             return apply_mask_neon(buf, mask);
         }
     }
 
-    // Fall back to scalar implementations
-    // For small buffers, use the fast32 path
-    // For larger buffers (>128 bytes), the 64-bit path is faster
     if buf.len() <= 128 {
-        apply_mask_fast32(buf, mask);
-    } else {
-        apply_mask_fast64(buf, mask);
+        return apply_mask_fast32(buf, mask);
+    }
+
+    // Try SIMD implementations first for larger buffers
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    if buf.len() >= 256 && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: The runtime check guarantees AVX2 support.
+        unsafe {
+            return apply_mask_avx2(buf, mask);
+        }
+    }
+
+    apply_mask_fast64(buf, mask);
+}
+
+/// Copy a payload into uninitialized output while applying its mask.
+#[inline]
+pub(crate) fn copy_mask(src: &[u8], dst: &mut [MaybeUninit<u8>], mask: [u8; 4]) {
+    assert_eq!(src.len(), dst.len());
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    if src.len() >= 256 && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: The slices have equal lengths and cannot overlap; AVX2 is available.
+        unsafe {
+            xor_avx2(src.as_ptr(), dst.as_mut_ptr().cast(), src.len(), mask);
+        }
+        return;
+    }
+
+    let mut input = src.chunks_exact(4);
+    let mut output = dst.chunks_exact_mut(4);
+    for (source, target) in input.by_ref().zip(output.by_ref()) {
+        let word = u32::from_ne_bytes([source[0], source[1], source[2], source[3]]);
+        let bytes = (word ^ u32::from_ne_bytes(mask)).to_ne_bytes();
+        for (slot, byte) in target.iter_mut().zip(bytes) {
+            slot.write(byte);
+        }
+    }
+    for ((slot, byte), mask) in output
+        .into_remainder()
+        .iter_mut()
+        .zip(input.remainder())
+        .zip(mask)
+    {
+        slot.write(byte ^ mask);
     }
 }
 
@@ -69,7 +97,7 @@ pub fn apply_mask_fast32(buf: &mut [u8], mask: [u8; 4]) {
         *word ^= mask_u32;
     }
 
-    apply_mask_fallback(suffix, mask_u32.to_ne_bytes()[..4].try_into().unwrap());
+    apply_mask_fallback(suffix, mask_u32.to_ne_bytes());
 }
 
 /// Even faster version using 64-bit blocks for larger buffers.
@@ -98,7 +126,7 @@ pub fn apply_mask_fast64(buf: &mut [u8], mask: [u8; 4]) {
         *word ^= mask_u64;
     }
 
-    apply_mask_fallback(suffix, mask_u64.to_ne_bytes()[..4].try_into().unwrap());
+    apply_mask_fallback(suffix, (mask_u64 as u32).to_ne_bytes());
 }
 
 /// AVX2-accelerated masking for x86_64 with 256-bit vectors.
@@ -110,37 +138,40 @@ pub fn apply_mask_fast64(buf: &mut [u8], mask: [u8; 4]) {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn apply_mask_avx2(buf: &mut [u8], mask: [u8; 4]) {
+    let ptr = buf.as_mut_ptr();
+    xor_avx2(ptr, ptr, buf.len(), mask);
+}
+
+/// The pointers must cover `len` bytes and be identical or non-overlapping.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[target_feature(enable = "avx2")]
+unsafe fn xor_avx2(src: *const u8, dst: *mut u8, len: usize, mask: [u8; 4]) {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
-    let len = buf.len();
-    if len < 32 {
-        return apply_mask_fast32(buf, mask);
+    let mask_256 = _mm256_set1_epi32(u32::from_ne_bytes(mask) as i32);
+    let mut offset = 0;
+    while len - offset >= 128 {
+        let a = _mm256_loadu_si256(src.add(offset).cast());
+        let b = _mm256_loadu_si256(src.add(offset + 32).cast());
+        let c = _mm256_loadu_si256(src.add(offset + 64).cast());
+        let d = _mm256_loadu_si256(src.add(offset + 96).cast());
+        _mm256_storeu_si256(dst.add(offset).cast(), _mm256_xor_si256(a, mask_256));
+        _mm256_storeu_si256(dst.add(offset + 32).cast(), _mm256_xor_si256(b, mask_256));
+        _mm256_storeu_si256(dst.add(offset + 64).cast(), _mm256_xor_si256(c, mask_256));
+        _mm256_storeu_si256(dst.add(offset + 96).cast(), _mm256_xor_si256(d, mask_256));
+        offset += 128;
     }
-
-    // Create 256-bit mask by repeating the 4-byte mask
-    let mask_u32 = u32::from_ne_bytes(mask);
-    let mask_128 = _mm_set1_epi32(mask_u32 as i32);
-    let mask_256 = _mm256_broadcastd_epi32(mask_128);
-
-    let mut ptr = buf.as_mut_ptr();
-    let end = ptr.add(len);
-    let aligned_end = ptr.add(len - (len % 32));
-
-    // Process 32-byte chunks with AVX2
-    while ptr < aligned_end {
-        let data = _mm256_loadu_si256(ptr as *const __m256i);
-        let masked = _mm256_xor_si256(data, mask_256);
-        _mm256_storeu_si256(ptr as *mut __m256i, masked);
-        ptr = ptr.add(32);
+    while len - offset >= 32 {
+        let word = _mm256_loadu_si256(src.add(offset).cast());
+        _mm256_storeu_si256(dst.add(offset).cast(), _mm256_xor_si256(word, mask_256));
+        offset += 32;
     }
-
-    // Handle remaining bytes with scalar code
-    let remaining = end.offset_from(ptr) as usize;
-    if remaining > 0 {
-        apply_mask_fast32(std::slice::from_raw_parts_mut(ptr, remaining), mask);
+    for index in offset..len {
+        dst.add(index)
+            .write(src.add(index).read() ^ mask[index & 3]);
     }
 }
 
@@ -186,6 +217,46 @@ unsafe fn apply_mask_neon(buf: &mut [u8], mask: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masked_copy_matches_scalar_and_preserves_guards() {
+        for size in (0..=260).chain([1023, 1024, 16384]) {
+            for offset in 0..32 {
+                let input: Vec<_> = (0..size + 32).map(|i| i as u8).collect();
+                let source = &input[offset..offset + size];
+                let mut output = vec![MaybeUninit::new(0xa5); size + 64];
+                let start = 31 - offset;
+                let mask = [0x12, 0x39, 0xab, 0xfe];
+                copy_mask(source, &mut output[start..start + size], mask);
+                // SAFETY: The output starts initialized, and copy_mask only writes bytes.
+                let output: Vec<_> = output
+                    .into_iter()
+                    .map(|byte| unsafe { byte.assume_init() })
+                    .collect();
+                assert!(output[..start].iter().all(|byte| *byte == 0xa5));
+                assert!(output[start + size..].iter().all(|byte| *byte == 0xa5));
+                for index in 0..size {
+                    assert_eq!(output[start + index], source[index] ^ mask[index & 3]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispatched_mask_matches_scalar_at_vector_boundaries() {
+        for size in [
+            0, 1, 15, 16, 31, 32, 127, 128, 129, 255, 256, 257, 1023, 16384,
+        ] {
+            for offset in 0..32 {
+                let mut actual: Vec<_> = (0..size + offset + 32).map(|i| i as u8).collect();
+                let mut expected = actual.clone();
+                let mask = [0x12, 0x39, 0xab, 0xfe];
+                apply_mask_fallback(&mut expected[offset..offset + size], mask);
+                apply_mask(&mut actual[offset..offset + size], mask);
+                assert_eq!(actual, expected, "size {size}, offset {offset}");
+            }
+        }
+    }
 
     #[test]
     #[wasm_bindgen_test::wasm_bindgen_test]
