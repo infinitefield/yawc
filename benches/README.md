@@ -19,7 +19,7 @@ Use `--smoke --repeats 1 --seconds 1` to check all five adapters first.
 For a local baseline without a network listener, use `--unix` instead of
 `--bind-ip`. Unix sockets are created under `target/comparison` and removed
 after each sample. Compare results only within the same transport.
-Saved measurements and the comparison report are in [results](results/README.md).
+Generated measurements belong in `target/comparison/` or the ignored `benches/results/` directory.
 
 Each server runs one event-loop thread with compression disabled and no TLS.
 TCP runs enable TCP_NODELAY. The common client validates the HTTP upgrade and every echoed byte,
@@ -97,7 +97,7 @@ The high-throughput case sends 16 messages before waiting for echoes, across 16
 connections, with 1 KiB payloads. A client that waits for each reply prevents that
 batching benefit. Reproduce it with `--libraries yawc-buffered-128k --case-index 5`.
 The measurements use Unix sockets without TLS or compression; TCP, TLS, application
-work and different hardware can change throughput. See the [comparison results](results/README.md).
+work and different hardware can change throughput.
 
 ## Measurement details
 

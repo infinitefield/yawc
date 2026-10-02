@@ -15,7 +15,7 @@ tags*
 /benches/comparison/target/
 /benches/comparison/__pycache__/
 !/benches/performance.rs
-!/benches/results/
+/benches/results/
 
 # cargo-fuzz
 fuzz/Cargo.lock

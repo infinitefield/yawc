@@ -472,6 +472,57 @@ where
 }
 
 #[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use crate::Options;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Wake, Waker},
+    };
+    use tokio::io::{duplex, AsyncWriteExt};
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn two_buffered_header_bytes_register_a_waker_when_payload_is_missing() {
+        let negotiated = Negotiation::new(None, &Options::default(), Role::Client).unwrap();
+        let (io, mut peer) = duplex(16);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03"),
+            &negotiated,
+        );
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(stream.stream.read_buffer().len(), 2);
+        assert!(stream.poll_next_frame(&mut cx).is_pending());
+        assert_eq!(count.0.load(Ordering::Relaxed), 0);
+
+        peer.write_all(b"abc").await.unwrap();
+        assert!(count.0.load(Ordering::Relaxed) > 0);
+        let Poll::Ready(Ok(frame)) = stream.poll_next_frame(&mut cx) else {
+            panic!("the completed frame must be ready after its payload arrives");
+        };
+        assert_eq!(frame.opcode(), OpCode::Binary);
+        assert_eq!(frame.payload().as_ref(), b"abc");
+    }
+}
+
+#[cfg(test)]
 mod capacity_tests {
     use super::*;
     use crate::Options;
