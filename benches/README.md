@@ -21,7 +21,7 @@ For a local baseline without a network listener, use `--unix` instead of
 after each sample. Compare results only within the same transport.
 Generated measurements belong in `target/comparison/` or the ignored `benches/results/` directory.
 
-Each server runs one event-loop thread with compression disabled and no TLS.
+By default, each server runs one event-loop thread with compression disabled and no TLS.
 TCP runs enable TCP_NODELAY. The common client validates the HTTP upgrade and
 every echo or application acknowledgement, uses fresh random masks, and supports
 fragmented responses. Text cases enable UTF-8 validation. Handshakes and warmup
@@ -73,9 +73,21 @@ Use `--baseline-server` with `yawc-batched-before` to compare library changes
 under the same batching policy. The saved server must support that adapter.
 
 Beast can run multiple Asio workers with `--beast-threads 4 --beast-cpus 0 1 2 3`.
-With multiple workers, each connection uses a strand to serialize its handlers. Choose server cores that
-do not overlap `--client-cpus`. Other adapters still use one server thread;
+With multiple workers, each connection uses a strand to serialize its handlers.
+Choose server cores that do not overlap `--client-cpus`. Other adapters still use one server thread;
 the report records each adapter's thread count and CPU allocation.
+
+Reproduce the four-thread Beast table with:
+
+```sh
+python3 benches/comparison/run.py --unix --libraries Boost.Beast \
+  --beast-threads 4 --beast-cpus 0 1 2 3 --client-cpus 4 6 8 10 \
+  --case-index 2 5 14 15 --warmup 0.5 --seconds 2 --repeats 5 \
+  --output target/comparison/beast-four-threads.json
+```
+
+For the one-thread control, omit `--beast-threads` and `--beast-cpus`, and choose
+a different output filename.
 
 ## Throughput settings
 

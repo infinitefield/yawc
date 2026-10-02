@@ -97,6 +97,10 @@ Optional Cargo features:
 
 ## Benchmarks
 
+The [benchmark code](benches/comparison/) includes the [runner](benches/comparison/run.py), [Rust servers](benches/comparison/src/bin/server.rs), [load client](benches/comparison/src/bin/load.rs), [Beast server](benches/comparison/beast.cpp), and [uWebSockets server](benches/comparison/uws.cpp). See the [build and run instructions](benches/README.md) to reproduce the results.
+
+Window 1 sends one request per connection before waiting for its reply. Window 16 sends 16 requests before reading their replies. The yawc server batches up to 32 immediately ready messages, then flushes; it adds no timer delay.
+
 On 2026-10-02, a matched run completed 210 validated samples over Unix sockets. Each server used one thread; four client workers ran on separate physical cores. Values are median messages per second from five randomized repetitions, with 0.5 seconds of warmup and 2 seconds of measurement per sample. All responses were checked. Higher is better.
 
 yawc used a 128 KiB read buffer, a 64 KiB write backpressure threshold, and batches of up to 32 ready messages. tokio-tungstenite used its default adapter for window 1 and its batched adapter for window 16. fastwebsockets and Beast flushed each response; uWebSockets batched writes internally. The tuned buffers increase memory use per connection.
