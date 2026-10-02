@@ -26,7 +26,7 @@ def exact(stream, size):
 
 
 class LoadValidation(unittest.TestCase):
-    def rejected(self, response, echo, expected):
+    def rejected(self, response, echo, expected, kind="binary"):
         with tempfile.TemporaryDirectory(prefix="test-", dir=BUILD) as directory:
             address = str(Path(directory) / "ws.sock")
             with socket.socket(socket.AF_UNIX) as listener:
@@ -52,7 +52,7 @@ class LoadValidation(unittest.TestCase):
 
                 thread = threading.Thread(target=serve)
                 thread.start()
-                result = subprocess.run([str(LOAD), f"unix:{address}", "1", "20", "1", "0", "0.01", "binary"],
+                result = subprocess.run([str(LOAD), f"unix:{address}", "1", "20", "1", "0", "0.01", kind],
                                         capture_output=True, text=True, timeout=10)
                 thread.join(timeout=6)
                 self.assertFalse(thread.is_alive())
@@ -73,6 +73,10 @@ class LoadValidation(unittest.TestCase):
     def test_unrequested_compression(self):
         response = RESPONSE[:-2] + b"Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n"
         self.rejected(response, None, "unexpected compression")
+
+    def test_corrupted_telemetry_acknowledgement(self):
+        self.rejected(RESPONSE, b"\x82\x18" + bytes(24),
+                      "invalid telemetry acknowledgement", kind="telemetry-binary")
 
     def test_fragmented_requests_have_valid_headers_masks_and_payloads(self):
         with tempfile.TemporaryDirectory(prefix="test-", dir=BUILD) as directory:

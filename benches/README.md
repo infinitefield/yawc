@@ -22,15 +22,42 @@ after each sample. Compare results only within the same transport.
 Generated measurements belong in `target/comparison/` or the ignored `benches/results/` directory.
 
 Each server runs one event-loop thread with compression disabled and no TLS.
-TCP runs enable TCP_NODELAY. The common client validates the HTTP upgrade and every echoed byte,
-uses fresh random masks, and supports fragmented responses. Text cases enable
-UTF-8 validation. Handshakes and warmup are excluded from throughput timing.
+TCP runs enable TCP_NODELAY. The common client validates the HTTP upgrade and
+every echo or application acknowledgement, uses fresh random masks, and supports
+fragmented responses. Text cases enable UTF-8 validation. Handshakes and warmup
+are excluded from throughput timing.
 Cases cover 20 B to 64 KiB, 1 to 128 connections, binary and text, and windows
 of 1 or 16 messages. A window of 16 sends a batch before reading its echoes.
 Cases 8 to 10 send each binary message as two separately masked fragments.
 Cases 11 and 12 pipeline 20 B and 125 B messages across 16 connections.
-Rust adapters and Beast complete a write per echoed message. uWebSockets batches
-writes while handling incoming data, which benefits its pipelined case.
+Cases 13 to 15 ingest telemetry batches instead of echoing them.
+The default Rust adapters and Beast complete a write per response. uWebSockets
+batches writes while handling incoming data, which benefits its pipelined case.
+
+### Telemetry ingestion
+
+The telemetry cases model a stateful binary request-response service. A message
+starts with an 8-byte little-endian sequence number, followed by 32-bit unsigned
+readings. Each server sums every reading, adds the batch to a per-connection
+running total, and sends a 24-byte binary acknowledgement containing the
+sequence number, total, and number of processed batches. The client checks all
+three fields on every response, including when 16 requests are pipelined.
+Cases 13 and 14 use 1 KiB requests with windows of 1 and 16; case 15 uses
+20-byte requests with a window of 16. This adds parsing, state updates, and
+response construction without depending on a database or external service.
+Use `--case-index 13 --repeats 1 --seconds 1` for a quick validation run.
+
+The README tables use this matched run. Select other CPU IDs if these are not
+distinct physical cores on your machine:
+
+```sh
+python3 benches/comparison/run.py --unix \
+  --libraries yawc-buffered-128k tokio-tungstenite tokio-tungstenite-batched \
+    fastwebsockets uWebSockets Boost.Beast \
+  --case-index 1 2 5 9 13 14 15 --client-cpus 4 6 8 10 \
+  --warmup 0.5 --seconds 2 --repeats 5 \
+  --output target/comparison/tuned-and-telemetry.json
+```
 
 For batching comparisons, select `yawc-batched`, `yawc-buffered`, or
 `tokio-tungstenite-batched` with `--libraries`. These adapters use `feed()` for
@@ -54,7 +81,7 @@ The read buffer can also grow. These settings increase memory use per connection
 Pass `throughput_options()` to `WebSocket::upgrade_with_options()` on the server,
 then pass the upgraded connection to `echo_batched()` below. Clients can pass the
 same options to `WebSocket::connect(url).with_options(...)`, but server-side tuning
-is what the comparison measures. The read-capacity option is introduced by this change.
+is what the comparison measures.
 
 ```rust
 use futures::{FutureExt, SinkExt};
@@ -133,8 +160,9 @@ dependency versions, client CPU use, server CPU use including warmup, and sample
 batch RTT percentiles. RTT includes queueing and client work; it is not isolated
 server latency. Each worker samples one batch in 64. Percentiles stay per worker.
 Check client CPU use before interpreting throughput as a server limit.
-Results describe local plaintext echo, not TLS, compression, handshakes, WAN
-latency, or multicore scaling. Background load can affect these measurements.
+Results describe local plaintext echo and telemetry aggregation, not TLS,
+compression, handshakes, WAN latency, or multicore scaling. Background load
+can affect these measurements.
 
 Preserve the original server before editing yawc, then compare both binaries
 in the same randomized run:

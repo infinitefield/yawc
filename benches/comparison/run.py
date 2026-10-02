@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run validated echo workloads in randomized order and save numeric measurements."""
+"""Run validated WebSocket workloads in randomized order and save measurements."""
 
 import argparse
 import hashlib
@@ -32,6 +32,9 @@ CASES = [
     (16, 16384, 1, "fragmented-binary"),
     (16, 20, 16, "binary"),
     (16, 125, 16, "binary"),
+    (16, 1024, 1, "telemetry-binary"),
+    (16, 1024, 16, "telemetry-binary"),
+    (16, 20, 16, "telemetry-binary"),
 ]
 
 
@@ -67,6 +70,8 @@ def measurement(args, name, case, commands):
     unix_address = f"unix:{socket_dir.name}/ws.sock"
     if args.unix:
         command[-1] = unix_address
+    if kind == "telemetry-binary":
+        command.append("telemetry")
     server = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     workers = []
     try:

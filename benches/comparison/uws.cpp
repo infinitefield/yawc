@@ -1,12 +1,18 @@
 #include "App.h"
+#include "telemetry.h"
 #include <iostream>
 
 int main(int argc, char **argv) {
-    if (argc != 2 || std::string_view(argv[1]) == "::" || std::string_view(argv[1]) == "0.0.0.0") {
-        std::cerr << "expected explicit bind IP\n";
+    if ((argc != 2 && argc != 3) || std::string_view(argv[1]) == "::" || std::string_view(argv[1]) == "0.0.0.0") {
+        std::cerr << "expected explicit bind address\n";
         return 1;
     }
-    struct Data {};
+    bool telemetry = argc == 3 && std::string_view(argv[2]) == "telemetry";
+    if (argc == 3 && !telemetry) {
+        std::cerr << "expected telemetry workload\n";
+        return 1;
+    }
+    struct Data { TelemetryState state; };
     bool listening = false;
     auto app = uWS::App();
     app.ws<Data>("/*", {
@@ -16,7 +22,21 @@ int main(int argc, char **argv) {
         .maxBackpressure = 16 * 1024 * 1024,
         .closeOnBackpressureLimit = true,
         .sendPingsAutomatically = false,
-        .message = [](auto *ws, std::string_view message, uWS::OpCode opcode) {
+        .message = [telemetry](auto *ws, std::string_view message, uWS::OpCode opcode) {
+            if (telemetry) {
+                if (opcode != uWS::OpCode::BINARY) {
+                    std::cerr << "telemetry requires binary messages\n";
+                    std::exit(1);
+                }
+                auto reply = ws->getUserData()->state.acknowledge(message);
+                message = std::string_view(reply.data(), reply.size());
+                opcode = uWS::OpCode::BINARY;
+                if (ws->send(message, opcode, false) == uWS::WebSocket<false, true, Data>::DROPPED) {
+                    std::cerr << "telemetry reply dropped\n";
+                    std::exit(1);
+                }
+                return;
+            }
             if (ws->send(message, opcode, false) == uWS::WebSocket<false, true, Data>::DROPPED) {
                 std::cerr << "echo dropped\n";
                 std::exit(1);

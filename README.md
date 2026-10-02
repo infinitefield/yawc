@@ -97,27 +97,30 @@ Optional Cargo features:
 
 ## Benchmarks
 
-The comparison suite completed 325 validated samples over Unix sockets on 2026-10-02. Each server used one thread and four client workers ran on separate physical cores. Values are median messages per second from five randomized repetitions, with 0.5 seconds of warmup and 2 seconds of measurement per sample. These are local plaintext echo results without TLS or compression. Higher is better.
+On 2026-10-02, a matched run completed 210 validated samples over Unix sockets. Each server used one thread; four client workers ran on separate physical cores. Values are median messages per second from five randomized repetitions, with 0.5 seconds of warmup and 2 seconds of measurement per sample. All responses were checked. Higher is better.
 
-| Binary workload | yawc | tokio-tungstenite | fastwebsockets | uWebSockets | Boost.Beast |
+yawc used a 128 KiB read buffer, a 64 KiB write backpressure threshold, and batches of up to 32 ready messages. tokio-tungstenite used its default adapter for window 1 and its batched adapter for window 16. fastwebsockets and Beast flushed each response; uWebSockets batched writes internally. The tuned buffers increase memory use per connection.
+
+### Echo
+
+| Binary workload | yawc tuned | tokio-tungstenite | fastwebsockets | uWebSockets | Boost.Beast |
 |---|---:|---:|---:|---:|---:|
-| 20 B, 64 connections, window 1 | 306,820 | 216,346 | 322,339 | 375,836 | 243,485 |
-| 1 KiB, 16 connections, window 1 | 270,867 | 208,081 | 285,262 | 324,446 | 226,989 |
-| 64 KiB, 16 connections, window 1 | 52,617 | 49,075 | 58,787 | 57,987 | 48,207 |
-| 1 KiB, 16 connections, window 16 | 547,624 | 533,351 | 565,077 | 2,362,718 | 280,105 |
-| 1 KiB in two fragments, 16 connections, window 16 | 509,049 | 476,713 | 509,915 | 2,224,018 | 253,055 |
-| 20 B, 16 connections, window 16 | 695,185 | 639,955 | 726,352 | 4,740,187 | 405,540 |
+| 20 B, 64 connections, window 1 | 299,871 | 218,543 | 319,369 | 373,675 | 236,503 |
+| 1 KiB, 16 connections, window 1 | 269,074 | 205,838 | 282,914 | 323,312 | 223,912 |
+| 1 KiB, 16 connections, window 16 | 1,838,982 | 1,466,336 | 566,137 | 2,292,540 | 276,305 |
+| 1 KiB in two fragments, 16 connections, window 16 | 1,527,572 | 1,182,136 | 506,162 | 2,200,804 | 252,129 |
 
-The default Rust adapters and Beast flush each echo. uWebSockets batches writes internally. A separate paired run used the same timing and compared yawc's default with a 128 KiB read buffer, a 64 KiB write backpressure threshold, and batches of up to 32 ready messages before flushing:
+### Telemetry aggregation
 
-| Binary workload | yawc default | yawc tuned |
-|---|---:|---:|
-| 20 B, 64 connections, window 1 | 306,827 | 299,096 |
-| 1 KiB, 16 connections, window 1 | 269,244 | 268,238 |
-| 20 B, 16 connections, window 16 | 708,856 | 3,248,325 |
-| 1 KiB, 16 connections, window 16 | 539,150 | 1,856,464 |
+Each binary request carries a sequence number and a batch of 32-bit readings. The server sums the readings, updates a per-connection total, and returns a 24-byte acknowledgement containing the sequence, total, and message count. The client validates every acknowledgement.
 
-The allocation benchmark reported zero allocations and reallocations after warmup in all 16 codec, echo, and fragmented echo cases from 20 B to 64 KiB. See the [benchmark instructions](https://github.com/infinitefield/yawc/blob/master/benches/README.md) for settings and reproduction commands. Results vary with hardware and background load.
+| Binary workload | yawc tuned | tokio-tungstenite | fastwebsockets | uWebSockets | Boost.Beast |
+|---|---:|---:|---:|---:|---:|
+| 1 KiB, 16 connections, window 1 | 272,277 | 207,178 | 289,386 | 313,142 | 219,811 |
+| 1 KiB, 16 connections, window 16 | 2,086,343 | 1,636,646 | 607,637 | 2,096,138 | 275,843 |
+| 20 B, 16 connections, window 16 | 2,681,737 | 2,026,108 | 719,589 | 4,569,648 | 404,668 |
+
+The allocation benchmark reported zero allocations and reallocations after warmup in all 16 codec, echo, and fragmented echo cases from 20 B to 64 KiB. See the [benchmark instructions](https://github.com/infinitefield/yawc/blob/master/benches/README.md) for the workloads and reproduction commands. These local plaintext results exclude TLS, compression, and application dependencies; hardware and background load affect them.
 
 ## Development
 
