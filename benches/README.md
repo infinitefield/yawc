@@ -42,6 +42,65 @@ both retain the 64 KiB write boundary.
 Use `--baseline-server` with `yawc-batched-before` to compare library changes
 under the same batching policy. The saved server must support that adapter.
 
+## Throughput settings
+
+These settings tune yawc's per-connection buffers, not the OS socket buffers:
+128 KiB initial read capacity and a 64 KiB write backpressure threshold.
+The threshold can be exceeded by a frame; it is not a hard memory limit.
+The read buffer can also grow. These settings increase memory use per connection.
+
+Pass `throughput_options()` to `WebSocket::upgrade_with_options()` on the server,
+then pass the upgraded connection to `echo_batched()` below. Clients can pass the
+same options to `WebSocket::connect(url).with_options(...)`, but server-side tuning
+is what the comparison measures. The read-capacity option is introduced by this change.
+
+```rust
+use futures::{FutureExt, SinkExt};
+use yawc::{HttpWebSocket, OpCode, Options, Result};
+
+fn throughput_options() -> Options {
+    Options::default()
+        .with_utf8()
+        .without_compression()
+        .with_read_buffer_capacity(128 * 1024)
+        .with_backpressure_boundary(64 * 1024)
+}
+
+async fn echo_batched(mut ws: HttpWebSocket) -> Result<()> {
+    loop {
+        let mut frame = ws.next_frame().await?;
+        for index in 0..32 {
+            match frame.opcode() {
+                OpCode::Text | OpCode::Binary => ws.feed(frame).await?,
+                OpCode::Close => return ws.close().await,
+                _ => {}
+            }
+            if index == 31 {
+                break;
+            }
+            match ws.next_frame().now_or_never() {
+                Some(next) => frame = next?,
+                None => break,
+            }
+        }
+        ws.flush().await?;
+    }
+}
+```
+
+The loop flushes when no frame is immediately available or after 32 frames.
+It never waits for a batch to fill. Backpressure can flush earlier.
+For an outgoing batch already available in your application, call `feed()` for each
+frame, then `flush()` once; continue polling incoming frames to handle control traffic.
+
+The high-throughput case sends 16 messages before waiting for echoes, across 16
+connections, with 1 KiB payloads. A client that waits for each reply prevents that
+batching benefit. Reproduce it with `--libraries yawc-buffered-128k --case-index 5`.
+The measurements use Unix sockets without TLS or compression; TCP, TLS, application
+work and different hardware can change throughput. See the [comparison results](results/README.md).
+
+## Measurement details
+
 The runner randomizes case order and saves every repetition, binary hashes,
 dependency versions, client CPU use, server CPU use including warmup, and sampled
 batch RTT percentiles. RTT includes queueing and client work; it is not isolated

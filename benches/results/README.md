@@ -1,5 +1,7 @@
 # Measured baseline
 
+For the current implementation, see the [latest comparison of all libraries](pr-comparison.md).
+
 Transport: Unix sockets. One server thread, two client processes
 (one for the single-connection case), separate physical cores, no TLS or compression.
 Baseline: 3 repetitions, 0.5 s warmup,
