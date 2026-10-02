@@ -2,10 +2,11 @@ use std::{
     env,
     mem::MaybeUninit,
     net::SocketAddr,
+    str::FromStr,
     time::{Duration, Instant},
 };
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use futures::future::try_join_all;
 use libc::rusage;
 use rand::random;
@@ -18,6 +19,43 @@ use tokio::{
 trait Transport: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> Transport for T {}
 
+#[derive(Clone, Copy)]
+enum MessageKind {
+    Binary,
+    Text,
+    FragmentedBinary,
+}
+
+impl FromStr for MessageKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "binary" => Ok(Self::Binary),
+            "text" => Ok(Self::Text),
+            "fragmented-binary" => Ok(Self::FragmentedBinary),
+            _ => bail!("invalid message type"),
+        }
+    }
+}
+
+fn encode_frame(outgoing: &mut Vec<u8>, payload: &[u8], opcode: u8, fin: bool) {
+    let size = payload.len();
+    outgoing.push((u8::from(fin) << 7) | opcode);
+    if size < 126 {
+        outgoing.push(0x80 | size as u8);
+    } else if size <= u16::MAX as usize {
+        outgoing.push(0x80 | 126);
+        outgoing.extend_from_slice(&(size as u16).to_be_bytes());
+    } else {
+        outgoing.push(0x80 | 127);
+        outgoing.extend_from_slice(&(size as u64).to_be_bytes());
+    }
+    let mask: [u8; 4] = random();
+    outgoing.extend_from_slice(&mask);
+    outgoing.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i & 3]));
+}
+
 struct Client {
     stream: BufReader<Box<dyn Transport>>,
     payload: Vec<u8>,
@@ -25,11 +63,12 @@ struct Client {
     incoming: Vec<u8>,
     window: usize,
     opcode: u8,
+    fragmented: bool,
     latencies: Vec<u64>,
 }
 
 impl Client {
-    async fn connect(address: &str, size: usize, window: usize, text: bool) -> Result<Self> {
+    async fn connect(address: &str, size: usize, window: usize, kind: MessageKind) -> Result<Self> {
         let mut stream: Box<dyn Transport> = if let Some(path) = address.strip_prefix("unix:") {
             Box::new(UnixStream::connect(path).await?)
         } else {
@@ -59,10 +98,15 @@ impl Client {
         Ok(Self {
             stream: BufReader::with_capacity(128 * 1024, stream),
             payload,
-            outgoing: Vec::with_capacity(window * (size + 14)),
+            outgoing: Vec::with_capacity(window * (size + 28)),
             incoming: vec![0; size],
             window,
-            opcode: if text { 1 } else { 2 },
+            opcode: if matches!(kind, MessageKind::Text) {
+                1
+            } else {
+                2
+            },
+            fragmented: matches!(kind, MessageKind::FragmentedBinary),
             latencies: Vec::with_capacity(16384),
         })
     }
@@ -70,27 +114,18 @@ impl Client {
     async fn batch(&mut self) -> Result<()> {
         self.outgoing.clear();
         for _ in 0..self.window {
-            let size = self.payload.len();
-            self.outgoing.push(0x80 | self.opcode);
-            if size < 126 {
-                self.outgoing.push(0x80 | size as u8);
-            } else if size <= u16::MAX as usize {
-                self.outgoing.push(0x80 | 126);
-                self.outgoing
-                    .extend_from_slice(&(size as u16).to_be_bytes());
+            if self.fragmented {
+                let middle = self.payload.len() / 2;
+                encode_frame(
+                    &mut self.outgoing,
+                    &self.payload[..middle],
+                    self.opcode,
+                    false,
+                );
+                encode_frame(&mut self.outgoing, &self.payload[middle..], 0, true);
             } else {
-                self.outgoing.push(0x80 | 127);
-                self.outgoing
-                    .extend_from_slice(&(size as u64).to_be_bytes());
+                encode_frame(&mut self.outgoing, &self.payload, self.opcode, true);
             }
-            let mask: [u8; 4] = random();
-            self.outgoing.extend_from_slice(&mask);
-            self.outgoing.extend(
-                self.payload
-                    .iter()
-                    .enumerate()
-                    .map(|(i, b)| b ^ mask[i & 3]),
-            );
         }
         self.stream.get_mut().write_all(&self.outgoing).await?;
         for _ in 0..self.window {
@@ -161,7 +196,7 @@ async fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
     ensure!(
         args.len() == 7,
-        "expected address connections bytes window warmup_seconds seconds binary|text"
+        "expected address connections bytes window warmup_seconds seconds binary|text|fragmented-binary"
     );
     let address = &args[0];
     let connections: usize = args[1].parse()?;
@@ -173,14 +208,10 @@ async fn main() -> Result<()> {
         connections > 0 && window > 0 && size > 0 && !duration.is_zero(),
         "invalid workload"
     );
-    ensure!(
-        matches!(args[6].as_str(), "binary" | "text"),
-        "invalid message type"
-    );
-    let mut clients = try_join_all(
-        (0..connections).map(|_| Client::connect(address, size, window, args[6] == "text")),
-    )
-    .await?;
+    let kind: MessageKind = args[6].parse()?;
+    let mut clients =
+        try_join_all((0..connections).map(|_| Client::connect(address, size, window, kind)))
+            .await?;
     let deadline = Instant::now() + warmup;
     tokio::time::timeout(
         warmup + Duration::from_secs(10),

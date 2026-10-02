@@ -5,7 +5,7 @@ use std::{future::poll_fn, time::Duration};
 use bytes::Bytes;
 use futures::{stream::SplitSink, FutureExt, SinkExt, StreamExt};
 use tokio::{io::duplex, time::timeout};
-use yawc::{Frame, OpCode, Options, Role, WebSocket};
+use yawc::{Frame, OpCode, Options, Role, WebSocket, WebSocketError};
 
 #[tokio::test]
 async fn feed_applies_backpressure_before_accepting_another_message() {
@@ -125,4 +125,58 @@ async fn manual_fragments_and_ping_keep_their_order() {
     let frame = server.next_frame().await.unwrap();
     assert_eq!(frame.opcode(), OpCode::Text);
     assert_eq!(frame.payload().as_ref(), b"first last");
+}
+
+#[tokio::test]
+async fn reassembled_payloads_can_outlive_later_messages() {
+    let (client_io, server_io) = duplex(1024);
+    let mut client = WebSocket::from_stream(client_io, Role::Client, Options::default()).unwrap();
+    let mut server = WebSocket::from_stream(server_io, Role::Server, Options::default()).unwrap();
+    let mut retained = Vec::new();
+    for value in 0..16u8 {
+        client
+            .feed(Frame::binary(vec![value; 17]).with_fin(false))
+            .await
+            .unwrap();
+        client.feed(Frame::ping("ping")).await.unwrap();
+        client
+            .feed(Frame::continuation(vec![value; 19]))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(server.next_frame().await.unwrap().opcode(), OpCode::Ping);
+        retained.push(server.next_frame().await.unwrap());
+    }
+    for (value, frame) in retained.iter().enumerate() {
+        assert_eq!(frame.payload().as_ref(), vec![value as u8; 36]);
+    }
+}
+
+#[tokio::test]
+async fn reused_fragment_storage_preserves_the_message_limit() {
+    let (client_io, server_io) = duplex(1024);
+    let mut client = WebSocket::from_stream(client_io, Role::Client, Options::default()).unwrap();
+    let mut server = WebSocket::from_stream(
+        server_io,
+        Role::Server,
+        Options::default().with_max_read_buffer(32),
+    )
+    .unwrap();
+    for size in [31, 31, 32] {
+        client
+            .feed(Frame::binary(vec![1; 17]).with_fin(false))
+            .await
+            .unwrap();
+        client
+            .feed(Frame::continuation(vec![1; size - 17]))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let result = server.next_frame().await;
+        if size < 32 {
+            assert_eq!(result.unwrap().payload().as_ref(), vec![1; size]);
+        } else {
+            assert!(matches!(result, Err(WebSocketError::FrameTooLarge)));
+        }
+    }
 }

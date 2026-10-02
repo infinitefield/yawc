@@ -27,6 +27,7 @@ uses fresh random masks, and supports fragmented responses. Text cases enable
 UTF-8 validation. Handshakes and warmup are excluded from throughput timing.
 Cases cover 20 B to 64 KiB, 1 to 128 connections, binary and text, and windows
 of 1 or 16 messages. A window of 16 sends a batch before reading its echoes.
+Cases 8 to 10 send each binary message as two separately masked fragments.
 Rust adapters and Beast complete a write per echoed message. uWebSockets batches
 writes while handling incoming data, which benefits its pipelined case.
 
@@ -100,6 +101,31 @@ The measurements use Unix sockets without TLS or compression; TCP, TLS, applicat
 work and different hardware can change throughput.
 
 ## Measurement details
+
+### Allocations
+
+```sh
+cargo bench -p yawc --bench allocations -- --assert-zero
+```
+
+Counts allocations and reallocations after 1,024 warmup iterations, including both
+peers and the in-memory transport. Cases cover codec roundtrips, echo windows of
+1 and 16, and two-fragment messages from 20 B to 64 KiB. Payloads are consumed
+before the next iteration. Connection setup, buffer growth, retained messages,
+TLS and compression are outside this check. Fragment assembly retains its buffer
+for reuse; retaining a returned message can require another allocation.
+
+### uWebSockets design
+
+The pinned uWebSockets version delivers complete messages as
+[borrowed views](https://github.com/uNetworking/uWebSockets/blob/2cb3a77d89045b9e39ca8c85e37f614d2b3afa2b/src/WebSocketContext.h)
+of a shared receive buffer. It batches replies in a
+[reusable cork buffer](https://github.com/uNetworking/uWebSockets/blob/2cb3a77d89045b9e39ca8c85e37f614d2b3afa2b/src/AsyncSocket.h)
+and uses [vectored writes for large plaintext messages](https://github.com/uNetworking/uWebSockets/blob/2cb3a77d89045b9e39ca8c85e37f614d2b3afa2b/src/WebSocket.h).
+Its callbacks consume these views synchronously. yawc returns owned payloads that
+can survive subsequent reads and move between tasks.
+
+### Socket measurements
 
 The runner randomizes case order and saves every repetition, binary hashes,
 dependency versions, client CPU use, server CPU use including warmup, and sampled

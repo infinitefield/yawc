@@ -225,3 +225,7 @@ smol = "2.0.2"
 [[bench]]
 name = "performance"
 harness = false
+
+[[bench]]
+name = "allocations"
+harness = false

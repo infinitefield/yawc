@@ -74,6 +74,49 @@ class LoadValidation(unittest.TestCase):
         response = RESPONSE[:-2] + b"Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n"
         self.rejected(response, None, "unexpected compression")
 
+    def test_fragmented_requests_have_valid_headers_masks_and_payloads(self):
+        with tempfile.TemporaryDirectory(prefix="test-", dir=BUILD) as directory:
+            address = str(Path(directory) / "ws.sock")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(address)
+                listener.listen(1)
+                listener.settimeout(5)
+                errors = []
+                expected = bytes(ord("!") + i for i in range(20))
+
+                def serve():
+                    try:
+                        with listener.accept()[0] as peer:
+                            peer.settimeout(5)
+                            request = b""
+                            while not request.endswith(b"\r\n\r\n"):
+                                request += exact(peer, 1)
+                            peer.sendall(RESPONSE)
+                            while True:
+                                first = peer.recv(1)
+                                if not first:
+                                    break
+                                self.assertEqual(first, b"\x02")
+                                self.assertEqual(exact(peer, 1), b"\x8a")
+                                mask = exact(peer, 4)
+                                head = bytes(b ^ mask[i % 4] for i, b in enumerate(exact(peer, 10)))
+                                self.assertEqual(exact(peer, 2), b"\x80\x8a")
+                                mask = exact(peer, 4)
+                                tail = bytes(b ^ mask[i % 4] for i, b in enumerate(exact(peer, 10)))
+                                self.assertEqual(head + tail, expected)
+                                peer.sendall(b"\x82\x14" + expected)
+                    except Exception as error:
+                        errors.append(error)
+
+                thread = threading.Thread(target=serve)
+                thread.start()
+                result = subprocess.run([str(LOAD), f"unix:{address}", "1", "20", "1", "0", "0.01", "fragmented-binary"],
+                                        capture_output=True, text=True, timeout=10)
+                thread.join(timeout=6)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

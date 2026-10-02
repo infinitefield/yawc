@@ -127,7 +127,7 @@ use crate::{codec, compression, frame, streaming::Streaming, Result, WebSocketEr
 #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::TlsConnector;
 use {
-    bytes::Bytes,
+    bytes::{Bytes, BytesMut},
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
@@ -460,7 +460,6 @@ pub(super) struct FragmentationState {
     opcode: OpCode,
     is_compressed: bool,
     bytes_read: usize,
-    parts: VecDeque<Bytes>,
 }
 
 /// Handles fragmentation and defragmentation of WebSocket frames.
@@ -475,6 +474,8 @@ struct FragmentLayer {
     outgoing_fragments: VecDeque<Frame>,
     /// Fragment accumulation for assembling incoming fragmented messages
     incoming_fragment: Option<FragmentationState>,
+    /// Reusable storage for fragmented messages, shared with the returned payload.
+    incoming_buffer: BytesMut,
     /// Maximum fragment size for outgoing messages
     fragment_size: Option<usize>,
     /// Maximum buffer size for incoming fragmented messages
@@ -493,6 +494,7 @@ impl FragmentLayer {
         Self {
             outgoing_fragments: VecDeque::new(),
             incoming_fragment: None,
+            incoming_buffer: BytesMut::new(),
             fragment_size,
             max_read_buffer,
             fragment_timeout,
@@ -534,8 +536,6 @@ impl FragmentLayer {
     /// - `Ok(None)` if this is a fragment and we're still waiting for more
     /// - `Err` if there's a protocol violation or timeout
     fn assemble_incoming(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
-        use bytes::BufMut;
-
         #[cfg(test)]
         println!(
             "<<Fragmentation<< OpCode={:?} fin={} len={}",
@@ -553,12 +553,13 @@ impl FragmentLayer {
 
                 // Handle fragmented messages
                 if !frame.fin {
+                    self.incoming_buffer.clear();
+                    self.incoming_buffer.extend_from_slice(&frame.payload);
                     let fragmentation = FragmentationState {
                         started: Instant::now(),
                         opcode: frame.opcode,
                         is_compressed: frame.is_compressed,
                         bytes_read: frame.payload.len(),
-                        parts: VecDeque::from([frame.payload]),
                     };
                     self.incoming_fragment = Some(fragmentation);
 
@@ -588,23 +589,13 @@ impl FragmentLayer {
                     }
                 }
 
-                fragment.parts.push_back(frame.payload);
+                self.incoming_buffer.extend_from_slice(&frame.payload);
 
                 if frame.fin {
                     // Assemble complete message
                     frame.opcode = fragment.opcode;
                     frame.is_compressed = fragment.is_compressed;
-                    frame.payload = fragment
-                        .parts
-                        .into_iter()
-                        .fold(
-                            bytes::BytesMut::with_capacity(fragment.bytes_read),
-                            |mut acc, b| {
-                                acc.put(b);
-                                acc
-                            },
-                        )
-                        .freeze();
+                    frame.payload = self.incoming_buffer.split().freeze();
 
                     Ok(Some(frame))
                 } else {

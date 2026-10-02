@@ -103,10 +103,41 @@ fn control_frames(c: &mut Criterion) {
     group.finish();
 }
 
+fn fragmented_echo(c: &mut Criterion) {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let mut group = c.benchmark_group("fragmented_echo");
+    for size in [20, 1024, 16384, 65536] {
+        let (client, server) = duplex((size + 16) * 4);
+        let mut client = WebSocket::from_stream(client, Role::Client, Options::default()).unwrap();
+        let mut server = WebSocket::from_stream(server, Role::Server, Options::default()).unwrap();
+        let payload = Bytes::from(vec![0x5a; size]);
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_function(BenchmarkId::from_parameter(size), |b| {
+            b.iter(|| {
+                runtime.block_on(async {
+                    client
+                        .feed(Frame::binary(payload.slice(..size / 2)).with_fin(false))
+                        .await
+                        .unwrap();
+                    client
+                        .feed(Frame::continuation(payload.slice(size / 2..)))
+                        .await
+                        .unwrap();
+                    client.flush().await.unwrap();
+                    let frame = server.next_frame().await.unwrap();
+                    server.send(frame).await.unwrap();
+                    black_box(client.next_frame().await.unwrap());
+                });
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(2)).sample_size(40);
-    targets = performance, control_frames
+    targets = performance, control_frames, fragmented_echo
 }
 criterion_main!(benches);

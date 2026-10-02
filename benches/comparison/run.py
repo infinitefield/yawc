@@ -27,6 +27,9 @@ CASES = [
     (16, 1024, 16, "binary"),
     (16, 1024, 1, "text"),
     (128, 16384, 1, "binary"),
+    (16, 1024, 1, "fragmented-binary"),
+    (16, 1024, 16, "fragmented-binary"),
+    (16, 16384, 1, "fragmented-binary"),
 ]
 
 
@@ -148,6 +151,7 @@ def main():
         commands["yawc-before"] = [str(args.baseline_server.resolve()), "yawc", address]
         commands["yawc-batched-before"] = [str(args.baseline_server.resolve()), "yawc-batched", address]
         commands["yawc-buffered-before"] = [str(args.baseline_server.resolve()), "yawc-buffered", address]
+        commands["yawc-buffered-128k-before"] = [str(args.baseline_server.resolve()), "yawc-buffered-128k", address]
     if any(name not in commands for name in args.libraries):
         parser.error("unknown library or missing --baseline-server")
     if args.output.exists():
