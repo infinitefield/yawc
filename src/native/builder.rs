@@ -2,7 +2,7 @@
 
 use std::{
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -84,6 +84,7 @@ pub struct WebSocketBuilder<S = MaybeTlsStream<TcpStream>> {
 pub(crate) struct WsBuilderOpts {
     pub(super) url: Url,
     pub(super) tcp_address: Option<SocketAddr>,
+    pub(super) local_address: Option<IpAddr>,
     pub(super) connector: Option<TlsConnector>,
     pub(super) proxy: Option<Proxy>,
     pub(super) establish_options: Option<Options>,
@@ -105,6 +106,7 @@ impl<S> WebSocketBuilder<S> {
             opts: Some(WsBuilderOpts {
                 url,
                 tcp_address: None,
+                local_address: None,
                 connector: None,
                 proxy: None,
                 establish_options: None,
@@ -152,6 +154,25 @@ impl<S> WebSocketBuilder<S> {
             unreachable!()
         };
         opts.tcp_address = Some(address);
+        self
+    }
+
+    /// Binds the TCP socket to a local address before connecting.
+    ///
+    /// Only resolved target addresses of the same kind, IPv4 or IPv6, as the local address
+    /// are tried; a socket bound to one kind cannot reach the other. With
+    /// [`with_proxy`](Self::with_proxy), the connection to the proxy is bound instead.
+    ///
+    /// # Parameters
+    /// - `address`: The local IP address to bind to; the port is chosen by the OS
+    ///
+    /// # Returns
+    /// The builder for method chaining
+    pub fn with_local_address(mut self, address: IpAddr) -> Self {
+        let Some(opts) = &mut self.opts else {
+            unreachable!()
+        };
+        opts.local_address = Some(address);
         self
     }
 
