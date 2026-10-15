@@ -5,7 +5,10 @@
 //! Everything above that, TLS included, then runs end to end through the tunnel, so the
 //! proxy sees only ciphertext for a `wss://` URL.
 
-use std::{fmt, io, net::SocketAddr};
+use std::{
+    fmt, io,
+    net::{IpAddr, SocketAddr},
+};
 
 use percent_encoding::percent_decode_str;
 use thiserror::Error;
@@ -15,6 +18,7 @@ use tokio::{
 };
 use url::{Host, Url};
 
+use super::connect_tcp;
 use crate::Result;
 
 /// The protocol version this module speaks.
@@ -193,6 +197,16 @@ impl Proxy {
     ///
     /// Apply a timeout around this future to bound DNS and proxy negotiation.
     pub async fn connect(&self, url: &Url, address: Option<SocketAddr>) -> Result<TcpStream> {
+        self.connect_from(url, address, None).await
+    }
+
+    /// [`Self::connect`], with the socket to the proxy bound to `local_address` when given.
+    pub(super) async fn connect_from(
+        &self,
+        url: &Url,
+        address: Option<SocketAddr>,
+        local_address: Option<IpAddr>,
+    ) -> Result<TcpStream> {
         if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") {
             return Err(crate::WebSocketError::InvalidHttpScheme);
         }
@@ -202,7 +216,7 @@ impl Proxy {
             );
         }
         let target = self.target(url, address).await?;
-        let mut stream = self.dial().await?;
+        let mut stream = self.dial(local_address).await?;
         connect(&mut stream, self, &target).await?;
         Ok(stream)
     }
@@ -431,12 +445,18 @@ impl fmt::Display for ReplyCode {
 }
 
 impl Proxy {
-    /// Connects to the proxy itself.
-    pub(crate) async fn dial(&self) -> Result<TcpStream> {
+    /// Connects to the proxy itself, from `local_address` when one is given.
+    pub(crate) async fn dial(&self, local_address: Option<IpAddr>) -> Result<TcpStream> {
         let stream = match &self.host {
-            Host::Domain(domain) => TcpStream::connect((domain.as_str(), self.port)).await?,
-            Host::Ipv4(ip) => TcpStream::connect(SocketAddr::from((*ip, self.port))).await?,
-            Host::Ipv6(ip) => TcpStream::connect(SocketAddr::from((*ip, self.port))).await?,
+            Host::Domain(domain) => {
+                connect_tcp(local_address, (domain.as_str(), self.port)).await?
+            }
+            Host::Ipv4(ip) => {
+                connect_tcp(local_address, SocketAddr::from((*ip, self.port))).await?
+            }
+            Host::Ipv6(ip) => {
+                connect_tcp(local_address, SocketAddr::from((*ip, self.port))).await?
+            }
         };
 
         Ok(stream)

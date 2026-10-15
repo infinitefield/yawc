@@ -131,7 +131,7 @@ use {
     http_body_util::Empty,
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
-    tokio::net::TcpStream,
+    tokio::net::{lookup_host, TcpSocket, TcpStream, ToSocketAddrs},
     tokio_rustls::rustls::pki_types::ServerName,
 };
 
@@ -140,6 +140,7 @@ use std::{
     collections::VecDeque,
     future::poll_fn,
     io,
+    net::{IpAddr, SocketAddr},
     pin::{pin, Pin},
     str::FromStr,
     sync::Arc,
@@ -155,7 +156,7 @@ use futures::{task::AtomicWaker, SinkExt};
 #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
-use url::Url;
+use url::{Host, Url};
 
 // Re-exports
 pub use crate::stream::MaybeTlsStream;
@@ -1589,19 +1590,61 @@ Either:
 /// then asked to tunnel to it.
 async fn dial(opts: &WsBuilderOpts) -> Result<TcpStream> {
     let Some(proxy) = opts.proxy.as_ref() else {
+        let local = opts.local_address;
         let stream = match opts.tcp_address {
-            Some(address) => TcpStream::connect(address).await?,
+            Some(address) => connect_tcp(local, address).await?,
             None => {
-                let host = opts.url.host().expect("hostname").to_string();
                 let port = opts.url.port_or_known_default().expect("port");
-                TcpStream::connect(format!("{host}:{port}")).await?
+                match opts.url.host().expect("hostname") {
+                    Host::Domain(domain) => connect_tcp(local, (domain, port)).await?,
+                    Host::Ipv4(ip) => connect_tcp(local, SocketAddr::from((ip, port))).await?,
+                    Host::Ipv6(ip) => connect_tcp(local, SocketAddr::from((ip, port))).await?,
+                }
             }
         };
 
         return Ok(stream);
     };
 
-    proxy.connect(&opts.url, opts.tcp_address).await
+    proxy
+        .connect_from(&opts.url, opts.tcp_address, opts.local_address)
+        .await
+}
+
+/// Opens a TCP connection to `target`, from a socket bound to `local_address` when one is set.
+///
+/// Without a local address this is `TcpStream::connect`. With one, the target is resolved
+/// and each IPv4 or IPv6 address matching the local address's kind is tried in turn from a
+/// freshly bound socket; a socket bound to one kind cannot reach the other, so those are
+/// skipped.
+async fn connect_tcp(
+    local_address: Option<IpAddr>,
+    target: impl ToSocketAddrs,
+) -> io::Result<TcpStream> {
+    let Some(local) = local_address else {
+        return TcpStream::connect(target).await;
+    };
+
+    let mut error = io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "no address of the local address's kind",
+    );
+    for remote in lookup_host(target)
+        .await?
+        .filter(|remote| remote.is_ipv4() == local.is_ipv4())
+    {
+        let socket = if local.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }?;
+        socket.bind(SocketAddr::new(local, 0))?;
+        match socket.connect(remote).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => error = err,
+        }
+    }
+    Err(error)
 }
 
 /// Runs the HTTP/1.1 handshake but keeps hyper's upgraded stream instead of downcasting.
@@ -1712,9 +1755,11 @@ mod tests {
 
     use super::*;
     use futures::SinkExt;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+    use tokio::net::TcpListener;
 
     /// A mock duplex stream that wraps tokio's DuplexStream for testing.
     struct MockStream {
@@ -2682,6 +2727,48 @@ mod tests {
         assert!(
             matches!(result, Err(WebSocketError::CompressionNotSupported)),
             "expected the handshake to fail, got a different outcome"
+        );
+    }
+
+    /// `localhost` usually also resolves to `::1`, which an IPv4 local address must skip.
+    #[tokio::test]
+    async fn dial_picks_the_target_of_the_local_address_kind() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://localhost:{}/", listener.local_addr().unwrap().port());
+        let opts = WebSocket::connect(url.parse().unwrap())
+            .with_local_address(Ipv4Addr::LOCALHOST.into())
+            .opts
+            .unwrap();
+
+        let accept = tokio::spawn(async move { listener.accept().await });
+        dial(&opts).await.unwrap();
+        assert_eq!(accept.await.unwrap().unwrap().1.ip(), Ipv4Addr::LOCALHOST);
+    }
+
+    #[tokio::test]
+    async fn dial_reaches_an_ipv6_literal_url() {
+        let listener = TcpListener::bind("[::1]:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let opts = WebSocket::connect(url.parse().unwrap()).opts.unwrap();
+
+        let accept = tokio::spawn(async move { listener.accept().await });
+        dial(&opts).await.unwrap();
+        accept.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dial_from_an_address_of_the_other_kind_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let opts = WebSocket::connect(url.parse().unwrap())
+            .with_local_address(Ipv6Addr::LOCALHOST.into())
+            .opts
+            .unwrap();
+
+        let err = dial(&opts).await.expect_err("IPv6 socket, IPv4 listener");
+        assert_eq!(
+            err.as_io_error().map(io::Error::kind),
+            Some(io::ErrorKind::AddrNotAvailable)
         );
     }
 }

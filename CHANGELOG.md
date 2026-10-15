@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Binding the client to a local address
+
+- **`WebSocket::connect(url).with_local_address(ip)`**: Binds the TCP socket to a local
+  address before connecting. Only resolved target addresses of the same kind, IPv4 or IPv6,
+  as the local address are tried; a target with none of them fails with `AddrNotAvailable`.
+  With `with_proxy`, the connection to the proxy is bound instead.
+
 #### SOCKS5 proxy support (RFC 1928)
 
 - **`WebSocket::connect(url).with_proxy(proxy)`**: Dials a SOCKS5 proxy and asks it to
