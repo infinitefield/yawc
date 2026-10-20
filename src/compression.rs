@@ -1,7 +1,7 @@
 use std::io;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use flate2::{CompressError, DecompressError, FlushCompress, Status};
+use flate2::{CompressError, DecompressError, FlushCompress, FlushDecompress, Status};
 
 use nom::{
     bytes::complete::{tag, take_while1},
@@ -658,7 +658,7 @@ impl Inflate {
             let before_out = decompressor.total_out();
             let before_in = decompressor.total_in();
 
-            let status = decompressor.decompress(input, dst, flate2::FlushDecompress::None);
+            let status = decompressor.decompress(input, dst, FlushDecompress::None);
 
             let read = (decompressor.total_out() - before_out) as usize;
             let consumed = (decompressor.total_in() - before_in) as usize;
@@ -708,35 +708,24 @@ impl Inflate {
     fn flush(&mut self, max_output_size: usize) -> crate::Result<Bytes> {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
-
-        let dst = inflate_chunk(output, max_output_size)?;
-        let before_out = decompressor.total_out();
-
-        decompressor
-            .decompress(&[], dst, flate2::FlushDecompress::Sync)
-            .map_err(inflate_error)?;
-
-        let written = (decompressor.total_out() - before_out) as usize;
-        // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
-        unsafe { output.advance_mut(written) };
+        let mut flush = FlushDecompress::Sync;
 
         loop {
             let dst = inflate_chunk(output, max_output_size)?;
 
             let before_out = decompressor.total_out();
             decompressor
-                .decompress(&[], dst, flate2::FlushDecompress::None)
+                .decompress(&[], dst, flush)
                 .map_err(inflate_error)?;
 
-            if before_out == decompressor.total_out() {
+            let written = (decompressor.total_out() - before_out) as usize;
+            if written == 0 && flush == FlushDecompress::None {
                 break Ok(output.split().freeze());
             }
 
-            let written = (decompressor.total_out() - before_out) as usize;
             // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
-            unsafe {
-                output.advance_mut(written);
-            }
+            unsafe { output.advance_mut(written) };
+            flush = FlushDecompress::None;
         }
     }
 }
@@ -2157,6 +2146,11 @@ mod tests {
     fn inflation_stops_at_the_output_limit_and_releases_buffered_data() {
         let mut compressor = Compressor::new(Compression::default(), HalfConfig::default());
         let compressed = compressor.compress(&vec![b'a'; 1024 * 1024], true).unwrap();
+        let mut decompressor = Decompressor::new(HalfConfig::default());
+        assert!(matches!(
+            decompressor.decompress(&[], false, 0),
+            Err(WebSocketError::FrameTooLarge)
+        ));
         for limit in [1, 1024, 4096, 64 * 1024] {
             let mut decompressor = Decompressor::new(HalfConfig::default());
             assert!(matches!(

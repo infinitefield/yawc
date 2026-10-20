@@ -254,57 +254,46 @@ where
         cx: &mut Context<'_>,
         max_read_buffer: usize,
     ) -> Poll<Result<Frame>> {
-        loop {
-            let res = if self.stream.read_buffer().is_empty() {
-                self.wake_proxy.set_waker(ContextKind::Read, cx.waker());
-                self.wake_proxy
-                    .with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx))
-            } else {
-                self.wake_proxy
-                    .poll_with_context(ContextKind::Read, cx, |cx| {
-                        self.read_half.poll_frame(&mut self.stream, cx)
-                    })
-            };
-            let res = match res {
-                Poll::Ready(Ok(frame)) => Poll::Ready(self.on_frame(frame, max_read_buffer)),
-                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-                Poll::Pending => Poll::Pending,
-            };
-            match res {
-                Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(frame)),
-                Poll::Ready(Ok(None)) => continue,
-                Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
-                    ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
-                    return Poll::Ready(Err(WebSocketError::ConnectionClosed));
-                }
-                Poll::Ready(Err(err)) => {
-                    let code = match err {
-                        WebSocketError::FrameTooLarge => CloseCode::Size,
-                        WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
-                        WebSocketError::ReservedBitsNotZero
-                        | WebSocketError::ControlFrameFragmented
-                        | WebSocketError::PingFrameTooLarge
-                        | WebSocketError::InvalidFragment
-                        | WebSocketError::FragmentTimeout
-                        | WebSocketError::InvalidContinuationFrame
-                        | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
-                        _ => CloseCode::Error,
-                    };
-                    self.emit_close(Frame::close(code, err.to_string()));
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending => {
-                    let res = ready!(self.poll_flush_obligated(ContextKind::Read, cx));
-                    if let Err(err) = res {
-                        return Poll::Ready(Err(err));
-                    }
-                    return Poll::Pending;
-                }
+        let res = if self.stream.read_buffer().is_empty() {
+            self.wake_proxy.set_waker(ContextKind::Read, cx.waker());
+            self.wake_proxy
+                .with_context(|cx| self.read_half.poll_frame(&mut self.stream, cx))
+        } else {
+            self.wake_proxy
+                .poll_with_context(ContextKind::Read, cx, |cx| {
+                    self.read_half.poll_frame(&mut self.stream, cx)
+                })
+        };
+        match res.map(|res| res.and_then(|frame| self.on_frame(frame, max_read_buffer))) {
+            Poll::Ready(Ok(frame)) => Poll::Ready(Ok(frame)),
+            Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
+                ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
+                Poll::Ready(Err(WebSocketError::ConnectionClosed))
+            }
+            Poll::Ready(Err(err)) => {
+                let code = match err {
+                    WebSocketError::FrameTooLarge => CloseCode::Size,
+                    WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
+                    WebSocketError::ReservedBitsNotZero
+                    | WebSocketError::ControlFrameFragmented
+                    | WebSocketError::PingFrameTooLarge
+                    | WebSocketError::InvalidFragment
+                    | WebSocketError::FragmentTimeout
+                    | WebSocketError::InvalidContinuationFrame
+                    | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
+                    _ => CloseCode::Error,
+                };
+                self.emit_close(Frame::close(code, err.to_string()));
+                Poll::Ready(Err(err))
+            }
+            Poll::Pending => {
+                ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
+                Poll::Pending
             }
         }
     }
 
-    fn on_frame(&mut self, mut frame: Frame, max_read_buffer: usize) -> Result<Option<Frame>> {
+    fn on_frame(&mut self, mut frame: Frame, max_read_buffer: usize) -> Result<Frame> {
         #[cfg(test)]
         println!(
             "<<Compression<< OpCode={:?} Fin={} Payload={}",
@@ -317,13 +306,13 @@ where
         match frame.opcode {
             OpCode::Ping => {
                 self.on_ping(&frame);
-                return Ok(Some(frame));
+                return Ok(frame);
             }
             OpCode::Close => {
                 self.on_close(&frame)?;
-                return Ok(Some(frame));
+                return Ok(frame);
             }
-            OpCode::Pong => return Ok(Some(frame)),
+            OpCode::Pong => return Ok(frame),
             _ => {}
         }
 
@@ -334,23 +323,19 @@ where
         };
 
         if frame.is_compressed {
-            if let Some(inflate) = self.inflate.as_mut() {
-                // This payload could be empty, which is fine if we are dealing with fragmented frames.
-                let payload =
-                    inflate.decompress(&frame.payload, frame.is_fin(), max_output_size)?;
-                // Remove the compression flag
-                frame.is_compressed = false;
-                frame.payload = payload;
-            } else {
-                return Err(WebSocketError::CompressionNotSupported);
-            }
+            let inflate = self
+                .inflate
+                .as_mut()
+                .ok_or(WebSocketError::CompressionNotSupported)?;
+            frame.payload = inflate.decompress(&frame.payload, frame.is_fin(), max_output_size)?;
+            frame.is_compressed = false;
         }
 
         if frame.payload.len() >= max_output_size {
             return Err(WebSocketError::FrameTooLarge);
         }
 
-        Ok(Some(frame))
+        Ok(frame)
     }
 
     fn on_ping(&mut self, frame: &Frame) {
