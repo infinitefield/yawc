@@ -162,6 +162,7 @@ pub struct Streaming<S> {
     deflate: Option<Compressor>,
     // decompressor
     inflate: Option<Decompressor>,
+    max_payload_read: usize,
 }
 
 impl<S> Streaming<S>
@@ -195,6 +196,7 @@ where
             flush_sends: false,
             deflate: negotiated.compressor(),
             inflate: negotiated.decompressor(),
+            max_payload_read: negotiated.max_payload_read,
         }
     }
 
@@ -244,6 +246,14 @@ where
     /// - Middle fragments: `OpCode::Continuation` with `FIN=false`
     /// - Final fragment: `OpCode::Continuation` with `FIN=true`
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
+        self.poll_next_frame_with_limit(cx, usize::MAX)
+    }
+
+    pub(crate) fn poll_next_frame_with_limit(
+        &mut self,
+        cx: &mut Context<'_>,
+        max_read_buffer: usize,
+    ) -> Poll<Result<Frame>> {
         loop {
             let res = if self.stream.read_buffer().is_empty() {
                 self.wake_proxy.set_waker(ContextKind::Read, cx.waker());
@@ -255,11 +265,14 @@ where
                         self.read_half.poll_frame(&mut self.stream, cx)
                     })
             };
+            let res = match res {
+                Poll::Ready(Ok(frame)) => Poll::Ready(self.on_frame(frame, max_read_buffer)),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            };
             match res {
-                Poll::Ready(Ok(frame)) => match self.on_frame(frame)? {
-                    Some(frame) => return Poll::Ready(Ok(frame)),
-                    None => continue,
-                },
+                Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(frame)),
+                Poll::Ready(Ok(None)) => continue,
                 Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
                     ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
                     return Poll::Ready(Err(WebSocketError::ConnectionClosed));
@@ -291,7 +304,7 @@ where
         }
     }
 
-    fn on_frame(&mut self, mut frame: Frame) -> Result<Option<Frame>> {
+    fn on_frame(&mut self, mut frame: Frame, max_read_buffer: usize) -> Result<Option<Frame>> {
         #[cfg(test)]
         println!(
             "<<Compression<< OpCode={:?} Fin={} Payload={}",
@@ -314,16 +327,27 @@ where
             _ => {}
         }
 
+        let max_output_size = if !frame.is_fin() || frame.opcode == OpCode::Continuation {
+            self.max_payload_read.min(max_read_buffer)
+        } else {
+            self.max_payload_read
+        };
+
         if frame.is_compressed {
             if let Some(inflate) = self.inflate.as_mut() {
                 // This payload could be empty, which is fine if we are dealing with fragmented frames.
-                let payload = inflate.decompress(&frame.payload, frame.is_fin())?;
+                let payload =
+                    inflate.decompress(&frame.payload, frame.is_fin(), max_output_size)?;
                 // Remove the compression flag
                 frame.is_compressed = false;
                 frame.payload = payload;
             } else {
                 return Err(WebSocketError::CompressionNotSupported);
             }
+        }
+
+        if frame.payload.len() >= max_output_size {
+            return Err(WebSocketError::FrameTooLarge);
         }
 
         Ok(Some(frame))

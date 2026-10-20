@@ -59,10 +59,10 @@ pub type CompressionLevel = flate2::Compression;
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// Maximum allowed payload size for incoming messages, in bytes.
+    /// Exclusive upper bound for each incoming frame's payload size, in bytes.
     ///
-    /// If a message exceeds this size, the connection will be closed immediately
-    /// to prevent overloading the receiving end.
+    /// Applies to both the wire payload and the decompressed payload. A frame whose
+    /// size reaches this limit closes the connection with code 1009.
     ///
     /// Default: 1 MiB (1,048,576 bytes) as defined in [`super::MAX_PAYLOAD_READ`]
     pub max_payload_read: Option<usize>,
@@ -70,9 +70,10 @@ pub struct Options {
     /// Maximum size allowed for the buffer that accumulates fragmented messages.
     ///
     /// WebSocket messages can be split into multiple fragments for transmission. These fragments
-    /// are accumulated in a read buffer until the complete message is received. To prevent memory
-    /// exhaustion attacks using extremely large fragmented messages, once the total size of
-    /// accumulated fragments exceeds this limit, the connection is closed.
+    /// are accumulated in a read buffer until the complete message is received. When the
+    /// accumulated size reaches this limit, the connection closes with code 1009.
+    /// Compressed fragments are bounded during inflation by the remaining buffer space.
+    /// The limit is exclusive and does not apply to manual [`super::streaming::Streaming`].
     ///
     /// Default: 2 MiB (2,097,152 bytes) as defined in [`super::MAX_READ_BUFFER`], or twice the
     /// configured `max_payload_read` value if that is set.
@@ -328,11 +329,10 @@ impl Options {
         }
     }
 
-    /// Sets the maximum allowed payload size for incoming messages.
+    /// Sets the exclusive payload size limit for each incoming frame.
     ///
-    /// Specifies the maximum size of messages that the WebSocket connection will accept.
-    /// If an incoming message exceeds this size, the connection will be terminated to avoid
-    /// overloading the receiver.
+    /// Applies before and during decompression. Use [`Self::with_max_read_buffer`]
+    /// to limit the total decompressed size of reassembled fragmented messages.
     ///
     /// # Parameters
     /// - `size`: The maximum payload size in bytes.
@@ -349,9 +349,9 @@ impl Options {
     /// Sets the maximum read buffer size for accumulated fragmented messages.
     ///
     /// When receiving fragmented WebSocket messages, data is accumulated in a read buffer.
-    /// Once this buffer exceeds the specified size limit, it will be reset back to the
-    /// initial 8 KiB capacity to prevent unbounded memory growth from very large fragmented
-    /// messages.
+    /// The connection closes with code 1009 when the decompressed message size reaches
+    /// this exclusive limit. Manual [`super::streaming::Streaming`] does not reassemble
+    /// messages and only applies the per-frame payload limit.
     ///
     /// # Parameters
     /// - `size`: Maximum size in bytes allowed for the read buffer

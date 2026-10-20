@@ -502,6 +502,16 @@ fn chunk(output: &mut BytesMut) -> &mut [u8] {
     unsafe { &mut *(uninitbuf as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) }
 }
 
+fn inflate_chunk(output: &mut BytesMut, max_output_size: usize) -> crate::Result<&mut [u8]> {
+    if output.len() >= max_output_size {
+        return Err(WebSocketError::FrameTooLarge);
+    }
+    let remaining = max_output_size - output.len();
+    let dst = chunk(output);
+    let len = dst.len().min(remaining);
+    Ok(&mut dst[..len])
+}
+
 /// Decompresses WebSocket payloads compressed with permessage-deflate.
 ///
 /// In no-context-takeover mode the dictionary is reset after each message, matching a
@@ -531,8 +541,17 @@ impl Decompressor {
     /// `stream_end` marks the final frame of a message, which triggers the handling
     /// permessage-deflate requires (the 4-byte suffix, and the dictionary reset in
     /// no-context-takeover mode).
-    pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
-        let res = self.inflate.decompress(input, stream_end);
+    /// `max_output_size` is an exclusive bound on this frame's decompressed output.
+    pub fn decompress(
+        &mut self,
+        input: &[u8],
+        stream_end: bool,
+        max_output_size: usize,
+    ) -> crate::Result<Bytes> {
+        let res = self.inflate.decompress(input, stream_end, max_output_size);
+        if res.is_err() {
+            self.inflate.output = BytesMut::new();
+        }
         if stream_end && self.no_context_takeover {
             self.inflate.reset();
         }
@@ -593,18 +612,26 @@ impl Inflate {
     }
 
     /// Decompresses input data while maintaining decompression context across frames.
-    fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
-        self.write(input)?;
+    fn decompress(
+        &mut self,
+        input: &[u8],
+        stream_end: bool,
+        max_output_size: usize,
+    ) -> crate::Result<Bytes> {
+        if max_output_size == 0 {
+            return Err(WebSocketError::FrameTooLarge);
+        }
+        self.write(input, max_output_size)?;
 
         if stream_end {
             // Add the required 4-byte suffix as per RFC 7692, Section 7.2.2.
             // A peer that already closed the stream with a final block does not need it,
             // and feeding it would be rejected by the inflater anyway.
             if !self.stream_ended {
-                self.write(&[0x0, 0x0, 0xff, 0xff])?;
+                self.write(&[0x0, 0x0, 0xff, 0xff], max_output_size)?;
             }
 
-            let out = self.flush()?;
+            let out = self.flush(max_output_size)?;
 
             // The stream is unusable once the peer sent a final block, so start fresh.
             // Such a peer is effectively running with no context takeover.
@@ -620,13 +647,13 @@ impl Inflate {
     }
 
     /// Writes compressed input data to the output buffer during decompression.
-    fn write(&mut self, mut input: &[u8]) -> io::Result<()> {
+    fn write(&mut self, mut input: &[u8], max_output_size: usize) -> crate::Result<()> {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
         let mut stream_ended = false;
 
         while !input.is_empty() {
-            let dst = chunk(output);
+            let dst = inflate_chunk(output, max_output_size)?;
 
             let before_out = decompressor.total_out();
             let before_in = decompressor.total_in();
@@ -636,7 +663,11 @@ impl Inflate {
             let read = (decompressor.total_out() - before_out) as usize;
             let consumed = (decompressor.total_in() - before_in) as usize;
 
+            // SAFETY: The decompressor initialized `read` bytes in the spare capacity.
             unsafe { output.advance_mut(read) };
+            if output.len() >= max_output_size {
+                return Err(WebSocketError::FrameTooLarge);
+            }
 
             input = &input[consumed..];
 
@@ -652,7 +683,8 @@ impl Inflate {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "corrupt deflate stream",
-                    ))
+                    )
+                    .into())
                 }
             }
 
@@ -662,7 +694,8 @@ impl Inflate {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "deflate stream made no progress",
-                ));
+                )
+                .into());
             }
         }
 
@@ -672,11 +705,11 @@ impl Inflate {
     }
 
     /// Flushes the decompressed data to the output buffer.
-    fn flush(&mut self) -> io::Result<Bytes> {
+    fn flush(&mut self, max_output_size: usize) -> crate::Result<Bytes> {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
 
-        let dst = chunk(output);
+        let dst = inflate_chunk(output, max_output_size)?;
         let before_out = decompressor.total_out();
 
         decompressor
@@ -684,10 +717,11 @@ impl Inflate {
             .map_err(inflate_error)?;
 
         let written = (decompressor.total_out() - before_out) as usize;
+        // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
         unsafe { output.advance_mut(written) };
 
         loop {
-            let dst = chunk(output);
+            let dst = inflate_chunk(output, max_output_size)?;
 
             let before_out = decompressor.total_out();
             decompressor
@@ -699,6 +733,7 @@ impl Inflate {
             }
 
             let written = (decompressor.total_out() - before_out) as usize;
+            // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
             unsafe {
                 output.advance_mut(written);
             }
@@ -862,7 +897,7 @@ mod tests {
 
         let mut inflate = Inflate::default();
         let decompressed = inflate
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("Decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
     }
@@ -876,7 +911,7 @@ mod tests {
 
         let mut inflate = Inflate::default();
         let decompressed = inflate
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("Decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
     }
@@ -912,7 +947,7 @@ mod tests {
             window_bits: None,
         });
         let decompressed = decompressor
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("Decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
     }
@@ -927,7 +962,7 @@ mod tests {
 
         let mut decompressor = Decompressor::new(HalfConfig::default());
         let decompressed = decompressor
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("Decompression failed");
 
         assert_eq!(&decompressed[..], &large_data[..]);
@@ -970,7 +1005,7 @@ mod tests {
 
             // Decompress the data
             let decompressed = decompressor
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
             let decompressed_data = decompressed;
@@ -1012,7 +1047,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("No-context compression failed on message {i}"));
 
             let decompressed = decompressor
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .unwrap_or_else(|_| panic!("No-context decompression failed on message {i}"));
 
             let decompressed_data = decompressed;
@@ -1068,7 +1103,7 @@ mod tests {
 
             // Decompress the data
             let decompressed = decompressor
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .unwrap_or_else(|_| panic!("Decompression failed on message {i}"));
 
             let decompressed_data = decompressed;
@@ -1099,7 +1134,7 @@ mod tests {
         // Decompress the data
         let mut decompressor = Decompressor::new(HalfConfig::default());
         let decompressed = decompressor
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("Decompression failed");
 
         // The decompression result should be Some(BytesMut) for a final frame
@@ -1131,7 +1166,7 @@ mod tests {
             println!("Raw message {}: Compressed size: {}", i, compressed.len());
 
             let decompressed = inflate
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .unwrap_or_else(|_| panic!("Raw decompression failed on message {i}"));
 
             let decompressed_data = decompressed;
@@ -1173,7 +1208,7 @@ mod tests {
             );
 
             // Try to decompress - this is where the issue should manifest
-            let decompressed = decompressor.decompress(&compressed, true);
+            let decompressed = decompressor.decompress(&compressed, true, usize::MAX);
 
             match decompressed {
                 Ok(decompressed_data) => {
@@ -1231,7 +1266,7 @@ mod tests {
             );
 
             let decompressed = decompressor
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .map_err(|e| {
                     println!("Repetitive data: POTENTIAL ISSUE REPRODUCED! Decompression error on message {i}: {e}");
                     e
@@ -1295,7 +1330,7 @@ mod tests {
                     });
 
                 let decompressed = decompressor
-                    .decompress(&compressed, true)
+                    .decompress(&compressed, true, usize::MAX)
                     .map_err(|e| {
                         println!("Stress test: POTENTIAL ISSUE! Decompression error on pattern {} message {}: {}",
                                 pattern_idx + 1, msg_idx, e);
@@ -1367,7 +1402,7 @@ mod tests {
             );
 
             let result = decompressor
-                .decompress(compressed_chunk, *is_final)
+                .decompress(compressed_chunk, *is_final, usize::MAX)
                 .expect("Fragmented decompression failed");
 
             decompressed_data.extend_from_slice(&result);
@@ -1437,7 +1472,7 @@ mod tests {
             let mut decompressed_data = Vec::new();
             for (frag_idx, (compressed, is_final)) in fragments.iter().enumerate() {
                 let result = decompressor
-                    .decompress(compressed, *is_final)
+                    .decompress(compressed, *is_final, usize::MAX)
                     .unwrap_or_else(|_| {
                         panic!(
                             "Decompression failed on message {} fragment {}",
@@ -1532,7 +1567,7 @@ mod tests {
                 .expect("Compression failed");
 
             let decompressed = no_context_decompressor
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .expect("Decompression failed");
 
             assert_eq!(
@@ -1574,7 +1609,7 @@ mod tests {
 
         let mut inflate = Inflate::default();
         let decompressed = inflate
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
 
@@ -1587,7 +1622,7 @@ mod tests {
         compressed.truncate(encoder.total_out() as usize);
 
         let decompressed = inflate
-            .decompress(&compressed, true)
+            .decompress(&compressed, true, usize::MAX)
             .expect("decompression failed");
         assert_eq!(decompressed.as_ref(), &data[..]);
     }
@@ -1625,7 +1660,7 @@ mod tests {
     fn test_decompress_issue_40_payload() {
         let mut inflate = Inflate::default();
         let decompressed = inflate
-            .decompress(ISSUE_40_PAYLOAD, true)
+            .decompress(ISSUE_40_PAYLOAD, true, usize::MAX)
             .expect("decompression failed");
         assert!(decompressed
             .starts_with(b"[2,\"35364f26-cea1-46ea-aea7-40b358986f8e\",\"TransactionEvent\""));
@@ -1653,7 +1688,7 @@ mod tests {
             compressed.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
             let decompressed = inflate
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .expect("decompression failed");
             assert_eq!(decompressed.as_ref(), &data[..]);
             assert!(!inflate.stream_ended);
@@ -1674,12 +1709,12 @@ mod tests {
 
         let mut inflate = Inflate::default();
         let first = inflate
-            .decompress(&compressed, false)
+            .decompress(&compressed, false, usize::MAX)
             .expect("decompression failed");
         assert!(inflate.stream_ended);
 
         let last = inflate
-            .decompress(&[0xde, 0xad], true)
+            .decompress(&[0xde, 0xad], true, usize::MAX)
             .expect("decompression failed");
         assert_eq!([first, last].concat(), &data[..]);
         assert!(!inflate.stream_ended);
@@ -1704,7 +1739,7 @@ mod tests {
             for message in messages {
                 let compressed = deflate.compress(message, true).expect("compression failed");
                 let decompressed = inflate
-                    .decompress(&compressed, true)
+                    .decompress(&compressed, true, usize::MAX)
                     .expect("decompression failed");
                 assert_eq!(
                     decompressed.as_ref(),
@@ -1730,7 +1765,7 @@ mod tests {
                     .expect("compression failed");
                 deflate.reset();
                 let decompressed = inflate
-                    .decompress(&compressed, true)
+                    .decompress(&compressed, true, usize::MAX)
                     .expect("decompression failed");
                 inflate.reset();
                 assert_eq!(
@@ -1749,7 +1784,7 @@ mod tests {
     fn test_decompress_issue_40_payload_window_bits_10() {
         let mut inflate = Inflate::new_with_window_bits(10);
         let decompressed = inflate
-            .decompress(ISSUE_40_PAYLOAD, true)
+            .decompress(ISSUE_40_PAYLOAD, true, usize::MAX)
             .expect("decompression failed");
         assert_eq!(decompressed.len(), 586);
     }
@@ -1772,7 +1807,7 @@ mod tests {
 
             let mut inflate = Inflate::new_with_window_bits(bits);
             let decompressed = inflate
-                .decompress(&compressed, true)
+                .decompress(&compressed, true, usize::MAX)
                 .expect("decompression failed");
             assert_eq!(decompressed.as_ref(), &data[..]);
             assert!(!inflate.stream_ended);
@@ -1897,7 +1932,7 @@ mod tests {
 
                 let stream_end = rng.below(2) == 0;
                 // Result is irrelevant, termination without panicking is the property.
-                let _ = inflate.decompress(&input, stream_end);
+                let _ = inflate.decompress(&input, stream_end, usize::MAX);
             },
         );
     }
@@ -1960,7 +1995,10 @@ mod tests {
                     } else {
                         offset + rng.below(stream.len() - offset + 1)
                     };
-                    if inflate.decompress(&stream[offset..end], last).is_err() {
+                    if inflate
+                        .decompress(&stream[offset..end], last, usize::MAX)
+                        .is_err()
+                    {
                         break;
                     }
                     offset = end;
@@ -1998,14 +2036,14 @@ mod tests {
                     let compressed = deflate.compress(&data, true).expect("compression failed");
                     deflate.reset();
                     let decompressed = inflate
-                        .decompress(&compressed, true)
+                        .decompress(&compressed, true, usize::MAX)
                         .expect("decompression failed");
                     inflate.reset();
                     (compressed, decompressed)
                 } else {
                     let compressed = deflate.compress(&data, true).expect("compression failed");
                     let decompressed = inflate
-                        .decompress(&compressed, true)
+                        .decompress(&compressed, true, usize::MAX)
                         .expect("decompression failed");
                     (compressed, decompressed)
                 };
@@ -2028,7 +2066,7 @@ mod tests {
     fn test_decompress_minimal_final_block() {
         let mut inflate = Inflate::default();
         let decompressed = inflate
-            .decompress(&[0x03, 0x80], true)
+            .decompress(&[0x03, 0x80], true, usize::MAX)
             .expect("decompression failed");
         assert!(decompressed.is_empty());
         assert!(!inflate.stream_ended);
@@ -2113,5 +2151,41 @@ mod tests {
     fn test_compression_config_absent_without_extension() {
         let config = CompressionConfig::resolve(None, None, Role::Client).expect("resolve");
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn inflation_stops_at_the_output_limit_and_releases_buffered_data() {
+        let mut compressor = Compressor::new(Compression::default(), HalfConfig::default());
+        let compressed = compressor.compress(&vec![b'a'; 1024 * 1024], true).unwrap();
+        for limit in [1, 1024, 4096, 64 * 1024] {
+            let mut decompressor = Decompressor::new(HalfConfig::default());
+            assert!(matches!(
+                decompressor.decompress(&compressed, true, limit),
+                Err(WebSocketError::FrameTooLarge)
+            ));
+            assert!(decompressor.inflate.decompress.total_out() <= limit as u64);
+            assert_eq!(decompressor.inflate.output.capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn inflate_flush_respects_the_output_limit() {
+        let mut compressor = Compressor::new(Compression::default(), HalfConfig::default());
+        let compressed = compressor.compress(&vec![b'a'; 1024 * 1024], true).unwrap();
+        let mut inflate = Inflate::default();
+        let mut prefix = [0; 1024];
+        inflate
+            .decompress
+            .decompress(&compressed, &mut prefix, flate2::FlushDecompress::None)
+            .unwrap();
+        assert_eq!(inflate.decompress.total_out(), 1024);
+        inflate.output.extend_from_slice(&prefix);
+
+        // The inflater has pending output even with no more compressed input.
+        assert!(matches!(
+            inflate.flush(1025),
+            Err(WebSocketError::FrameTooLarge)
+        ));
+        assert_eq!(inflate.decompress.total_out(), 1025);
     }
 }
