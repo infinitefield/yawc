@@ -273,11 +273,14 @@ where
             Poll::Ready(Err(err)) => {
                 let code = match err {
                     WebSocketError::FrameTooLarge => CloseCode::Size,
+                    WebSocketError::InvalidUTF8 => CloseCode::Invalid,
                     WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
                     WebSocketError::ReservedBitsNotZero
                     | WebSocketError::ControlFrameFragmented
                     | WebSocketError::PingFrameTooLarge
                     | WebSocketError::InvalidFragment
+                    | WebSocketError::InvalidCloseFrame
+                    | WebSocketError::InvalidCloseCode
                     | WebSocketError::FragmentTimeout
                     | WebSocketError::InvalidContinuationFrame
                     | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
@@ -352,7 +355,6 @@ where
                 let _ = frame.close_reason()?;
 
                 if !code.is_allowed() {
-                    self.emit_close(Frame::close(CloseCode::Protocol, &frame.payload[2..]));
                     return Err(WebSocketError::InvalidCloseCode);
                 }
             }

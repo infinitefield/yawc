@@ -8,9 +8,15 @@
 // exists there.
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::mem::discriminant;
+
+use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
-use yawc::{frame::OpCode, Frame, Options, Role, WebSocket, WebSocketError};
+use tokio_util::codec::{Decoder, Encoder};
+use yawc::{
+    close::CloseCode, codec, frame::OpCode, Frame, Options, Role, WebSocket, WebSocketError,
+};
 
 /// Builds a connected client/server pair over an in-memory duplex.
 fn pair(options: Options) -> (WebSocket<DuplexStream>, WebSocket<DuplexStream>) {
@@ -200,4 +206,67 @@ async fn reads_a_frame_written_by_hand() {
     let received = server.next().await.unwrap();
     assert_eq!(received.opcode(), OpCode::Text);
     assert_eq!(received.payload().as_ref(), b"hello");
+}
+
+#[tokio::test]
+async fn invalid_close_frames_receive_one_error_reply() {
+    struct InvalidClose {
+        payload: &'static [u8],
+        error: WebSocketError,
+        close_code: CloseCode,
+    }
+
+    let cases = [
+        InvalidClose {
+            payload: &[0x03, 0xed],
+            error: WebSocketError::InvalidCloseCode,
+            close_code: CloseCode::Protocol,
+        },
+        InvalidClose {
+            payload: &[0x03],
+            error: WebSocketError::InvalidCloseFrame,
+            close_code: CloseCode::Protocol,
+        },
+        InvalidClose {
+            payload: &[0x03, 0xe8, 0xff],
+            error: WebSocketError::InvalidUTF8,
+            close_code: CloseCode::Invalid,
+        },
+    ];
+    for case in cases {
+        for role in [Role::Client, Role::Server] {
+            let peer_role = match role {
+                Role::Client => Role::Server,
+                Role::Server => Role::Client,
+            };
+            let (io, mut peer) = duplex(4096);
+            let mut receiver = WebSocket::from_stream(io, role, Options::default()).unwrap();
+            let mut bytes = BytesMut::new();
+            let mut close = Frame::close(CloseCode::Normal, "");
+            *close.payload_mut() = case.payload.into();
+            codec::Encoder::new(peer_role)
+                .encode(close, &mut bytes)
+                .unwrap();
+            peer.write_all(&bytes).await.unwrap();
+            let error = match receiver.next_frame().await {
+                Err(error) => error,
+                Ok(_) => panic!("an invalid close frame must be rejected"),
+            };
+            assert_eq!(discriminant(&error), discriminant(&case.error));
+            assert!(matches!(
+                receiver.next_frame().await,
+                Err(WebSocketError::ConnectionClosed)
+            ));
+
+            bytes.clear();
+            bytes.reserve(4096);
+            peer.read_buf(&mut bytes).await.unwrap();
+            let mut decoder = codec::Decoder::new(peer_role, 4096);
+            let reply = decoder.decode(&mut bytes).unwrap().unwrap();
+            assert_eq!(reply.opcode(), OpCode::Close);
+            assert_eq!(reply.close_code(), Some(case.close_code));
+            assert!(decoder.decode(&mut bytes).unwrap().is_none());
+            assert!(bytes.is_empty());
+        }
+    }
 }
