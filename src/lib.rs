@@ -7,6 +7,8 @@
 //! - `reqwest`: WebSocket via reqwest HTTP client
 //! - `axum`: WebSocket extractor for axum
 //! - `http2`: WebSockets over HTTP/2 via extended CONNECT (RFC 8441)
+//! - `tls` (default): TLS client support with a caller-supplied connector
+//! - `rustls-ring` (default), `rustls-aws-lc-rs`: TLS with bundled roots and a fallback crypto provider
 //! - `zlib`: Advanced compression with window size control
 //! - `json`: JSON serialization support
 //!
@@ -255,6 +257,16 @@ pub enum WebSocketError {
     /// URL scheme is not ws:// or wss://.
     #[error("Invalid http scheme")]
     InvalidHttpScheme,
+
+    /// A native `wss://` connection requires the `tls` feature.
+    #[error("TLS is disabled; enable the tls feature to connect to wss:// URLs")]
+    #[cfg(not(target_arch = "wasm32"))]
+    TlsDisabled,
+
+    /// TLS is enabled without a fallback provider or a custom connector.
+    #[error("TLS requires a custom connector or the rustls-ring or rustls-aws-lc-rs feature")]
+    #[cfg(not(target_arch = "wasm32"))]
+    MissingTlsConnector,
 
     /// The peer does not support RFC 8441 extended CONNECT.
     ///

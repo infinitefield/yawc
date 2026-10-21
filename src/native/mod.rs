@@ -124,6 +124,8 @@ mod upgrade;
 
 use crate::{codec, compression, frame, streaming::Streaming, Result, WebSocketError};
 
+#[cfg(feature = "tls")]
+use tokio_rustls::rustls::pki_types::ServerName;
 #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::TlsConnector;
 use {
@@ -132,7 +134,6 @@ use {
     hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
     tokio::net::{lookup_host, TcpSocket, TcpStream, ToSocketAddrs},
-    tokio_rustls::rustls::pki_types::ServerName,
 };
 
 use std::{
@@ -740,6 +741,8 @@ impl WebSocket<MaybeTlsStream<TcpStream>> {
     /// Establishes a WebSocket connection to the specified `url`.
     ///
     /// This asynchronous function supports both `ws://` (non-secure) and `wss://` (secure) schemes.
+    /// `wss://` requires `tls`, enabled by default alongside `rustls-ring`. Without a
+    /// `rustls-*` provider feature, supply a connector with `with_connector`.
     ///
     /// # Parameters
     /// - `url`: The WebSocket URL to connect to.
@@ -1562,38 +1565,47 @@ async fn connect_stream(
     options: &Options,
     alpn: &[&[u8]],
 ) -> Result<MaybeTlsStream<TcpStream>> {
+    let secure = match opts.url.scheme() {
+        "ws" => false,
+        "wss" => true,
+        _ => return Err(WebSocketError::InvalidHttpScheme),
+    };
+    #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+    let _ = alpn;
+
+    #[cfg(not(feature = "tls"))]
+    if secure {
+        return Err(WebSocketError::TlsDisabled);
+    }
+
+    #[cfg(feature = "tls")]
+    let connector = if secure {
+        Some(match opts.connector.clone() {
+            Some(connector) => connector,
+            #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
+            None => tls_connector_with_alpn(alpn),
+            #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+            None => return Err(WebSocketError::MissingTlsConnector),
+        })
+    } else {
+        None
+    };
+
     let tcp_stream = dial(opts).await?;
     let _ = tcp_stream.set_nodelay(options.no_delay);
 
-    match opts.url.scheme() {
-        "ws" => Ok(MaybeTlsStream::Plain(tcp_stream)),
-        "wss" => {
-            let host = opts.url.host().expect("hostname").to_string();
-            let connector = match opts.connector.clone() {
-                Some(connector) => connector,
-                #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
-                None => tls_connector_with_alpn(alpn),
-                #[cfg(not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
-                None => {
-                    let _ = alpn;
-                    panic!(
-                        r#"No Rustls crypto provider was enabled for yawc to connect to a `wss://` endpoint!
+    #[cfg(feature = "tls")]
+    if let Some(connector) = connector {
+        let host = opts.url.host().expect("hostname").to_string();
+        let domain = ServerName::try_from(host)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
 
-Either:
-    - provide a `connector` in the WebSocketBuilder options
-    - enable one of the following features: `rustls-ring`, `rustls-aws-lc-rs`"#
-                    )
-                }
-            };
-            let domain = ServerName::try_from(host)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))?;
-
-            Ok(MaybeTlsStream::Tls(
-                connector.connect(domain, tcp_stream).await?,
-            ))
-        }
-        _ => Err(WebSocketError::InvalidHttpScheme),
+        return Ok(MaybeTlsStream::Tls(
+            connector.connect(domain, tcp_stream).await?,
+        ));
     }
+
+    Ok(MaybeTlsStream::Plain(tcp_stream))
 }
 
 /// Opens the TCP connection, either straight to the target or to a SOCKS5 proxy that is

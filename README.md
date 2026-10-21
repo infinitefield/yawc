@@ -86,7 +86,14 @@ Optional Cargo features:
 | `http2` | WebSocket extended CONNECT over HTTP/2 |
 | `simd` | SIMD UTF-8 validation |
 | `zlib` | Compression window-bit controls |
-| `rustls-ring`, `rustls-aws-lc-rs` | Select the fallback TLS crypto provider |
+| `tls` | TLS client support with a caller-supplied connector |
+| `rustls-ring`, `rustls-aws-lc-rs` | Enable TLS, bundled roots, and a fallback crypto provider |
+
+`tls` and `rustls-ring` are enabled by default. Server-only users can disable defaults
+to omit the TLS dependencies. If you disable defaults and use `with_connector`, enable `tls`.
+Native `WebSocket::connect` calls to `wss://` URLs fail before dialing when TLS is
+disabled or no connector or fallback provider is configured. Browser WebSockets and
+caller-supplied TLS streams do not require yawc's `tls` feature.
 
 ## Examples and guides
 

@@ -37,8 +37,27 @@ jobs:
       - name: Test http2
         # axum comes along because the RFC 8441 extractor test needs both features.
         run: cargo test --verbose --features http2,axum
+      - name: Test without TLS
+        run: cargo test --verbose --no-default-features --features axum,http2,reqwest
+      - name: Test custom TLS
+        run: cargo test --verbose --no-default-features --features tls,axum,http2
+      - name: Check isolated TLS features
+        run: |
+          cargo check --lib --no-default-features --features axum,http2,reqwest
+          cargo check --lib --no-default-features --features tls
+          cargo check --lib --no-default-features --features rustls-aws-lc-rs
+      - name: Check server dependencies
+        shell: bash
+        run: |
+          cargo tree --no-default-features --features axum -e normal --prefix none > dependencies.txt
+          if grep -Eq '^(tokio-rustls|rustls|rustls-webpki|webpki-roots) v' dependencies.txt; then
+            echo "Server-only builds must not depend on TLS crates"
+            exit 1
+          fi
       - name: Test WASM
         run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --lib --target wasm32-unknown-unknown --no-default-features
           env WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome --lib
           wasm-pack test --node --lib
       - name: Check formatting

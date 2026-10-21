@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native TLS client support is gated by `tls`, enabled by default alongside
+  `rustls-ring`. Users with defaults disabled must enable `tls` to use
+  `with_connector`. A native `wss://` connection without TLS or a connector now
+  returns `TlsDisabled` or `MissingTlsConnector` before dialing.
+
 #### Binding the client to a local address
 
 - **`WebSocket::connect(url).with_local_address(ip)`**: Binds the TCP socket to a local
