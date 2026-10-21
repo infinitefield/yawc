@@ -530,6 +530,14 @@ impl FragmentLayer {
         !self.outgoing_fragments.is_empty()
     }
 
+    fn remaining_read_capacity(&self) -> usize {
+        let bytes_read = self
+            .incoming_fragment
+            .as_ref()
+            .map_or(0, |fragment| fragment.bytes_read);
+        self.max_read_buffer.saturating_sub(bytes_read)
+    }
+
     /// Processes an incoming frame, handling fragmentation and reassembly.
     ///
     /// Returns:
@@ -1191,7 +1199,9 @@ where
     /// Polls for the next frame in the WebSocket stream.
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
         loop {
-            let frame = ready!(self.streaming.poll_next_frame(cx))?;
+            let frame = ready!(self
+                .streaming
+                .poll_next_frame_with_limit(cx, self.fragment_layer.remaining_read_capacity()))?;
             match self.on_frame(frame)? {
                 Some(ok) => break Poll::Ready(Ok(ok)),
                 None => continue,
