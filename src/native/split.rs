@@ -171,7 +171,6 @@ use crate::{
 /// use futures::StreamExt;
 /// use std::task::Context;
 /// use std::pin::Pin;
-/// use tokio_rustls::TlsConnector;
 /// use url::Url;
 ///
 /// #[tokio::main]

@@ -4,6 +4,7 @@ use std::{
 };
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(feature = "tls")]
 use tokio_rustls::client::TlsStream;
 
 /// A stream that might be protected with TLS.
@@ -15,6 +16,8 @@ pub enum MaybeTlsStream<S> {
     /// Unencrypted socket stream.
     Plain(S),
     /// Encrypted socket stream using `rustls`.
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
     Tls(TlsStream<S>),
 }
 
@@ -24,6 +27,7 @@ impl<S> From<S> for MaybeTlsStream<S> {
     }
 }
 
+#[cfg(feature = "tls")]
 impl<S> From<TlsStream<S>> for MaybeTlsStream<S> {
     fn from(value: TlsStream<S>) -> Self {
         Self::Tls(value)
@@ -38,6 +42,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for MaybeTlsStream<S> {
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             MaybeTlsStream::Plain(s) => pin!(s).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
             MaybeTlsStream::Tls(s) => pin!(s).poll_read(cx, buf),
         }
     }
@@ -51,6 +56,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<S> {
     ) -> Poll<Result<usize, std::io::Error>> {
         match self.get_mut() {
             MaybeTlsStream::Plain(s) => pin!(s).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
             MaybeTlsStream::Tls(s) => pin!(s).poll_write(cx, buf),
         }
     }
@@ -58,6 +64,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<S> {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         match self.get_mut() {
             MaybeTlsStream::Plain(s) => pin!(s).poll_flush(cx),
+            #[cfg(feature = "tls")]
             MaybeTlsStream::Tls(s) => pin!(s).poll_flush(cx),
         }
     }
@@ -68,6 +75,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<S> {
     ) -> Poll<Result<(), std::io::Error>> {
         match self.get_mut() {
             MaybeTlsStream::Plain(s) => pin!(s).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
             MaybeTlsStream::Tls(s) => pin!(s).poll_shutdown(cx),
         }
     }

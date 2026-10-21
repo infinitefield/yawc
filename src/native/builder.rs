@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::{future::BoxFuture, FutureExt};
+#[cfg(feature = "tls")]
 use tokio_rustls::TlsConnector;
 use url::Url;
 
@@ -47,21 +48,14 @@ pub type HttpRequestBuilder = hyper::http::request::Builder;
 /// # Example
 /// ```no_run
 /// use yawc::{WebSocket, Options};
-/// use tokio_rustls::TlsConnector;
 ///
 /// async fn connect_example() -> yawc::Result<()> {
-///     let ws = WebSocket::connect("wss://example.com/socket".parse()?)
+///     let ws = WebSocket::connect("ws://example.com/socket".parse()?)
 ///         .with_options(Options::default().with_utf8())
-///         .with_connector(create_tls_connector())
 ///         .await?;
 ///
 ///     // Use the WebSocket
 ///     Ok(())
-/// }
-///
-/// fn create_tls_connector() -> TlsConnector {
-///     // Create a custom TLS connector
-///     todo!()
 /// }
 /// ```
 /// The `S` parameter is the stream the finished connection runs on, and it defaults to
@@ -85,6 +79,7 @@ pub(crate) struct WsBuilderOpts {
     pub(super) url: Url,
     pub(super) tcp_address: Option<SocketAddr>,
     pub(super) local_address: Option<IpAddr>,
+    #[cfg(feature = "tls")]
     pub(super) connector: Option<TlsConnector>,
     pub(super) proxy: Option<Proxy>,
     pub(super) establish_options: Option<Options>,
@@ -107,6 +102,7 @@ impl<S> WebSocketBuilder<S> {
                 url,
                 tcp_address: None,
                 local_address: None,
+                #[cfg(feature = "tls")]
                 connector: None,
                 proxy: None,
                 establish_options: None,
@@ -123,12 +119,16 @@ impl<S> WebSocketBuilder<S> {
     /// This allows for customized TLS settings when connecting to wss:// URLs,
     /// such as custom certificate validation, client certificates, or specific
     /// cipher suites.
+    /// With defaults disabled, enable `tls` to use this method. A custom connector
+    /// does not require either of yawc's `rustls-*` provider features.
     ///
     /// # Parameters
     /// - `connector`: The TLS connector to use for secure connections
     ///
     /// # Returns
     /// The builder for method chaining
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
     pub fn with_connector(mut self, connector: TlsConnector) -> Self {
         let Some(opts) = &mut self.opts else {
             unreachable!()
