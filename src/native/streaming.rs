@@ -246,7 +246,7 @@ where
     /// - Middle fragments: `OpCode::Continuation` with `FIN=false`
     /// - Final fragment: `OpCode::Continuation` with `FIN=true`
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
-        self.poll_next_frame_with_limit(cx, usize::MAX)
+        self.poll_next_frame_with_limit(cx, self.max_payload_read)
     }
 
     pub(crate) fn poll_next_frame_with_limit(
