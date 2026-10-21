@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- New `tls` feature makes native TLS client dependencies optional. Defaults still
-  enable `rustls-ring`. Users with defaults disabled must enable `tls` to use
+- Native TLS client support is gated by `tls`, enabled by default alongside
+  `rustls-ring`. Users with defaults disabled must enable `tls` to use
   `with_connector`. A native `wss://` connection without TLS or a connector now
   returns `TlsDisabled` or `MissingTlsConnector` before dialing.
 

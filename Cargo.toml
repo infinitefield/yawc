@@ -33,7 +33,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 # Optional feature configurations
 [features]
-default = ["rustls-ring"]
+default = ["tls", "rustls-ring"]
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 simd = ["simdutf8"]
 reqwest = ["dep:reqwest"]

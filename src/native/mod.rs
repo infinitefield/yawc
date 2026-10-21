@@ -741,7 +741,7 @@ impl WebSocket<MaybeTlsStream<TcpStream>> {
     /// Establishes a WebSocket connection to the specified `url`.
     ///
     /// This asynchronous function supports both `ws://` (non-secure) and `wss://` (secure) schemes.
-    /// `wss://` requires `tls`, enabled by default through `rustls-ring`. Without a
+    /// `wss://` requires `tls`, enabled by default alongside `rustls-ring`. Without a
     /// `rustls-*` provider feature, supply a connector with `with_connector`.
     ///
     /// # Parameters

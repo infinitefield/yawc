@@ -7,7 +7,7 @@
 //! - `reqwest`: WebSocket via reqwest HTTP client
 //! - `axum`: WebSocket extractor for axum
 //! - `http2`: WebSockets over HTTP/2 via extended CONNECT (RFC 8441)
-//! - `tls`: TLS client support with a caller-supplied connector
+//! - `tls` (default): TLS client support with a caller-supplied connector
 //! - `rustls-ring` (default), `rustls-aws-lc-rs`: TLS with bundled roots and a fallback crypto provider
 //! - `zlib`: Advanced compression with window size control
 //! - `json`: JSON serialization support
