@@ -22,7 +22,7 @@ rust-version = "1.82.0"
 [workspace]
 
 [dependencies]
-yawc = { version = "0.4", path = "..", default-features = false, features = ["rustls-aws-lc-rs"] }
+yawc = { version = "0.5", path = "..", default-features = false, features = ["rustls-aws-lc-rs"] }
 rustyline = "14.0.0"
 clap = { version = "4.5.20", features = ["derive"] }
 anyhow = "1.0.91"
