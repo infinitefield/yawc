@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::compression::WebSocketExtensions;
+use crate::compression::{DeflatePool, WebSocketExtensions};
 
 /// Type alias for the compression level used in WebSocket compression settings.
 ///
@@ -612,6 +612,19 @@ impl Options {
         }
     }
 
+    /// Shares deflate state through `pool` in no-context-takeover mode.
+    ///
+    /// See [`DeflateOptions::pool`]. Enables compression with the default settings if
+    /// it was not already enabled.
+    pub fn with_deflate_pool(self, pool: DeflatePool) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.pool = Some(pool);
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
     /// Disables context takeover for client-side compression.
     ///
     /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
@@ -720,6 +733,15 @@ pub struct DeflateOptions {
     ///
     /// Default: `0` (compress every message)
     pub compression_threshold: usize,
+
+    /// Where deflate state waits between messages in no-context-takeover mode.
+    ///
+    /// Without a pool, each connection keeps its own compressor and decompressor for
+    /// its whole life. With one, a direction that negotiated no context takeover
+    /// borrows state for one message at a time. See [`DeflatePool`].
+    ///
+    /// Default: `None`
+    pub pool: Option<DeflatePool>,
 }
 
 impl DeflateOptions {
@@ -740,6 +762,7 @@ impl DeflateOptions {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -760,6 +783,7 @@ impl DeflateOptions {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -781,6 +805,7 @@ impl DeflateOptions {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -848,6 +873,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -874,6 +900,7 @@ mod tests {
             server_no_context_takeover: true,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -900,6 +927,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -928,6 +956,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -956,6 +985,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -984,6 +1014,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1010,6 +1041,7 @@ mod tests {
             server_no_context_takeover: true,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         #[cfg(not(feature = "zlib"))]
@@ -1018,6 +1050,7 @@ mod tests {
             server_no_context_takeover: true,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         #[cfg(feature = "zlib")]
@@ -1067,6 +1100,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1093,6 +1127,7 @@ mod tests {
             server_no_context_takeover: false,
             client_no_context_takeover: false,
             compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1131,6 +1166,7 @@ mod tests {
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
                 compression_threshold: 0,
+                pool: None,
             };
 
             let merged = server.merge(&client_offer);
@@ -1153,6 +1189,7 @@ mod tests {
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
                 compression_threshold: 0,
+                pool: None,
             };
 
             let merged = server.merge(&client_offer);

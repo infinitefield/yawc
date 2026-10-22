@@ -26,7 +26,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use futures::{FutureExt, SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use yawc::{Frame, OpCode, Options, Role, WebSocket};
+use yawc::{DeflatePool, Frame, OpCode, Options, Role, WebSocket};
 
 struct CountingAllocator;
 
@@ -78,20 +78,23 @@ struct Mode {
     extensions: Option<&'static str>,
     compression_threshold: usize,
     buffer_capacity: Option<usize>,
+    pooled: bool,
 }
 
-const MODES: [Mode; 5] = [
+const MODES: [Mode; 6] = [
     Mode {
         name: "no compression",
         extensions: None,
         compression_threshold: 0,
         buffer_capacity: None,
+        pooled: false,
     },
     Mode {
         name: "deflate",
         extensions: Some("permessage-deflate"),
         compression_threshold: 0,
         buffer_capacity: None,
+        pooled: false,
     },
     Mode {
         name: "deflate, no context takeover",
@@ -100,18 +103,30 @@ const MODES: [Mode; 5] = [
         ),
         compression_threshold: 0,
         buffer_capacity: None,
+        pooled: false,
     },
     Mode {
         name: "deflate, threshold 64",
         extensions: Some("permessage-deflate"),
         compression_threshold: 64,
         buffer_capacity: None,
+        pooled: false,
     },
     Mode {
         name: "deflate, threshold 64, 1 KiB",
         extensions: Some("permessage-deflate"),
         compression_threshold: 64,
         buffer_capacity: Some(1024),
+        pooled: false,
+    },
+    Mode {
+        name: "no context takeover, pool, 1 KiB",
+        extensions: Some(
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+        ),
+        compression_threshold: 0,
+        buffer_capacity: Some(1024),
+        pooled: true,
     },
 ];
 
@@ -181,10 +196,14 @@ impl AsyncWrite for Wire {
     }
 }
 
+/// Server options for `mode`. Clones share one pool, as connections would.
 fn options(mode: &Mode) -> Options {
-    let options = Options::default()
+    let mut options = Options::default()
         .with_low_latency_compression()
         .with_compression_threshold(mode.compression_threshold);
+    if mode.pooled {
+        options = options.with_deflate_pool(DeflatePool::new(4));
+    }
     match mode.buffer_capacity {
         Some(capacity) => options
             .with_read_buffer_capacity(capacity)
@@ -243,7 +262,7 @@ impl Snapshot {
             (Some(now), Some(then)) => format!("{:10.1}", (now - then) as f64 / per),
             _ => format!("{:>10}", "n/a"),
         };
-        println!("{:<30} {phase:<6} {heap:10.1} {rss}", mode.name);
+        println!("{:<34} {phase:<6} {heap:10.1} {rss}", mode.name);
     }
 }
 
@@ -253,6 +272,7 @@ fn measure(mode: &Mode, connections: usize) {
         .map(|_| Wire::reading(request.clone()))
         .collect();
     let mut servers = Vec::with_capacity(connections);
+    let options = options(mode);
 
     let base = Snapshot::take();
     for wire in wires.drain(..) {
@@ -260,7 +280,7 @@ fn measure(mode: &Mode, connections: usize) {
             wire,
             Role::Server,
             mode.extensions,
-            options(mode),
+            options.clone(),
         )
         .expect("the server accepts the extensions it is given");
         servers.push(server);
@@ -296,7 +316,7 @@ fn main() {
 
     println!("{connections} connections, KiB per connection");
     println!(
-        "{:<30} {:<6} {:>10} {:>10}",
+        "{:<34} {:<6} {:>10} {:>10}",
         "mode", "phase", "heap", "rss_anon"
     );
     for mode in &MODES {

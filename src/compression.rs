@@ -13,6 +13,11 @@ use nom::{
 
 use crate::{CompressionLevel, DeflateOptions, Role, WebSocketError};
 
+mod pool;
+
+pub use pool::DeflatePool;
+use pool::{DeflateQueue, InflateQueue};
+
 static PERMESSAGE_DEFLATE: &str = "permessage-deflate";
 
 /// Handler for permessage-deflate negotiation in WebSocket connections.
@@ -262,13 +267,15 @@ const WINDOW_BITS: std::ops::RangeInclusive<u8> = 9..=15;
 ///
 /// Built once at handshake time from the negotiated extension parameters, with the role
 /// already applied, so the read and write paths just use `incoming`/`outgoing`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompressionConfig {
     level: CompressionLevel,
     /// Settings for the direction we compress.
     outgoing: HalfConfig,
     /// Settings for the direction we decompress.
     incoming: HalfConfig,
+    /// Shared state for directions without context takeover.
+    pool: Option<DeflatePool>,
 }
 
 impl CompressionConfig {
@@ -319,17 +326,37 @@ impl CompressionConfig {
             level,
             outgoing,
             incoming,
+            pool: None,
         }))
+    }
+
+    /// Shares deflate state through `pool` for directions without context takeover.
+    pub(crate) fn with_pool(self, pool: Option<DeflatePool>) -> Self {
+        Self { pool, ..self }
     }
 
     /// Builds the compressor for the direction this side writes.
     pub(crate) fn compressor(&self) -> Compressor {
-        Compressor::new(self.level, self.outgoing)
+        let mut compressor = Compressor::new(self.level, self.outgoing);
+        if self.outgoing.no_context_takeover {
+            compressor.pool = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.deflate_queue(self.level, self.outgoing.window_bits));
+        }
+        compressor
     }
 
     /// Builds the decompressor for the direction this side reads.
     pub(crate) fn decompressor(&self) -> Decompressor {
-        Decompressor::new(self.incoming)
+        let mut decompressor = Decompressor::new(self.incoming);
+        if self.incoming.no_context_takeover {
+            decompressor.pool = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.inflate_queue(self.incoming.window_bits));
+        }
+        decompressor
     }
 }
 
@@ -339,11 +366,13 @@ impl CompressionConfig {
 /// memory use at the cost of compression ratio.
 ///
 /// The deflate state is built on the first call to [`Compressor::compress`], so a
-/// connection that never sends a compressed message never pays for it.
+/// connection that never sends a compressed message never pays for it. With a pool,
+/// it is borrowed for each message instead and returned once the message is done.
 pub struct Compressor {
     deflate: Option<Deflate>,
     level: CompressionLevel,
     config: HalfConfig,
+    pool: Option<DeflateQueue>,
 }
 
 impl Compressor {
@@ -353,6 +382,7 @@ impl Compressor {
             deflate: None,
             level,
             config,
+            pool: None,
         }
     }
 
@@ -362,18 +392,28 @@ impl Compressor {
     /// - `input`: The data slice to compress.
     /// - `flush`: Whether to flush the compressor (typically true for final frames).
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
-        let deflate = self
-            .deflate
-            .get_or_insert_with(|| match self.config.window_bits {
+        let deflate = self.deflate.get_or_insert_with(|| {
+            if let Some(deflate) = self.pool.as_ref().and_then(|pool| pool.pop()) {
+                return deflate;
+            }
+            match self.config.window_bits {
                 #[cfg(feature = "zlib")]
                 Some(window_bits) => Deflate::new_with_window_bits(self.level, window_bits),
                 #[cfg(not(feature = "zlib"))]
                 Some(_) => Deflate::new(self.level),
                 None => Deflate::new(self.level),
-            });
+            }
+        });
         let res = deflate.compress(input, flush);
         if flush && self.config.no_context_takeover {
             deflate.reset();
+            // State that failed mid-message is not handed to another connection.
+            if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
+                if let Some(deflate) = self.deflate.take() {
+                    // A full pool drops the state, which bounds idle memory.
+                    let _ = pool.push(deflate);
+                }
+            }
         }
         res
     }
@@ -530,6 +570,7 @@ fn inflate_chunk(output: &mut BytesMut, max_output_size: usize) -> crate::Result
 pub struct Decompressor {
     inflate: Option<Inflate>,
     config: HalfConfig,
+    pool: Option<InflateQueue>,
 }
 
 impl Decompressor {
@@ -538,6 +579,7 @@ impl Decompressor {
         Self {
             inflate: None,
             config,
+            pool: None,
         }
     }
 
@@ -553,21 +595,31 @@ impl Decompressor {
         stream_end: bool,
         max_output_size: usize,
     ) -> crate::Result<Bytes> {
-        let inflate = self
-            .inflate
-            .get_or_insert_with(|| match self.config.window_bits {
+        let inflate = self.inflate.get_or_insert_with(|| {
+            if let Some(inflate) = self.pool.as_ref().and_then(|pool| pool.pop()) {
+                return inflate;
+            }
+            match self.config.window_bits {
                 #[cfg(feature = "zlib")]
                 Some(window_bits) => Inflate::new_with_window_bits(window_bits),
                 #[cfg(not(feature = "zlib"))]
                 Some(_) => Inflate::default(),
                 None => Inflate::default(),
-            });
+            }
+        });
         let res = inflate.decompress(input, stream_end, max_output_size);
         if res.is_err() {
             inflate.output = BytesMut::new();
         }
         if stream_end && self.config.no_context_takeover {
             inflate.reset();
+            // State that failed mid-message is not handed to another connection.
+            if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
+                if let Some(inflate) = self.inflate.take() {
+                    // A full pool drops the state, which bounds idle memory.
+                    let _ = pool.push(inflate);
+                }
+            }
         }
         res
     }

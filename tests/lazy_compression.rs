@@ -2,44 +2,11 @@
 //! before it compresses or decompresses anything.
 //!
 //! This file holds a single test because the counting allocator is process-wide.
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    sync::atomic::{AtomicIsize, Ordering},
-};
+mod common;
 
 use futures::{SinkExt, StreamExt};
 use tokio::io::duplex;
 use yawc::{Frame, Options, Role, WebSocket};
-
-struct CountingAllocator;
-
-static LIVE: AtomicIsize = AtomicIsize::new(0);
-
-// SAFETY: Every operation delegates to System with the original pointer and layout.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        LIVE.fetch_add(size as isize - layout.size() as isize, Ordering::Relaxed);
-        unsafe { System.realloc(ptr, layout, size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Two 8 KiB I/O buffers plus small bookkeeping. Eager deflate state is over 300 KiB.
 const MAX_OPEN_BYTES: isize = 32 * 1024;
@@ -50,11 +17,11 @@ async fn deflate_state_is_built_on_first_use() {
     let options = Options::default().with_low_latency_compression();
     let (client, server) = duplex(64 * 1024);
 
-    let before = LIVE.load(Ordering::Relaxed);
+    let before = common::live_bytes();
     let mut server =
         WebSocket::from_stream_with_extensions(server, Role::Server, extensions, options.clone())
             .expect("the server accepts permessage-deflate");
-    let opened = LIVE.load(Ordering::Relaxed) - before;
+    let opened = common::live_bytes() - before;
     assert!(
         opened < MAX_OPEN_BYTES,
         "opening a deflate connection allocated {opened} bytes"

@@ -160,6 +160,7 @@ use tokio_util::codec::Framed;
 use url::{Host, Url};
 
 // Re-exports
+pub use crate::compression::DeflatePool;
 pub use crate::stream::MaybeTlsStream;
 #[cfg(feature = "http2")]
 pub use builder::HttpVersion;
@@ -256,7 +257,15 @@ impl Negotiation {
             extensions.as_ref(),
             options.compression.as_ref().map(|deflate| deflate.level),
             role,
-        )?;
+        )?
+        .map(|config| {
+            config.with_pool(
+                options
+                    .compression
+                    .as_ref()
+                    .and_then(|deflate| deflate.pool.clone()),
+            )
+        });
 
         // The read buffer holds at least two payloads unless told otherwise.
         let max_payload_read = options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ);
