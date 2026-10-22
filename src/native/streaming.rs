@@ -58,7 +58,7 @@ use std::{
 
 use crate::{close::CloseCode, codec, Negotiation, OpCode, Result, Role};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, FramedParts};
 
@@ -149,6 +149,10 @@ use crate::{
 ///
 /// This allows compressed data to be processed incrementally without waiting
 /// for the complete message.
+///
+/// With [`Options::with_max_fragment_size`](crate::Options::with_max_fragment_size),
+/// the compressed output of each frame sent is itself split into frames of at most
+/// that size, compressed one at a time as the transport accepts them.
 pub struct Streaming<S> {
     stream: Framed<S, Codec>,
     // Reading state
@@ -174,6 +178,40 @@ pub struct Streaming<S> {
     write_buffer_capacity: usize,
     // the write buffer grew past its usual size and is replaced once flushed
     write_buffer_grown: bool,
+    // compressed output is sent in frames of at most this size
+    compressed_fragment_size: Option<usize>,
+    // a frame whose compressed output is still being sent
+    pending: Option<PendingFrame>,
+}
+
+/// A frame being compressed and sent one wire frame at a time.
+struct PendingFrame {
+    /// Input not compressed yet.
+    input: Bytes,
+    opcode: OpCode,
+    fin: bool,
+    /// Whether the first wire frame carries RSV1, as the first frame of a message.
+    rsv1: bool,
+    /// Whether no wire frame has been sent for it yet.
+    first: bool,
+    /// Largest payload of a wire frame.
+    limit: usize,
+}
+
+impl PendingFrame {
+    /// The next wire frame. Only the first carries the opcode and RSV1, and only the
+    /// last carries FIN.
+    fn next_frame(&mut self, payload: Bytes, last: bool) -> Frame {
+        let opcode = if self.first {
+            self.opcode
+        } else {
+            OpCode::Continuation
+        };
+        let mut frame = Frame::new(last && self.fin, opcode, None, payload);
+        frame.is_compressed = self.first && self.rsv1;
+        self.first = false;
+        frame
+    }
 }
 
 impl<S> Streaming<S>
@@ -220,6 +258,11 @@ where
                 .write_buffer_capacity
                 .unwrap_or(DEFAULT_BUFFER_CAPACITY),
             write_buffer_grown: false,
+            compressed_fragment_size: negotiated
+                .fragmentation
+                .as_ref()
+                .and_then(|fragmentation| fragmentation.fragment_size),
+            pending: None,
         }
     }
 
@@ -417,6 +460,9 @@ where
     }
 
     fn emit_close(&mut self, frame: Frame) {
+        // No data frame may follow a close, so the rest of a message being sent is
+        // dropped.
+        self.pending = None;
         self.obligated_sends.push_back(frame);
         self.read_half.is_closed = true;
     }
@@ -476,6 +522,7 @@ where
         let this = self.get_mut();
         if this.obligated_sends.is_empty()
             && !this.flush_sends
+            && this.pending.is_none()
             && this.stream.write_buffer().len() < this.stream.backpressure_boundary()
         {
             // Framed can accept another frame without polling the transport.
@@ -483,8 +530,11 @@ where
         }
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
         ready!(this.poll_flush_obligated(ContextKind::Write, cx))?;
-        this.wake_proxy
-            .with_context(|cx| this.write_half.poll_ready(&mut this.stream, cx))
+        let wake_proxy = Arc::clone(&this.wake_proxy);
+        wake_proxy.with_context(|cx| {
+            ready!(this.poll_send_pending(cx))?;
+            this.write_half.poll_ready(&mut this.stream, cx)
+        })
     }
 
     fn start_send(self: Pin<&mut Self>, mut item: Frame) -> std::result::Result<(), Self::Error> {
@@ -498,32 +548,28 @@ where
             item.payload.len()
         );
 
-        // A whole message in one frame may skip compression. A fragmented message
-        // cannot, since RSV1 on its first frame covers every fragment.
-        let small_message = item.opcode != OpCode::Continuation
-            && item.is_fin()
-            && item.payload.len() < this.compression_threshold;
-        let should_compress = !item.opcode.is_control() && !small_message;
-        if should_compress {
+        if this.compresses(&item) {
             if let Some(deflate) = this.deflate.as_mut() {
-                let output = deflate.compress(&item.payload, item.is_fin())?;
                 // Set the RSV1 bit only when we are not streaming
-                item.is_compressed = !this.write_half.streaming;
-                item.payload = output;
+                let rsv1 = !this.write_half.streaming;
+                if let Some(limit) = this.compressed_fragment_size {
+                    // Compressed as the transport accepts frames; see poll_send_pending.
+                    this.pending = Some(PendingFrame {
+                        input: item.payload,
+                        opcode: item.opcode,
+                        fin: item.fin,
+                        rsv1,
+                        first: true,
+                        limit,
+                    });
+                    return Ok(());
+                }
+                item.payload = deflate.compress(&item.payload, item.is_fin())?;
+                item.is_compressed = rsv1;
             }
         }
 
-        this.write_half.start_send(&mut this.stream, item)?;
-
-        // Frames up to the backpressure boundary collect in the buffer between
-        // flushes, so only growth past both limits is given back.
-        let usual = this
-            .write_buffer_capacity
-            .max(this.stream.backpressure_boundary());
-        if this.stream.write_buffer().len() > usual {
-            this.write_buffer_grown = true;
-        }
-        Ok(())
+        this.send_frame(item)
     }
 
     fn poll_flush(
@@ -532,9 +578,11 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        ready!(this
-            .wake_proxy
-            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx)))?;
+        let wake_proxy = Arc::clone(&this.wake_proxy);
+        ready!(wake_proxy.with_context(|cx| {
+            ready!(this.poll_send_pending(cx))?;
+            this.write_half.poll_flush(&mut this.stream, cx)
+        }))?;
         this.release_write_buffer();
         Poll::Ready(Ok(()))
     }
@@ -545,8 +593,76 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        this.wake_proxy
-            .with_context(|cx| this.write_half.poll_close(&mut this.stream, cx))
+        let wake_proxy = Arc::clone(&this.wake_proxy);
+        wake_proxy.with_context(|cx| {
+            ready!(this.poll_send_pending(cx))?;
+            this.write_half.poll_close(&mut this.stream, cx)
+        })
+    }
+}
+
+impl<S> Streaming<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Whether `frame` is compressed when sent.
+    pub(crate) fn compresses(&self, frame: &Frame) -> bool {
+        // A whole message in one frame may skip compression. A fragmented message
+        // cannot, since RSV1 on its first frame covers every fragment.
+        let small_message = frame.opcode != OpCode::Continuation
+            && frame.is_fin()
+            && frame.payload.len() < self.compression_threshold;
+        self.deflate.is_some() && !frame.opcode.is_control() && !small_message
+    }
+
+    /// Whether compressed frames are fragmented by their compressed size, so a
+    /// message must reach this layer whole.
+    pub(crate) fn fragments_compressed(&self, frame: &Frame) -> bool {
+        self.compressed_fragment_size.is_some() && self.compresses(frame)
+    }
+
+    /// Compresses the pending frame and queues its wire frames, one frame of output
+    /// at a time and only once the transport accepts another frame, so compressed
+    /// output never collects beyond a frame.
+    fn poll_send_pending(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        while let Some(pending) = self.pending.as_mut() {
+            ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
+            let Some(deflate) = self.deflate.as_mut() else {
+                self.pending = None;
+                break;
+            };
+            let bounded = match deflate.compress_bounded(&pending.input, pending.fin, pending.limit)
+            {
+                Ok(bounded) => bounded,
+                Err(err) => {
+                    self.pending = None;
+                    return Poll::Ready(Err(err.into()));
+                }
+            };
+            pending.input.advance(bounded.consumed);
+            let frame = pending.next_frame(bounded.payload, bounded.last);
+            if bounded.last {
+                self.pending = None;
+            }
+            self.send_frame(frame)?;
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    /// Queues one wire frame, noting whether the write buffer grew past its usual
+    /// size.
+    fn send_frame(&mut self, frame: Frame) -> Result<()> {
+        self.write_half.start_send(&mut self.stream, frame)?;
+
+        // Frames up to the backpressure boundary collect in the buffer between
+        // flushes, so only growth past both limits is given back.
+        let usual = self
+            .write_buffer_capacity
+            .max(self.stream.backpressure_boundary());
+        if self.stream.write_buffer().len() > usual {
+            self.write_buffer_grown = true;
+        }
+        Ok(())
     }
 }
 

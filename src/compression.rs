@@ -385,7 +385,37 @@ impl Compressor {
     /// - `input`: The data slice to compress.
     /// - `flush`: Whether to flush the compressor (typically true for final frames).
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
-        let deflate = self.deflate.get_or_insert_with(|| {
+        let res = self.deflate().compress(input, flush);
+        if flush {
+            self.end_message(res.is_ok());
+        }
+        res
+    }
+
+    /// Compresses part of a message into at most `limit` bytes of output.
+    ///
+    /// Input is consumed only until `limit` bytes of output are ready, so the output
+    /// buffer stays near `limit` whatever the input size. Call again with the input
+    /// that was not consumed until [`Bounded::last`] is set. With `fin`, the message
+    /// ends once all of its input is consumed.
+    pub(crate) fn compress_bounded(
+        &mut self,
+        input: &[u8],
+        fin: bool,
+        limit: usize,
+    ) -> io::Result<Bounded> {
+        let res = self.deflate().compress_bounded(input, fin, limit);
+        match &res {
+            Ok(bounded) if bounded.last && fin => self.end_message(true),
+            Ok(_) => {}
+            Err(_) => self.end_message(false),
+        }
+        res
+    }
+
+    /// The deflate state, built or taken from the pool on first use.
+    fn deflate(&mut self) -> &mut Deflate {
+        self.deflate.get_or_insert_with(|| {
             let pooled = self
                 .pool
                 .as_ref()
@@ -400,19 +430,35 @@ impl Compressor {
                 Some(_) => Deflate::new(self.level),
                 None => Deflate::new(self.level),
             }
-        });
-        let res = deflate.compress(input, flush);
-        if flush && self.config.no_context_takeover {
+        })
+    }
+
+    /// Resets state that keeps no context once a message ends, and returns it to
+    /// the pool unless the message failed.
+    fn end_message(&mut self, ok: bool) {
+        if !self.config.no_context_takeover {
+            return;
+        }
+        if let Some(deflate) = self.deflate.as_mut() {
             deflate.reset();
-            // State that failed mid-message is not handed to another connection.
-            if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
-                if let Some(deflate) = self.deflate.take() {
-                    pool.put_deflate(self.config.window_bits, deflate);
-                }
+        }
+        // State that failed mid-message is not handed to another connection.
+        if let Some(pool) = self.pool.as_ref().filter(|_| ok) {
+            if let Some(deflate) = self.deflate.take() {
+                pool.put_deflate(self.config.window_bits, deflate);
             }
         }
-        res
     }
+}
+
+/// One frame of output from [`Compressor::compress_bounded`].
+pub(crate) struct Bounded {
+    /// How many input bytes were consumed.
+    pub(crate) consumed: usize,
+    /// Compressed bytes for one frame, at most the limit.
+    pub(crate) payload: Bytes,
+    /// Whether all of the input has been consumed and its output returned.
+    pub(crate) last: bool,
 }
 
 /// A Deflate compressor for WebSocket payloads, supporting both contextual and no-context-takeover compression.
@@ -426,6 +472,8 @@ struct Deflate {
     compress: flate2::Compress,
     /// The level `compress` was built with, so a pool only reuses matching state.
     level: CompressionLevel,
+    /// A bounded message has been flushed, and its output is still being returned.
+    flushed: bool,
 }
 
 impl Deflate {
@@ -435,6 +483,7 @@ impl Deflate {
             output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new(level, false),
             level,
+            flushed: false,
         }
     }
 
@@ -445,18 +494,21 @@ impl Deflate {
             output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new_with_window_bits(level, false, window_bits),
             level,
+            flushed: false,
         }
     }
 
     /// Resets the compression dictionary, for no-context-takeover mode.
     fn reset(&mut self) {
         self.compress.reset();
+        self.output.clear();
+        self.flushed = false;
     }
 
     /// Compresses input data while maintaining compression context across frames.
     fn compress(&mut self, mut input: &[u8], flush: bool) -> io::Result<Bytes> {
         while !input.is_empty() {
-            let consumed = self.write(input)?;
+            let consumed = self.write(input, usize::MAX)?;
             input = &input[consumed..];
         }
 
@@ -468,12 +520,59 @@ impl Deflate {
         }
     }
 
-    /// Writes a chunk of data to the output buffer during compression.
-    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+    /// Compresses input until `limit` bytes of output are ready. See
+    /// [`Compressor::compress_bounded`].
+    fn compress_bounded(&mut self, input: &[u8], fin: bool, limit: usize) -> io::Result<Bounded> {
+        let limit = limit.max(1);
+        // A message drops the deflate suffix from its end, so the suffix is held back
+        // until it is known that no output follows it. A frame never splits it.
+        let hold = if fin { DEFLATE_SUFFIX.len() } else { 0 };
+        let full = limit.saturating_add(hold);
+
+        let mut consumed = 0;
+        while consumed < input.len() && self.output.len() < full {
+            let room = (full - self.output.len()).max(OUTPUT_CAPACITY);
+            consumed += self.write(&input[consumed..], room)?;
+        }
+        if consumed < input.len() {
+            return Ok(Bounded {
+                consumed,
+                payload: self.output.split_to(limit).freeze(),
+                last: false,
+            });
+        }
+
+        if fin && !self.flushed {
+            self.sync_flush()?;
+            self.flushed = true;
+        }
+        if self.output.len() - hold > limit {
+            return Ok(Bounded {
+                consumed,
+                payload: self.output.split_to(limit).freeze(),
+                last: false,
+            });
+        }
+        if fin {
+            self.output.truncate(self.output.len() - hold);
+            self.flushed = false;
+        }
+        Ok(Bounded {
+            consumed,
+            payload: take_output(&mut self.output),
+            last: true,
+        })
+    }
+
+    /// Writes a chunk of data to the output buffer during compression, producing at
+    /// most `max_output` bytes.
+    fn write(&mut self, input: &[u8], max_output: usize) -> io::Result<usize> {
         let output = &mut self.output;
         let compressor = &mut self.compress;
 
         let dst = chunk(output);
+        let len = max_output.min(dst.len());
+        let dst = &mut dst[..len];
 
         let before_out = compressor.total_out();
         let before_in = compressor.total_in();
@@ -497,6 +596,16 @@ impl Deflate {
 
     /// Flushes the compressor, syncing any pending data and returning the accumulated output buffer.
     fn flush(&mut self) -> io::Result<Bytes> {
+        self.sync_flush()?;
+        let output = &mut self.output;
+        if output.ends_with(&DEFLATE_SUFFIX) {
+            output.truncate(output.len() - DEFLATE_SUFFIX.len());
+        }
+        Ok(take_output(output))
+    }
+
+    /// Writes out all pending data, ending the output with the deflate suffix.
+    fn sync_flush(&mut self) -> io::Result<()> {
         let output = &mut self.output;
         let compressor = &mut self.compress;
 
@@ -511,22 +620,19 @@ impl Deflate {
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
 
+            // FlushCompress::Sync writes the end of the stream, indicating the stream is finished
+            if output.ends_with(&DEFLATE_SUFFIX) {
+                return Ok(());
+            }
             // zlib writes nothing for a sync flush right after another, since the
             // stream already ends on one. Write the empty stored block it would have,
             // which the stream, byte-aligned by the last flush, can take as is.
             if written == 0 && status == Status::BufError {
                 output.put_u8(0x0);
-                output.extend_from_slice(&[0x0, 0x0, 0xff, 0xff]);
-            }
-
-            // FlushCompress::Sync writes the end of the stream, indicating the stream is finished
-            if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
-                output.truncate(output.len() - 4);
-                break;
+                output.extend_from_slice(&DEFLATE_SUFFIX);
+                return Ok(());
             }
         }
-
-        Ok(take_output(output))
     }
 }
 
@@ -544,6 +650,9 @@ fn inflate_error(err: DecompressError) -> io::Error {
         format!("Decompression error: {err}"),
     )
 }
+
+/// The empty block a sync flush ends with, which permessage-deflate leaves off.
+const DEFLATE_SUFFIX: [u8; 4] = [0x0, 0x0, 0xff, 0xff];
 
 /// The output buffer a compressor or decompressor starts with.
 const OUTPUT_CAPACITY: usize = 1024;
@@ -2283,6 +2392,20 @@ mod tests {
         let mut inflate = Inflate::default();
         for message in [&b"hello"[..], b"", b"", b"again"] {
             let wire = deflate.compress(message, true).unwrap();
+            let plain = inflate.decompress(&wire, true, 1024).unwrap();
+            assert_eq!(plain.as_ref(), message);
+        }
+        for message in [&b"hello"[..], b"", b"", b"again"] {
+            let mut rest = message;
+            let mut wire = Vec::new();
+            loop {
+                let bounded = deflate.compress_bounded(rest, true, 3).unwrap();
+                rest = &rest[bounded.consumed..];
+                wire.extend_from_slice(&bounded.payload);
+                if bounded.last {
+                    break;
+                }
+            }
             let plain = inflate.decompress(&wire, true, 1024).unwrap();
             assert_eq!(plain.as_ref(), message);
         }

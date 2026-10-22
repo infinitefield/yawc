@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- With compression and `max_fragment_size`, the compressed output is fragmented
+  instead of the input. Every compressed frame is at most the fragment size, and
+  a message is compressed one frame at a time as the transport accepts frames,
+  so sending a large message holds about one fragment of compressed output
+  ([#57](https://github.com/infinitefield/yawc/issues/57)).
+
+### Fixed
+
+- With the `zlib` backend and context takeover, sending an empty message right
+  after another message no longer hangs.
+
 ## [0.5.0] - 2026-10-22
 
 Cuts the memory an idle connection holds. A server that imposes no context

@@ -1381,6 +1381,11 @@ where
         if this.fragment_layer.fragment_size.is_none() {
             return this.streaming.start_send_unpin(item);
         }
+        // Compressed output is fragmented by the streaming layer instead, so frames
+        // are bounded by their compressed size.
+        if item.is_fin() && this.streaming.fragments_compressed(&item) {
+            return this.streaming.start_send_unpin(item);
+        }
         this.fragment_layer.fragment_outgoing(item);
         Ok(())
     }

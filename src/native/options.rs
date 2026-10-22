@@ -193,6 +193,12 @@ pub struct Fragmentation {
     /// fragmented into multiple frames. Each fragment will have a payload size
     /// at or below this limit.
     ///
+    /// With compression, the compressed output is fragmented, not the input: each
+    /// compressed frame on the wire is at most this size, and a message is
+    /// compressed one frame at a time as the transport accepts frames. Sending a
+    /// large message then holds about one fragment of compressed output instead of
+    /// the whole message.
+    ///
     /// This is useful for:
     /// - Preventing large messages from blocking smaller ones
     /// - Working with intermediaries that have message size limits
@@ -471,7 +477,8 @@ impl Options {
     ///
     /// When set, outgoing messages that exceed this size will be automatically
     /// fragmented into multiple frames. Each fragment will have a payload size
-    /// at or below this limit.
+    /// at or below this limit. With compression, this bounds the compressed frames;
+    /// see [`Fragmentation::fragment_size`].
     ///
     /// # Parameters
     /// - `size`: Maximum fragment size in bytes
