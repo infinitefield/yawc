@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-22
+
+Cuts the memory an idle connection holds. A server that imposes no context
+takeover, shares a `DeflatePool` and uses 1 KiB buffers keeps about 2.5 KiB per
+connection after one message each way, down from about 374 KiB with deflate.
+See `benches/connection_memory.rs`.
+
+### Breaking
+
+- `DeflateOptions` gains `compression_threshold` and `pool`, and `Options` gains
+  `write_buffer_capacity`. Struct literals that list every field need the new
+  fields or `..Default::default()`.
+
+### Added
+
+- **`DeflatePool`** (`Options::with_deflate_pool`): directions that negotiated no
+  context takeover borrow deflate state for one message and return it reset.
+  Directions with context takeover never use the pool. Adds the
+  `crossbeam-queue` dependency.
+- **`Options::with_compression_threshold(size)`**: messages sent as one frame
+  below `size` bytes go out uncompressed. Fragmented messages are always
+  compressed. Default 0 keeps the previous behavior.
+- **`Options::with_write_buffer_capacity(size)`**: initial size of the socket
+  write buffer.
+
+### Changed
+
+- Deflate state is built on first use instead of at the handshake.
+- `read_buffer_capacity` is now exact, so it can be set below 8 KiB.
+- Read, write, fragment and deflate output buffers return to their usual size
+  after a large message instead of keeping the largest size for the life of the
+  connection.
+
+## [0.4.x] - Previous Releases
+
 ### Added
 
 - Native TLS client support is gated by `tls`, enabled by default alongside
