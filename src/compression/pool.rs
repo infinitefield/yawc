@@ -11,8 +11,13 @@ use crossbeam_queue::ArrayQueue;
 use super::{Deflate, Inflate, WINDOW_BITS};
 use crate::CompressionLevel;
 
-/// One queue per window size deflate accepts.
-const WINDOW_SIZES: usize = (*WINDOW_BITS.end() - *WINDOW_BITS.start() + 1) as usize;
+/// One queue per window size deflate accepts. Only the `zlib` backends take a window
+/// size; the default backend always uses 15 bits and needs a single queue.
+const WINDOW_SIZES: usize = if cfg!(feature = "zlib") {
+    (*WINDOW_BITS.end() - *WINDOW_BITS.start() + 1) as usize
+} else {
+    1
+};
 
 /// Shares permessage-deflate state between connections that do not keep context.
 ///
@@ -119,18 +124,19 @@ impl fmt::Debug for DeflatePool {
     }
 }
 
-/// The queue index for a window size.
-///
-/// Window bits only change the state with the `zlib` feature; without it every
-/// connection uses the default window and shares one queue.
+/// The queue index for a window size. `None` means the default of 15 bits.
+#[cfg(feature = "zlib")]
 fn slot(window_bits: Option<u8>) -> usize {
-    let bits = match window_bits {
-        Some(bits) if cfg!(feature = "zlib") => {
-            bits.clamp(*WINDOW_BITS.start(), *WINDOW_BITS.end())
-        }
-        _ => *WINDOW_BITS.end(),
-    };
+    let bits = window_bits.map_or(*WINDOW_BITS.end(), |bits| {
+        bits.clamp(*WINDOW_BITS.start(), *WINDOW_BITS.end())
+    });
     usize::from(bits - WINDOW_BITS.start())
+}
+
+/// The queue index for a window size. Without `zlib` there is only one.
+#[cfg(not(feature = "zlib"))]
+fn slot(_window_bits: Option<u8>) -> usize {
+    0
 }
 
 #[cfg(test)]
