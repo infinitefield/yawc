@@ -7,14 +7,18 @@
 //! - `open`: the connection was built, as right after the handshake.
 //! - `recv`: it read one small message from the client.
 //! - `send`: it sent one small message back.
+//! - `recv big`: it read one 256 KiB message from the client.
+//! - `send big`: it sent one 256 KiB message back.
 //!
 //! cargo bench --bench connection_memory
 //! cargo bench --bench connection_memory --features zlib
 //! CONNECTIONS=10000 cargo bench --bench connection_memory
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    collections::VecDeque,
     env, fs,
     io::Result as IoResult,
+    mem,
     pin::Pin,
     sync::{
         atomic::{AtomicIsize, Ordering},
@@ -72,6 +76,8 @@ const REQUEST: &str = r#"["REQ","subscription-1",{"kinds":[1],"limit":10}]"#;
 /// A small server reply, shaped like a Nostr `EOSE`.
 const REPLY: &str = r#"["EOSE","subscription-1"]"#;
 const DEFAULT_CONNECTIONS: usize = 1_000;
+/// The size of the large message each side sends once, within the limits relays use.
+const LARGE_SIZE: usize = 256 * 1024;
 
 struct Mode {
     name: &'static str,
@@ -130,26 +136,27 @@ const MODES: [Mode; 6] = [
     },
 ];
 
-/// An in-memory stream: reads return `incoming` once, writes are dropped
-/// unless `captured` is set.
+/// An in-memory stream: reads return the `incoming` chunks once, writes are
+/// dropped unless `captured` is set.
 ///
-/// It allocates nothing on its own, so every byte counted belongs to yawc.
+/// A read never spans two chunks, so each phase reads only its own message. The
+/// stream allocates nothing once built, so every byte counted belongs to yawc.
 struct Wire {
-    incoming: Bytes,
+    incoming: VecDeque<Bytes>,
     captured: Option<Arc<Mutex<Vec<u8>>>>,
 }
 
 impl Wire {
-    fn reading(incoming: Bytes) -> Self {
+    fn reading(incoming: &[Bytes]) -> Self {
         Self {
-            incoming,
+            incoming: incoming.iter().cloned().collect(),
             captured: None,
         }
     }
 
     fn capturing(captured: Arc<Mutex<Vec<u8>>>) -> Self {
         Self {
-            incoming: Bytes::new(),
+            incoming: VecDeque::new(),
             captured: Some(captured),
         }
     }
@@ -161,13 +168,16 @@ impl AsyncRead for Wire {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<IoResult<()>> {
-        if self.incoming.is_empty() {
+        while self.incoming.front().is_some_and(Bytes::is_empty) {
+            self.incoming.pop_front();
+        }
+        let Some(chunk) = self.incoming.front_mut() else {
             // An idle peer: nothing more to read, and nothing will wake us.
             return Poll::Pending;
-        }
-        let len = self.incoming.len().min(buf.remaining());
-        buf.put_slice(&self.incoming[..len]);
-        self.incoming.advance(len);
+        };
+        let len = chunk.len().min(buf.remaining());
+        buf.put_slice(&chunk[..len]);
+        chunk.advance(len);
         Poll::Ready(Ok(()))
     }
 }
@@ -212,27 +222,43 @@ fn options(mode: &Mode) -> Options {
     }
 }
 
-/// The bytes a client sends for `REQUEST` under `mode`, masked and compressed.
+/// A large text payload that compresses about as well as JSON events do.
+fn large_payload() -> Bytes {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let text: String = (0..LARGE_SIZE / 16)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            format!("{:016x}", state)
+        })
+        .collect();
+    Bytes::from(text)
+}
+
+/// The bytes a client sends under `mode`, masked and compressed: first
+/// `REQUEST`, then `large`, one chunk per message.
 ///
 /// The client compresses every message, as browsers do, whatever threshold the
 /// server uses.
-fn client_request(mode: &Mode) -> Bytes {
+fn client_messages(mode: &Mode, large: &Bytes) -> [Bytes; 2] {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let wire = Wire::capturing(Arc::clone(&captured));
     let client_options = Options::default().with_low_latency_compression();
     let mut client =
         WebSocket::from_stream_with_extensions(wire, Role::Client, mode.extensions, client_options)
             .expect("the client accepts the extensions it is given");
-    client
-        .send(Frame::text(REQUEST))
-        .now_or_never()
-        .expect("writes to the in-memory wire complete at once")
-        .expect("sending to the in-memory wire cannot fail");
-    drop(client);
-    let captured = captured
-        .lock()
-        .expect("the capture buffer is only used on this thread");
-    Bytes::copy_from_slice(&captured)
+    [Frame::text(REQUEST), Frame::text(large.clone())].map(|frame| {
+        client
+            .send(frame)
+            .now_or_never()
+            .expect("writes to the in-memory wire complete at once")
+            .expect("sending to the in-memory wire cannot fail");
+        let mut captured = captured
+            .lock()
+            .expect("the capture buffer is only used on this thread");
+        Bytes::from(mem::take(&mut *captured))
+    })
 }
 
 /// Anonymous resident memory of this process in KiB, from `/proc` (Linux only).
@@ -262,15 +288,13 @@ impl Snapshot {
             (Some(now), Some(then)) => format!("{:10.1}", (now - then) as f64 / per),
             _ => format!("{:>10}", "n/a"),
         };
-        println!("{:<34} {phase:<6} {heap:10.1} {rss}", mode.name);
+        println!("{:<34} {phase:<8} {heap:10.1} {rss}", mode.name);
     }
 }
 
-fn measure(mode: &Mode, connections: usize) {
-    let request = client_request(mode);
-    let mut wires: Vec<Wire> = (0..connections)
-        .map(|_| Wire::reading(request.clone()))
-        .collect();
+fn measure(mode: &Mode, large: &Bytes, connections: usize) {
+    let messages = client_messages(mode, large);
+    let mut wires: Vec<Wire> = (0..connections).map(|_| Wire::reading(&messages)).collect();
     let mut servers = Vec::with_capacity(connections);
     let options = options(mode);
 
@@ -306,6 +330,25 @@ fn measure(mode: &Mode, connections: usize) {
             .expect("sending to the in-memory wire cannot fail");
     }
     Snapshot::take().report(&base, mode, "send", connections);
+
+    for server in &mut servers {
+        let frame = server
+            .next()
+            .now_or_never()
+            .expect("the large message is already on the wire")
+            .expect("the connection is open");
+        assert_eq!(frame.payload().len(), large.len());
+    }
+    Snapshot::take().report(&base, mode, "recv big", connections);
+
+    for server in &mut servers {
+        server
+            .send(Frame::text(large.clone()))
+            .now_or_never()
+            .expect("writes to the in-memory wire complete at once")
+            .expect("sending to the in-memory wire cannot fail");
+    }
+    Snapshot::take().report(&base, mode, "send big", connections);
 }
 
 fn main() {
@@ -316,10 +359,11 @@ fn main() {
 
     println!("{connections} connections, KiB per connection");
     println!(
-        "{:<34} {:<6} {:>10} {:>10}",
+        "{:<34} {:<8} {:>10} {:>10}",
         "mode", "phase", "heap", "rss_anon"
     );
+    let large = large_payload();
     for mode in &MODES {
-        measure(mode, connections);
+        measure(mode, &large, connections);
     }
 }
