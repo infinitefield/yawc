@@ -504,12 +504,20 @@ impl Deflate {
             let dst = chunk(output);
             let before_out = compressor.total_out();
 
-            compressor
+            let status = compressor
                 .compress(&[], dst, FlushCompress::Sync)
                 .map_err(deflate_error)?;
 
             let written = (compressor.total_out() - before_out) as usize;
             unsafe { output.advance_mut(written) };
+
+            // zlib writes nothing for a sync flush right after another, since the
+            // stream already ends on one. Write the empty stored block it would have,
+            // which the stream, byte-aligned by the last flush, can take as is.
+            if written == 0 && status == Status::BufError {
+                output.put_u8(0x0);
+                output.extend_from_slice(&[0x0, 0x0, 0xff, 0xff]);
+            }
 
             // FlushCompress::Sync writes the end of the stream, indicating the stream is finished
             if output.ends_with(&[0x0, 0x0, 0xff, 0xff]) {
@@ -2265,5 +2273,18 @@ mod tests {
             Err(WebSocketError::FrameTooLarge)
         ));
         assert_eq!(inflate.decompress.total_out(), 1025);
+    }
+
+    #[test]
+    fn an_empty_message_after_another_ends() {
+        // zlib writes nothing for a second sync flush with no new input, which left
+        // the flush waiting for the deflate suffix forever.
+        let mut deflate = Deflate::new(CompressionLevel::fast());
+        let mut inflate = Inflate::default();
+        for message in [&b"hello"[..], b"", b"", b"again"] {
+            let wire = deflate.compress(message, true).unwrap();
+            let plain = inflate.decompress(&wire, true, 1024).unwrap();
+            assert_eq!(plain.as_ref(), message);
+        }
     }
 }
