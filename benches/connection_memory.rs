@@ -176,12 +176,16 @@ fn options(mode: &Mode) -> Options {
         .with_compression_threshold(mode.compression_threshold)
 }
 
-/// The bytes a client sends for `REQUEST` under `mode`, compressed and masked.
+/// The bytes a client sends for `REQUEST` under `mode`, masked and compressed.
+///
+/// The client compresses every message, as browsers do, whatever threshold the
+/// server uses.
 fn client_request(mode: &Mode) -> Bytes {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let wire = Wire::capturing(Arc::clone(&captured));
+    let client_options = Options::default().with_low_latency_compression();
     let mut client =
-        WebSocket::from_stream_with_extensions(wire, Role::Client, mode.extensions, options(mode))
+        WebSocket::from_stream_with_extensions(wire, Role::Client, mode.extensions, client_options)
             .expect("the client accepts the extensions it is given");
     client
         .send(Frame::text(REQUEST))
