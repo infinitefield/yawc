@@ -84,15 +84,16 @@ pub struct Options {
     /// Larger buffers can reduce reads for bursts of messages, at the cost of memory
     /// per connection. Smaller buffers save memory on mostly idle connections. The
     /// buffer grows as needed for large frames, so this does not change message size
-    /// limits.
+    /// limits, and returns to this size after a larger frame.
     ///
     /// Default: `None` (8 KiB)
     pub read_buffer_capacity: Option<usize>,
 
     /// Initial capacity of the socket write buffer, in bytes.
     ///
-    /// The buffer grows as needed for large frames. This does not change when writes
-    /// are flushed; see [`Options::max_backpressure_write_boundary`] for that.
+    /// The buffer grows as needed for large frames, and returns to this size once a
+    /// flush has written them out. This does not change when writes are flushed; see
+    /// [`Options::max_backpressure_write_boundary`] for that.
     ///
     /// Default: `None` (8 KiB)
     pub write_buffer_capacity: Option<usize>,

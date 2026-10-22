@@ -140,7 +140,7 @@ use std::{
     borrow::BorrowMut,
     collections::VecDeque,
     future::poll_fn,
-    io,
+    io, mem,
     net::{IpAddr, SocketAddr},
     pin::{pin, Pin},
     str::FromStr,
@@ -493,7 +493,7 @@ struct FragmentLayer {
     outgoing_fragments: VecDeque<Frame>,
     /// Fragment accumulation for assembling incoming fragmented messages
     incoming_fragment: Option<FragmentationState>,
-    /// Reusable storage for fragmented messages, shared with the returned payload.
+    /// Storage for the fragmented message being assembled, handed to its payload.
     incoming_buffer: BytesMut,
     /// Maximum fragment size for outgoing messages
     fragment_size: Option<usize>,
@@ -622,7 +622,9 @@ impl FragmentLayer {
                     // Assemble complete message
                     frame.opcode = fragment.opcode;
                     frame.is_compressed = fragment.is_compressed;
-                    frame.payload = self.incoming_buffer.split().freeze();
+                    // Take the whole buffer: a split would leave it holding the
+                    // message's allocation for as long as the connection lives.
+                    frame.payload = mem::take(&mut self.incoming_buffer).freeze();
 
                     Ok(Some(frame))
                 } else {

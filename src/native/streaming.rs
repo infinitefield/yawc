@@ -62,6 +62,9 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, FramedParts};
 
+/// The buffer size tokio-util starts `Framed` with, used when none is configured.
+const DEFAULT_BUFFER_CAPACITY: usize = 8 * 1024;
+
 use crate::{
     codec::Codec,
     compression::{Compressor, Decompressor},
@@ -165,6 +168,12 @@ pub struct Streaming<S> {
     max_payload_read: usize,
     // messages sent as one frame below this size are not compressed
     compression_threshold: usize,
+    // size the read buffer returns to after a larger frame
+    read_buffer_capacity: usize,
+    // size the write buffer returns to after it grew past the backpressure boundary
+    write_buffer_capacity: usize,
+    // the write buffer grew past its usual size and is replaced once flushed
+    write_buffer_grown: bool,
 }
 
 impl<S> Streaming<S>
@@ -204,6 +213,13 @@ where
             inflate: negotiated.decompressor(),
             max_payload_read: negotiated.max_payload_read,
             compression_threshold: negotiated.compression_threshold,
+            read_buffer_capacity: negotiated
+                .read_buffer_capacity
+                .unwrap_or(DEFAULT_BUFFER_CAPACITY),
+            write_buffer_capacity: negotiated
+                .write_buffer_capacity
+                .unwrap_or(DEFAULT_BUFFER_CAPACITY),
+            write_buffer_grown: false,
         }
     }
 
@@ -271,7 +287,13 @@ where
                     self.read_half.poll_frame(&mut self.stream, cx)
                 })
         };
-        match res.map(|res| res.and_then(|frame| self.on_frame(frame, max_read_buffer))) {
+        let res = res.map(|res| {
+            res.and_then(|frame| {
+                self.release_read_buffer(frame.payload.len());
+                self.on_frame(frame, max_read_buffer)
+            })
+        });
+        match res {
             Poll::Ready(Ok(frame)) => Poll::Ready(Ok(frame)),
             Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
                 ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
@@ -300,6 +322,27 @@ where
                 ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
                 Poll::Pending
             }
+        }
+    }
+
+    /// Gives back the memory a frame larger than the read buffer made it grow to.
+    ///
+    /// The frame's payload shares the buffer's allocation, so the buffer keeps all of
+    /// it until replaced. Bytes of the next frame already read are kept, unless there
+    /// are more than fit, in which case the next frame shrinks it instead.
+    fn release_read_buffer(&mut self, frame_len: usize) {
+        let capacity = self.read_buffer_capacity;
+        let buffer = self.stream.read_buffer_mut();
+        if frame_len > capacity && buffer.len() <= capacity {
+            set_capacity(buffer, capacity);
+        }
+    }
+
+    /// Gives back the memory the write buffer grew to, once it has been written out.
+    fn release_write_buffer(&mut self) {
+        if self.write_buffer_grown && self.stream.write_buffer().is_empty() {
+            set_capacity(self.stream.write_buffer_mut(), self.write_buffer_capacity);
+            self.write_buffer_grown = false;
         }
     }
 
@@ -470,7 +513,17 @@ where
             }
         }
 
-        this.write_half.start_send(&mut this.stream, item)
+        this.write_half.start_send(&mut this.stream, item)?;
+
+        // Frames up to the backpressure boundary collect in the buffer between
+        // flushes, so only growth past both limits is given back.
+        let usual = this
+            .write_buffer_capacity
+            .max(this.stream.backpressure_boundary());
+        if this.stream.write_buffer().len() > usual {
+            this.write_buffer_grown = true;
+        }
+        Ok(())
     }
 
     fn poll_flush(
@@ -479,8 +532,11 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        this.wake_proxy
-            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx))
+        ready!(this
+            .wake_proxy
+            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx)))?;
+        this.release_write_buffer();
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(

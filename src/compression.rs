@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, mem};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use flate2::{CompressError, DecompressError, FlushCompress, FlushDecompress, Status};
@@ -432,7 +432,7 @@ impl Deflate {
     /// Creates a new `Deflate` compressor with the specified compression level.
     fn new(level: CompressionLevel) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new(level, false),
             level,
         }
@@ -442,7 +442,7 @@ impl Deflate {
     #[cfg(feature = "zlib")]
     fn new_with_window_bits(level: CompressionLevel, window_bits: u8) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new_with_window_bits(level, false, window_bits),
             level,
         }
@@ -464,7 +464,7 @@ impl Deflate {
             self.flush()
         } else {
             // Return buffered data without flushing
-            Ok(self.output.split().freeze())
+            Ok(take_output(&mut self.output))
         }
     }
 
@@ -518,7 +518,7 @@ impl Deflate {
             }
         }
 
-        Ok(output.split().freeze())
+        Ok(take_output(output))
     }
 }
 
@@ -535,6 +535,20 @@ fn inflate_error(err: DecompressError) -> io::Error {
         io::ErrorKind::InvalidInput,
         format!("Decompression error: {err}"),
     )
+}
+
+/// The output buffer a compressor or decompressor starts with.
+const OUTPUT_CAPACITY: usize = 1024;
+
+/// Takes the finished output. Small output is split off so the buffer reuses the rest
+/// of its allocation. Large output takes the whole buffer, since a split would leave
+/// the buffer holding that allocation for as long as the state lives.
+fn take_output(output: &mut BytesMut) -> Bytes {
+    if output.len() > OUTPUT_CAPACITY {
+        mem::take(output).freeze()
+    } else {
+        output.split().freeze()
+    }
 }
 
 /// Returns a mutable slice to the next available chunk of memory in the BytesMut buffer.
@@ -647,7 +661,7 @@ impl Default for Inflate {
     /// Creates a new `Inflate` instance with a default buffer size and decompressor.
     fn default() -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             decompress: flate2::Decompress::new(false),
             stream_ended: false,
         }
@@ -668,7 +682,7 @@ impl Inflate {
     #[cfg(feature = "zlib")]
     fn new_with_window_bits(window_bits: u8) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             decompress: flate2::Decompress::new_with_window_bits(false, window_bits),
             stream_ended: false,
         }
@@ -711,7 +725,7 @@ impl Inflate {
 
             Ok(out)
         } else {
-            Ok(self.output.split().freeze())
+            Ok(take_output(&mut self.output))
         }
     }
 
@@ -789,7 +803,7 @@ impl Inflate {
 
             let written = (decompressor.total_out() - before_out) as usize;
             if written == 0 && flush == FlushDecompress::None {
-                break Ok(output.split().freeze());
+                break Ok(take_output(output));
             }
 
             // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
