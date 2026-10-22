@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! Messages below `compression_threshold` go out without RSV1, and mixing them with
 //! compressed messages keeps the peer's context in sync.
 use futures::{SinkExt, StreamExt};

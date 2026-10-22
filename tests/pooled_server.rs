@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! A server that forces no context takeover in both directions, so every connection
 //! can share a `DeflatePool`, works with a client that offered neither flag.
 use std::{convert::Infallible, net::SocketAddr};

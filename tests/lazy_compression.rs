@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! A connection that negotiated permessage-deflate must not allocate deflate state
 //! before it compresses or decompresses anything.
 //!

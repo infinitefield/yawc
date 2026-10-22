@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! Buffers far smaller than a message still carry it, compressed or not.
 use futures::{SinkExt, StreamExt};
 use tokio::io::duplex;

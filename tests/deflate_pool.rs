@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! Connections without context takeover that share a `DeflatePool` hold no deflate
 //! state between messages.
 //!
