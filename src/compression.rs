@@ -337,23 +337,22 @@ impl CompressionConfig {
 ///
 /// In no-context-takeover mode the dictionary is reset after each message, lowering
 /// memory use at the cost of compression ratio.
+///
+/// The deflate state is built on the first call to [`Compressor::compress`], so a
+/// connection that never sends a compressed message never pays for it.
 pub struct Compressor {
-    deflate: Deflate,
-    no_context_takeover: bool,
+    deflate: Option<Deflate>,
+    level: CompressionLevel,
+    config: HalfConfig,
 }
 
 impl Compressor {
     /// Creates a compressor for one direction of a connection.
     pub(crate) fn new(level: CompressionLevel, config: HalfConfig) -> Self {
         Self {
-            deflate: match config.window_bits {
-                #[cfg(feature = "zlib")]
-                Some(window_bits) => Deflate::new_with_window_bits(level, window_bits),
-                #[cfg(not(feature = "zlib"))]
-                Some(_) => Deflate::new(level),
-                None => Deflate::new(level),
-            },
-            no_context_takeover: config.no_context_takeover,
+            deflate: None,
+            level,
+            config,
         }
     }
 
@@ -363,9 +362,18 @@ impl Compressor {
     /// - `input`: The data slice to compress.
     /// - `flush`: Whether to flush the compressor (typically true for final frames).
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
-        let res = self.deflate.compress(input, flush);
-        if flush && self.no_context_takeover {
-            self.deflate.reset();
+        let deflate = self
+            .deflate
+            .get_or_insert_with(|| match self.config.window_bits {
+                #[cfg(feature = "zlib")]
+                Some(window_bits) => Deflate::new_with_window_bits(self.level, window_bits),
+                #[cfg(not(feature = "zlib"))]
+                Some(_) => Deflate::new(self.level),
+                None => Deflate::new(self.level),
+            });
+        let res = deflate.compress(input, flush);
+        if flush && self.config.no_context_takeover {
+            deflate.reset();
         }
         res
     }
@@ -516,23 +524,20 @@ fn inflate_chunk(output: &mut BytesMut, max_output_size: usize) -> crate::Result
 ///
 /// In no-context-takeover mode the dictionary is reset after each message, matching a
 /// peer that compresses the same way.
+///
+/// The inflate state is built on the first call to [`Decompressor::decompress`], so a
+/// connection that never receives a compressed frame never pays for it.
 pub struct Decompressor {
-    inflate: Inflate,
-    no_context_takeover: bool,
+    inflate: Option<Inflate>,
+    config: HalfConfig,
 }
 
 impl Decompressor {
     /// Creates a decompressor for one direction of a connection.
     pub(crate) fn new(config: HalfConfig) -> Self {
         Self {
-            inflate: match config.window_bits {
-                #[cfg(feature = "zlib")]
-                Some(window_bits) => Inflate::new_with_window_bits(window_bits),
-                #[cfg(not(feature = "zlib"))]
-                Some(_) => Inflate::default(),
-                None => Inflate::default(),
-            },
-            no_context_takeover: config.no_context_takeover,
+            inflate: None,
+            config,
         }
     }
 
@@ -548,12 +553,21 @@ impl Decompressor {
         stream_end: bool,
         max_output_size: usize,
     ) -> crate::Result<Bytes> {
-        let res = self.inflate.decompress(input, stream_end, max_output_size);
+        let inflate = self
+            .inflate
+            .get_or_insert_with(|| match self.config.window_bits {
+                #[cfg(feature = "zlib")]
+                Some(window_bits) => Inflate::new_with_window_bits(window_bits),
+                #[cfg(not(feature = "zlib"))]
+                Some(_) => Inflate::default(),
+                None => Inflate::default(),
+            });
+        let res = inflate.decompress(input, stream_end, max_output_size);
         if res.is_err() {
-            self.inflate.output = BytesMut::new();
+            inflate.output = BytesMut::new();
         }
-        if stream_end && self.no_context_takeover {
-            self.inflate.reset();
+        if stream_end && self.config.no_context_takeover {
+            inflate.reset();
         }
         res
     }
@@ -2157,8 +2171,9 @@ mod tests {
                 decompressor.decompress(&compressed, true, limit),
                 Err(WebSocketError::FrameTooLarge)
             ));
-            assert!(decompressor.inflate.decompress.total_out() <= limit as u64);
-            assert_eq!(decompressor.inflate.output.capacity(), 0);
+            let inflate = decompressor.inflate.as_ref().expect("decompress built it");
+            assert!(inflate.decompress.total_out() <= limit as u64);
+            assert_eq!(inflate.output.capacity(), 0);
         }
     }
 
