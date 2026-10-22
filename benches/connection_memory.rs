@@ -77,18 +77,21 @@ struct Mode {
     name: &'static str,
     extensions: Option<&'static str>,
     compression_threshold: usize,
+    buffer_capacity: Option<usize>,
 }
 
-const MODES: [Mode; 4] = [
+const MODES: [Mode; 5] = [
     Mode {
         name: "no compression",
         extensions: None,
         compression_threshold: 0,
+        buffer_capacity: None,
     },
     Mode {
         name: "deflate",
         extensions: Some("permessage-deflate"),
         compression_threshold: 0,
+        buffer_capacity: None,
     },
     Mode {
         name: "deflate, no context takeover",
@@ -96,11 +99,19 @@ const MODES: [Mode; 4] = [
             "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
         ),
         compression_threshold: 0,
+        buffer_capacity: None,
     },
     Mode {
         name: "deflate, threshold 64",
         extensions: Some("permessage-deflate"),
         compression_threshold: 64,
+        buffer_capacity: None,
+    },
+    Mode {
+        name: "deflate, threshold 64, 1 KiB",
+        extensions: Some("permessage-deflate"),
+        compression_threshold: 64,
+        buffer_capacity: Some(1024),
     },
 ];
 
@@ -171,9 +182,15 @@ impl AsyncWrite for Wire {
 }
 
 fn options(mode: &Mode) -> Options {
-    Options::default()
+    let options = Options::default()
         .with_low_latency_compression()
-        .with_compression_threshold(mode.compression_threshold)
+        .with_compression_threshold(mode.compression_threshold);
+    match mode.buffer_capacity {
+        Some(capacity) => options
+            .with_read_buffer_capacity(capacity)
+            .with_write_buffer_capacity(capacity),
+        None => options,
+    }
 }
 
 /// The bytes a client sends for `REQUEST` under `mode`, masked and compressed.

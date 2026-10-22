@@ -58,7 +58,7 @@ use std::{
 
 use crate::{close::CloseCode, codec, Negotiation, OpCode, Result, Role};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, FramedParts};
 
@@ -178,13 +178,17 @@ where
 
         let mut parts = FramedParts::new(stream, codec);
         parts.read_buf = read_buf.into();
-        if let Some(capacity) = negotiated.read_buffer_capacity {
-            parts
-                .read_buf
-                .reserve(capacity.saturating_sub(parts.read_buf.len()));
-        }
 
+        // `from_parts` marks leftover handshake bytes as readable, which
+        // `Framed::with_capacity` cannot, but it also raises both buffers to 8 KiB.
+        // Swap in buffers of the configured size afterwards.
         let mut framed = Framed::from_parts(parts);
+        if let Some(capacity) = negotiated.read_buffer_capacity {
+            set_capacity(framed.read_buffer_mut(), capacity);
+        }
+        if let Some(capacity) = negotiated.write_buffer_capacity {
+            set_capacity(framed.write_buffer_mut(), capacity);
+        }
         if let Some(boundary) = negotiated.max_backpressure_write_boundary {
             framed.set_backpressure_boundary(boundary);
         }
@@ -490,6 +494,15 @@ where
     }
 }
 
+/// Replaces `buffer` with one of `capacity` bytes, keeping its contents.
+///
+/// The new buffer is never smaller than the bytes already in it.
+fn set_capacity(buffer: &mut BytesMut, capacity: usize) {
+    let mut resized = BytesMut::with_capacity(capacity.max(buffer.len()));
+    resized.extend_from_slice(buffer);
+    *buffer = resized;
+}
+
 #[cfg(test)]
 mod wake_tests {
     use super::*;
@@ -559,6 +572,35 @@ mod capacity_tests {
             &negotiated,
         );
         assert!(stream.stream.read_buffer().capacity() >= 64 * 1024);
+        assert_eq!(
+            stream.next_frame().await.unwrap().payload().as_ref(),
+            b"abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn small_capacities_are_exact_and_keep_upgrade_bytes() {
+        let options = Options::default()
+            .with_read_buffer_capacity(512)
+            .with_write_buffer_capacity(256);
+        let negotiated = Negotiation::new(None, &options, Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03abc"),
+            &negotiated,
+        );
+        assert_eq!(stream.stream.read_buffer().capacity(), 512);
+        assert_eq!(stream.stream.write_buffer().capacity(), 256);
+        // The flush threshold stays at tokio-util's default, not the buffer size.
+        let default = Negotiation::new(None, &Options::default(), Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let default = Streaming::new(Role::Client, io, Bytes::new(), &default);
+        assert_eq!(
+            stream.stream.backpressure_boundary(),
+            default.stream.backpressure_boundary()
+        );
         assert_eq!(
             stream.next_frame().await.unwrap().payload().as_ref(),
             b"abc"

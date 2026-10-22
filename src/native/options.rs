@@ -82,9 +82,20 @@ pub struct Options {
     /// Initial capacity of the socket read buffer, in bytes.
     ///
     /// Larger buffers can reduce reads for bursts of messages, at the cost of memory
-    /// per connection. The buffer can grow beyond this capacity for large frames.
-    /// This does not change message size limits. Tokio's minimum is 8 KiB.
+    /// per connection. Smaller buffers save memory on mostly idle connections. The
+    /// buffer grows as needed for large frames, so this does not change message size
+    /// limits.
+    ///
+    /// Default: `None` (8 KiB)
     pub read_buffer_capacity: Option<usize>,
+
+    /// Initial capacity of the socket write buffer, in bytes.
+    ///
+    /// The buffer grows as needed for large frames. This does not change when writes
+    /// are flushed; see [`Options::max_backpressure_write_boundary`] for that.
+    ///
+    /// Default: `None` (8 KiB)
+    pub write_buffer_capacity: Option<usize>,
 
     /// Compression settings for the WebSocket connection.
     ///
@@ -365,13 +376,34 @@ impl Options {
         }
     }
 
-    /// Reserve at least `capacity` bytes initially for socket reads (minimum 8 KiB).
+    /// Sets the initial capacity of the socket read buffer, in bytes.
     ///
     /// Use a larger value for bursts of small messages when the extra memory per
-    /// connection is acceptable. Fragment assembly limits are configured separately.
+    /// connection is acceptable, or a smaller one for many idle connections. Fragment
+    /// assembly limits are configured separately.
     pub fn with_read_buffer_capacity(self, capacity: usize) -> Self {
         Self {
             read_buffer_capacity: Some(capacity),
+            ..self
+        }
+    }
+
+    /// Sets the initial capacity of the socket write buffer, in bytes.
+    ///
+    /// See [`Options::write_buffer_capacity`].
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// // Many idle connections: start both buffers at 1 KiB.
+    /// let options = Options::default()
+    ///     .with_read_buffer_capacity(1024)
+    ///     .with_write_buffer_capacity(1024);
+    /// ```
+    pub fn with_write_buffer_capacity(self, capacity: usize) -> Self {
+        Self {
+            write_buffer_capacity: Some(capacity),
             ..self
         }
     }
