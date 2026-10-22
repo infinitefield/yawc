@@ -231,6 +231,8 @@ pub(crate) struct Negotiation {
     pub(crate) utf8: bool,
     pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
+    /// Messages sent as one frame below this size skip compression.
+    pub(crate) compression_threshold: usize,
 }
 
 impl Negotiation {
@@ -272,6 +274,10 @@ impl Negotiation {
             utf8: options.check_utf8,
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
+            compression_threshold: options
+                .compression
+                .as_ref()
+                .map_or(0, |deflate| deflate.compression_threshold),
         })
     }
 

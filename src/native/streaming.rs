@@ -163,6 +163,8 @@ pub struct Streaming<S> {
     // decompressor
     inflate: Option<Decompressor>,
     max_payload_read: usize,
+    // messages sent as one frame below this size are not compressed
+    compression_threshold: usize,
 }
 
 impl<S> Streaming<S>
@@ -197,6 +199,7 @@ where
             deflate: negotiated.compressor(),
             inflate: negotiated.decompressor(),
             max_payload_read: negotiated.max_payload_read,
+            compression_threshold: negotiated.compression_threshold,
         }
     }
 
@@ -448,7 +451,12 @@ where
             item.payload.len()
         );
 
-        let should_compress = !item.opcode.is_control();
+        // A whole message in one frame may skip compression. A fragmented message
+        // cannot, since RSV1 on its first frame covers every fragment.
+        let small_message = item.opcode != OpCode::Continuation
+            && item.is_fin()
+            && item.payload.len() < this.compression_threshold;
+        let should_compress = !item.opcode.is_control() && !small_message;
         if should_compress {
             if let Some(deflate) = this.deflate.as_mut() {
                 let output = deflate.compress(&item.payload, item.is_fin())?;

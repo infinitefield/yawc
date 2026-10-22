@@ -558,6 +558,28 @@ impl Options {
         }
     }
 
+    /// Sends messages smaller than `bytes` uncompressed.
+    ///
+    /// See [`DeflateOptions::compression_threshold`]. Enables compression with the
+    /// default settings if it was not already enabled.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_low_latency_compression()
+    ///     .with_compression_threshold(64);
+    /// ```
+    pub fn with_compression_threshold(self, bytes: usize) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.compression_threshold = bytes;
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
     /// Disables context takeover for client-side compression.
     ///
     /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
@@ -656,6 +678,16 @@ pub struct DeflateOptions {
     /// When `true`, compression state is reset after each message, reducing
     /// memory usage at the cost of compression efficiency.
     pub client_no_context_takeover: bool,
+
+    /// Messages with a payload smaller than this many bytes are sent uncompressed.
+    ///
+    /// RFC 7692 lets each message be compressed or not. Payloads of a few dozen bytes
+    /// rarely shrink under deflate, so skipping them saves CPU, and a connection that
+    /// only sends small messages never allocates a compressor. Only messages sent as a
+    /// single frame are skipped; fragmented messages are always compressed.
+    ///
+    /// Default: `0` (compress every message)
+    pub compression_threshold: usize,
 }
 
 impl DeflateOptions {
@@ -675,6 +707,7 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         }
     }
 
@@ -694,6 +727,7 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         }
     }
 
@@ -714,6 +748,7 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         }
     }
 
@@ -780,6 +815,7 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -805,6 +841,7 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -830,6 +867,7 @@ mod tests {
             client_max_window_bits: Some(15),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -857,6 +895,7 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -884,6 +923,7 @@ mod tests {
             client_max_window_bits: Some(13),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -911,6 +951,7 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -936,6 +977,7 @@ mod tests {
             client_max_window_bits: Some(14),
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         #[cfg(not(feature = "zlib"))]
@@ -943,6 +985,7 @@ mod tests {
             level: CompressionLevel::default(),
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         #[cfg(feature = "zlib")]
@@ -991,6 +1034,7 @@ mod tests {
             client_max_window_bits: Some(13),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1016,6 +1060,7 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1053,6 +1098,7 @@ mod tests {
                 client_max_window_bits: Some(12), // Server prefers 12
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
+                compression_threshold: 0,
             };
 
             let merged = server.merge(&client_offer);
@@ -1074,6 +1120,7 @@ mod tests {
                 level: CompressionLevel::default(),
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
+                compression_threshold: 0,
             };
 
             let merged = server.merge(&client_offer);

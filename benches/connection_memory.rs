@@ -76,22 +76,31 @@ const DEFAULT_CONNECTIONS: usize = 1_000;
 struct Mode {
     name: &'static str,
     extensions: Option<&'static str>,
+    compression_threshold: usize,
 }
 
-const MODES: [Mode; 3] = [
+const MODES: [Mode; 4] = [
     Mode {
         name: "no compression",
         extensions: None,
+        compression_threshold: 0,
     },
     Mode {
         name: "deflate",
         extensions: Some("permessage-deflate"),
+        compression_threshold: 0,
     },
     Mode {
         name: "deflate, no context takeover",
         extensions: Some(
             "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
         ),
+        compression_threshold: 0,
+    },
+    Mode {
+        name: "deflate, threshold 64",
+        extensions: Some("permessage-deflate"),
+        compression_threshold: 64,
     },
 ];
 
@@ -161,8 +170,10 @@ impl AsyncWrite for Wire {
     }
 }
 
-fn options() -> Options {
-    Options::default().with_low_latency_compression()
+fn options(mode: &Mode) -> Options {
+    Options::default()
+        .with_low_latency_compression()
+        .with_compression_threshold(mode.compression_threshold)
 }
 
 /// The bytes a client sends for `REQUEST` under `mode`, compressed and masked.
@@ -170,7 +181,7 @@ fn client_request(mode: &Mode) -> Bytes {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let wire = Wire::capturing(Arc::clone(&captured));
     let mut client =
-        WebSocket::from_stream_with_extensions(wire, Role::Client, mode.extensions, options())
+        WebSocket::from_stream_with_extensions(wire, Role::Client, mode.extensions, options(mode))
             .expect("the client accepts the extensions it is given");
     client
         .send(Frame::text(REQUEST))
@@ -224,9 +235,13 @@ fn measure(mode: &Mode, connections: usize) {
 
     let base = Snapshot::take();
     for wire in wires.drain(..) {
-        let server =
-            WebSocket::from_stream_with_extensions(wire, Role::Server, mode.extensions, options())
-                .expect("the server accepts the extensions it is given");
+        let server = WebSocket::from_stream_with_extensions(
+            wire,
+            Role::Server,
+            mode.extensions,
+            options(mode),
+        )
+        .expect("the server accepts the extensions it is given");
         servers.push(server);
     }
     Snapshot::take().report(&base, mode, "open", connections);
