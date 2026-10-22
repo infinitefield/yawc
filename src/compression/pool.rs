@@ -41,17 +41,31 @@ struct DeflateKey {
 /// pool empty builds new state, and state returned to a full pool is dropped. A
 /// capacity of 0 keeps nothing.
 ///
-/// # Example
+/// # Many idle connections
+///
+/// A server can impose no context takeover in both directions, even on clients that
+/// did not offer it, which RFC 7692 allows. With a pool, small socket buffers and a
+/// compression threshold, an idle connection then costs about 2 KiB instead of the
+/// roughly 370 KiB of a connection that keeps its own deflate state. The price is a
+/// lower compression ratio, since no message can refer to earlier ones.
+///
 /// ```rust
 /// use yawc::{DeflatePool, Options};
 ///
+/// // One pool for the whole server; every connection gets a clone of `options`.
 /// let pool = DeflatePool::new(64);
 /// let options = Options::default()
 ///     .with_low_latency_compression()
 ///     .server_no_context_takeover()
 ///     .client_no_context_takeover()
-///     .with_deflate_pool(pool.clone());
+///     .with_deflate_pool(pool)
+///     .with_compression_threshold(64)
+///     .with_read_buffer_capacity(1024)
+///     .with_write_buffer_capacity(1024);
 /// ```
+///
+/// Size the pool for the messages compressed at the same moment, roughly the number
+/// of runtime worker threads, not for the number of connections.
 #[derive(Clone)]
 pub struct DeflatePool {
     shared: Arc<Shared>,
