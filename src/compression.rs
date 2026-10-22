@@ -16,7 +16,6 @@ use crate::{CompressionLevel, DeflateOptions, Role, WebSocketError};
 mod pool;
 
 pub use pool::DeflatePool;
-use pool::{DeflateQueue, InflateQueue};
 
 static PERMESSAGE_DEFLATE: &str = "permessage-deflate";
 
@@ -339,10 +338,7 @@ impl CompressionConfig {
     pub(crate) fn compressor(&self) -> Compressor {
         let mut compressor = Compressor::new(self.level, self.outgoing);
         if self.outgoing.no_context_takeover {
-            compressor.pool = self
-                .pool
-                .as_ref()
-                .and_then(|pool| pool.deflate_queue(self.level, self.outgoing.window_bits));
+            compressor.pool = self.pool.clone();
         }
         compressor
     }
@@ -351,10 +347,7 @@ impl CompressionConfig {
     pub(crate) fn decompressor(&self) -> Decompressor {
         let mut decompressor = Decompressor::new(self.incoming);
         if self.incoming.no_context_takeover {
-            decompressor.pool = self
-                .pool
-                .as_ref()
-                .and_then(|pool| pool.inflate_queue(self.incoming.window_bits));
+            decompressor.pool = self.pool.clone();
         }
         decompressor
     }
@@ -372,7 +365,7 @@ pub struct Compressor {
     deflate: Option<Deflate>,
     level: CompressionLevel,
     config: HalfConfig,
-    pool: Option<DeflateQueue>,
+    pool: Option<DeflatePool>,
 }
 
 impl Compressor {
@@ -393,7 +386,11 @@ impl Compressor {
     /// - `flush`: Whether to flush the compressor (typically true for final frames).
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
         let deflate = self.deflate.get_or_insert_with(|| {
-            if let Some(deflate) = self.pool.as_ref().and_then(|pool| pool.pop()) {
+            let pooled = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.take_deflate(self.level, self.config.window_bits));
+            if let Some(deflate) = pooled {
                 return deflate;
             }
             match self.config.window_bits {
@@ -410,8 +407,7 @@ impl Compressor {
             // State that failed mid-message is not handed to another connection.
             if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
                 if let Some(deflate) = self.deflate.take() {
-                    // A full pool drops the state, which bounds idle memory.
-                    let _ = pool.push(deflate);
+                    pool.put_deflate(self.config.window_bits, deflate);
                 }
             }
         }
@@ -428,6 +424,8 @@ impl Compressor {
 struct Deflate {
     output: BytesMut,
     compress: flate2::Compress,
+    /// The level `compress` was built with, so a pool only reuses matching state.
+    level: CompressionLevel,
 }
 
 impl Deflate {
@@ -436,6 +434,7 @@ impl Deflate {
         Self {
             output: BytesMut::with_capacity(1024),
             compress: flate2::Compress::new(level, false),
+            level,
         }
     }
 
@@ -445,6 +444,7 @@ impl Deflate {
         Self {
             output: BytesMut::with_capacity(1024),
             compress: flate2::Compress::new_with_window_bits(level, false, window_bits),
+            level,
         }
     }
 
@@ -570,7 +570,7 @@ fn inflate_chunk(output: &mut BytesMut, max_output_size: usize) -> crate::Result
 pub struct Decompressor {
     inflate: Option<Inflate>,
     config: HalfConfig,
-    pool: Option<InflateQueue>,
+    pool: Option<DeflatePool>,
 }
 
 impl Decompressor {
@@ -596,7 +596,11 @@ impl Decompressor {
         max_output_size: usize,
     ) -> crate::Result<Bytes> {
         let inflate = self.inflate.get_or_insert_with(|| {
-            if let Some(inflate) = self.pool.as_ref().and_then(|pool| pool.pop()) {
+            let pooled = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.take_inflate(self.config.window_bits));
+            if let Some(inflate) = pooled {
                 return inflate;
             }
             match self.config.window_bits {
@@ -616,8 +620,7 @@ impl Decompressor {
             // State that failed mid-message is not handed to another connection.
             if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
                 if let Some(inflate) = self.inflate.take() {
-                    // A full pool drops the state, which bounds idle memory.
-                    let _ = pool.push(inflate);
+                    pool.put_inflate(self.config.window_bits, inflate);
                 }
             }
         }

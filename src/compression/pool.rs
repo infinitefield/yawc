@@ -4,30 +4,15 @@
 //! connection only needs deflate state while a message is being compressed or
 //! decompressed. Between messages the state sits in a [`DeflatePool`], and memory
 //! scales with messages in flight instead of open connections.
-use std::{
-    fmt,
-    sync::{Arc, Mutex, PoisonError},
-};
+use std::{array, fmt, sync::Arc};
 
 use crossbeam_queue::ArrayQueue;
 
-use super::{Deflate, Inflate};
+use super::{Deflate, Inflate, WINDOW_BITS};
 use crate::CompressionLevel;
 
-/// Idle compressors for one compression level and window size.
-pub(super) type DeflateQueue = Arc<ArrayQueue<Deflate>>;
-/// Idle decompressors for one window size.
-pub(super) type InflateQueue = Arc<ArrayQueue<Inflate>>;
-
-/// One queue per combination of settings, looked up when a connection is set up.
-type Queues<K, T> = Mutex<Vec<(K, Arc<ArrayQueue<T>>)>>;
-
-/// What a pooled compressor was built with. Only identical settings can share state.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct DeflateKey {
-    level: CompressionLevel,
-    window_bits: Option<u8>,
-}
+/// One queue per window size deflate accepts.
+const WINDOW_SIZES: usize = (*WINDOW_BITS.end() - *WINDOW_BITS.start() + 1) as usize;
 
 /// Shares permessage-deflate state between connections that do not keep context.
 ///
@@ -37,9 +22,10 @@ struct DeflateKey {
 /// the pool is cheap, and every clone shares the same state.
 ///
 /// `capacity` bounds how many idle compressors, and separately how many idle
-/// decompressors, are kept for each combination of settings. A message that finds the
-/// pool empty builds new state, and state returned to a full pool is dropped. A
-/// capacity of 0 keeps nothing.
+/// decompressors, are kept for each window size. A message that finds the pool empty
+/// builds new state, and state returned to a full pool is dropped. A capacity of 0
+/// keeps nothing. Connections sharing a pool should use the same compression level;
+/// a compressor built with another level is dropped instead of reused.
 ///
 /// # Many idle connections
 ///
@@ -68,83 +54,83 @@ struct DeflateKey {
 /// of runtime worker threads, not for the number of connections.
 #[derive(Clone)]
 pub struct DeflatePool {
-    shared: Arc<Shared>,
+    /// `None` when the capacity is 0, since an `ArrayQueue` cannot be empty-sized.
+    shared: Option<Arc<Shared>>,
 }
 
 struct Shared {
     capacity: usize,
-    // A handful of entries at most.
-    deflate: Queues<DeflateKey, Deflate>,
-    inflate: Queues<Option<u8>, Inflate>,
+    deflate: [ArrayQueue<Deflate>; WINDOW_SIZES],
+    inflate: [ArrayQueue<Inflate>; WINDOW_SIZES],
 }
 
 impl DeflatePool {
-    /// Creates a pool that keeps up to `capacity` idle objects per setting.
+    /// Creates a pool that keeps up to `capacity` idle objects per window size.
     pub fn new(capacity: usize) -> Self {
-        Self {
-            shared: Arc::new(Shared {
+        let shared = (capacity > 0).then(|| {
+            Arc::new(Shared {
                 capacity,
-                deflate: Mutex::new(Vec::new()),
-                inflate: Mutex::new(Vec::new()),
-            }),
-        }
+                deflate: array::from_fn(|_| ArrayQueue::new(capacity)),
+                inflate: array::from_fn(|_| ArrayQueue::new(capacity)),
+            })
+        });
+        Self { shared }
     }
 
-    /// The queue for compressors with these settings, or `None` if nothing is kept.
-    pub(super) fn deflate_queue(
+    /// Takes an idle compressor built with `level` and `window_bits`, if there is one.
+    pub(super) fn take_deflate(
         &self,
         level: CompressionLevel,
         window_bits: Option<u8>,
-    ) -> Option<DeflateQueue> {
-        let key = DeflateKey {
-            level,
-            window_bits: effective_window_bits(window_bits),
-        };
-        queue_for(&self.shared.deflate, key, self.shared.capacity)
+    ) -> Option<Deflate> {
+        let shared = self.shared.as_ref()?;
+        let deflate = shared.deflate[slot(window_bits)].pop()?;
+        (deflate.level == level).then_some(deflate)
     }
 
-    /// The queue for decompressors with this window size, or `None` if nothing is kept.
-    pub(super) fn inflate_queue(&self, window_bits: Option<u8>) -> Option<InflateQueue> {
-        let key = effective_window_bits(window_bits);
-        queue_for(&self.shared.inflate, key, self.shared.capacity)
+    /// Returns a reset compressor. A full pool drops it.
+    pub(super) fn put_deflate(&self, window_bits: Option<u8>, deflate: Deflate) {
+        if let Some(shared) = &self.shared {
+            // A full pool drops the state, which bounds idle memory.
+            let _ = shared.deflate[slot(window_bits)].push(deflate);
+        }
+    }
+
+    /// Takes an idle decompressor built with `window_bits`, if there is one.
+    pub(super) fn take_inflate(&self, window_bits: Option<u8>) -> Option<Inflate> {
+        self.shared.as_ref()?.inflate[slot(window_bits)].pop()
+    }
+
+    /// Returns a reset decompressor. A full pool drops it.
+    pub(super) fn put_inflate(&self, window_bits: Option<u8>, inflate: Inflate) {
+        if let Some(shared) = &self.shared {
+            // A full pool drops the state, which bounds idle memory.
+            let _ = shared.inflate[slot(window_bits)].push(inflate);
+        }
     }
 }
 
 impl fmt::Debug for DeflatePool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let capacity = self.shared.as_ref().map_or(0, |shared| shared.capacity);
         f.debug_struct("DeflatePool")
-            .field("capacity", &self.shared.capacity)
+            .field("capacity", &capacity)
             .finish_non_exhaustive()
     }
 }
 
+/// The queue index for a window size.
+///
 /// Window bits only change the state with the `zlib` feature; without it every
 /// connection uses the default window and shares one queue.
-fn effective_window_bits(window_bits: Option<u8>) -> Option<u8> {
-    if cfg!(feature = "zlib") {
-        window_bits
-    } else {
-        None
-    }
-}
-
-fn queue_for<K: PartialEq, T>(
-    queues: &Queues<K, T>,
-    key: K,
-    capacity: usize,
-) -> Option<Arc<ArrayQueue<T>>> {
-    if capacity == 0 {
-        return None;
-    }
-    // The list is only ever appended to, so a panic elsewhere cannot leave it
-    // inconsistent and a poisoned lock is safe to use.
-    let mut queues = queues.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, queue)) = queues.iter().find(|(existing, _)| *existing == key) {
-        return Some(Arc::clone(queue));
-    }
-    let queue = Arc::new(ArrayQueue::new(capacity));
-    queues.push((key, Arc::clone(&queue)));
-    Some(queue)
+fn slot(window_bits: Option<u8>) -> usize {
+    let bits = match window_bits {
+        Some(bits) if cfg!(feature = "zlib") => {
+            bits.clamp(*WINDOW_BITS.start(), *WINDOW_BITS.end())
+        }
+        _ => *WINDOW_BITS.end(),
+    };
+    usize::from(bits - WINDOW_BITS.start())
 }
 
 #[cfg(test)]
@@ -173,13 +159,11 @@ mod tests {
     }
 
     fn idle_compressors(pool: &DeflatePool) -> usize {
-        pool.deflate_queue(CompressionLevel::fast(), None)
-            .unwrap()
-            .len()
+        pool.shared.as_ref().unwrap().deflate[slot(None)].len()
     }
 
     fn idle_decompressors(pool: &DeflatePool) -> usize {
-        pool.inflate_queue(None).unwrap().len()
+        pool.shared.as_ref().unwrap().inflate[slot(None)].len()
     }
 
     #[test]
@@ -266,7 +250,25 @@ mod tests {
     #[test]
     fn zero_capacity_keeps_nothing() {
         let pool = DeflatePool::new(0);
-        assert!(pool.deflate_queue(CompressionLevel::fast(), None).is_none());
-        assert!(pool.inflate_queue(None).is_none());
+        let mut compressor = config(NO_CONTEXT, &pool).compressor();
+        compressor.compress(b"hello", true).unwrap();
+        assert!(pool.take_deflate(CompressionLevel::fast(), None).is_none());
+    }
+
+    #[test]
+    fn state_built_with_another_level_is_not_reused() {
+        let pool = DeflatePool::new(4);
+        pool.put_deflate(None, Deflate::new(CompressionLevel::best()));
+        assert!(pool.take_deflate(CompressionLevel::fast(), None).is_none());
+        pool.put_deflate(None, Deflate::new(CompressionLevel::fast()));
+        assert!(pool.take_deflate(CompressionLevel::fast(), None).is_some());
+    }
+
+    #[test]
+    fn every_window_size_has_a_queue() {
+        for bits in WINDOW_BITS {
+            assert!(slot(Some(bits)) < WINDOW_SIZES);
+        }
+        assert_eq!(slot(None), slot(Some(*WINDOW_BITS.end())));
     }
 }
