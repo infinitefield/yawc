@@ -228,3 +228,7 @@ harness = false
 [[bench]]
 name = "allocations"
 harness = false
+
+[[bench]]
+name = "connection_memory"
+harness = false
