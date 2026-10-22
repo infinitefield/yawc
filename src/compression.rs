@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, mem};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use flate2::{CompressError, DecompressError, FlushCompress, FlushDecompress, Status};
@@ -12,6 +12,10 @@ use nom::{
 };
 
 use crate::{CompressionLevel, DeflateOptions, Role, WebSocketError};
+
+mod pool;
+
+pub use pool::DeflatePool;
 
 static PERMESSAGE_DEFLATE: &str = "permessage-deflate";
 
@@ -262,13 +266,15 @@ const WINDOW_BITS: std::ops::RangeInclusive<u8> = 9..=15;
 ///
 /// Built once at handshake time from the negotiated extension parameters, with the role
 /// already applied, so the read and write paths just use `incoming`/`outgoing`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompressionConfig {
     level: CompressionLevel,
     /// Settings for the direction we compress.
     outgoing: HalfConfig,
     /// Settings for the direction we decompress.
     incoming: HalfConfig,
+    /// Shared state for directions without context takeover.
+    pool: Option<DeflatePool>,
 }
 
 impl CompressionConfig {
@@ -319,17 +325,31 @@ impl CompressionConfig {
             level,
             outgoing,
             incoming,
+            pool: None,
         }))
+    }
+
+    /// Shares deflate state through `pool` for directions without context takeover.
+    pub(crate) fn with_pool(self, pool: Option<DeflatePool>) -> Self {
+        Self { pool, ..self }
     }
 
     /// Builds the compressor for the direction this side writes.
     pub(crate) fn compressor(&self) -> Compressor {
-        Compressor::new(self.level, self.outgoing)
+        let mut compressor = Compressor::new(self.level, self.outgoing);
+        if self.outgoing.no_context_takeover {
+            compressor.pool = self.pool.clone();
+        }
+        compressor
     }
 
     /// Builds the decompressor for the direction this side reads.
     pub(crate) fn decompressor(&self) -> Decompressor {
-        Decompressor::new(self.incoming)
+        let mut decompressor = Decompressor::new(self.incoming);
+        if self.incoming.no_context_takeover {
+            decompressor.pool = self.pool.clone();
+        }
+        decompressor
     }
 }
 
@@ -337,23 +357,25 @@ impl CompressionConfig {
 ///
 /// In no-context-takeover mode the dictionary is reset after each message, lowering
 /// memory use at the cost of compression ratio.
+///
+/// The deflate state is built on the first call to [`Compressor::compress`], so a
+/// connection that never sends a compressed message never pays for it. With a pool,
+/// it is borrowed for each message instead and returned once the message is done.
 pub struct Compressor {
-    deflate: Deflate,
-    no_context_takeover: bool,
+    deflate: Option<Deflate>,
+    level: CompressionLevel,
+    config: HalfConfig,
+    pool: Option<DeflatePool>,
 }
 
 impl Compressor {
     /// Creates a compressor for one direction of a connection.
     pub(crate) fn new(level: CompressionLevel, config: HalfConfig) -> Self {
         Self {
-            deflate: match config.window_bits {
-                #[cfg(feature = "zlib")]
-                Some(window_bits) => Deflate::new_with_window_bits(level, window_bits),
-                #[cfg(not(feature = "zlib"))]
-                Some(_) => Deflate::new(level),
-                None => Deflate::new(level),
-            },
-            no_context_takeover: config.no_context_takeover,
+            deflate: None,
+            level,
+            config,
+            pool: None,
         }
     }
 
@@ -363,9 +385,31 @@ impl Compressor {
     /// - `input`: The data slice to compress.
     /// - `flush`: Whether to flush the compressor (typically true for final frames).
     pub fn compress(&mut self, input: &[u8], flush: bool) -> io::Result<Bytes> {
-        let res = self.deflate.compress(input, flush);
-        if flush && self.no_context_takeover {
-            self.deflate.reset();
+        let deflate = self.deflate.get_or_insert_with(|| {
+            let pooled = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.take_deflate(self.level, self.config.window_bits));
+            if let Some(deflate) = pooled {
+                return deflate;
+            }
+            match self.config.window_bits {
+                #[cfg(feature = "zlib")]
+                Some(window_bits) => Deflate::new_with_window_bits(self.level, window_bits),
+                #[cfg(not(feature = "zlib"))]
+                Some(_) => Deflate::new(self.level),
+                None => Deflate::new(self.level),
+            }
+        });
+        let res = deflate.compress(input, flush);
+        if flush && self.config.no_context_takeover {
+            deflate.reset();
+            // State that failed mid-message is not handed to another connection.
+            if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
+                if let Some(deflate) = self.deflate.take() {
+                    pool.put_deflate(self.config.window_bits, deflate);
+                }
+            }
         }
         res
     }
@@ -380,14 +424,17 @@ impl Compressor {
 struct Deflate {
     output: BytesMut,
     compress: flate2::Compress,
+    /// The level `compress` was built with, so a pool only reuses matching state.
+    level: CompressionLevel,
 }
 
 impl Deflate {
     /// Creates a new `Deflate` compressor with the specified compression level.
     fn new(level: CompressionLevel) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new(level, false),
+            level,
         }
     }
 
@@ -395,8 +442,9 @@ impl Deflate {
     #[cfg(feature = "zlib")]
     fn new_with_window_bits(level: CompressionLevel, window_bits: u8) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             compress: flate2::Compress::new_with_window_bits(level, false, window_bits),
+            level,
         }
     }
 
@@ -416,7 +464,7 @@ impl Deflate {
             self.flush()
         } else {
             // Return buffered data without flushing
-            Ok(self.output.split().freeze())
+            Ok(take_output(&mut self.output))
         }
     }
 
@@ -470,7 +518,7 @@ impl Deflate {
             }
         }
 
-        Ok(output.split().freeze())
+        Ok(take_output(output))
     }
 }
 
@@ -487,6 +535,20 @@ fn inflate_error(err: DecompressError) -> io::Error {
         io::ErrorKind::InvalidInput,
         format!("Decompression error: {err}"),
     )
+}
+
+/// The output buffer a compressor or decompressor starts with.
+const OUTPUT_CAPACITY: usize = 1024;
+
+/// Takes the finished output. Small output is split off so the buffer reuses the rest
+/// of its allocation. Large output takes the whole buffer, since a split would leave
+/// the buffer holding that allocation for as long as the state lives.
+fn take_output(output: &mut BytesMut) -> Bytes {
+    if output.len() > OUTPUT_CAPACITY {
+        mem::take(output).freeze()
+    } else {
+        output.split().freeze()
+    }
 }
 
 /// Returns a mutable slice to the next available chunk of memory in the BytesMut buffer.
@@ -516,23 +578,22 @@ fn inflate_chunk(output: &mut BytesMut, max_output_size: usize) -> crate::Result
 ///
 /// In no-context-takeover mode the dictionary is reset after each message, matching a
 /// peer that compresses the same way.
+///
+/// The inflate state is built on the first call to [`Decompressor::decompress`], so a
+/// connection that never receives a compressed frame never pays for it.
 pub struct Decompressor {
-    inflate: Inflate,
-    no_context_takeover: bool,
+    inflate: Option<Inflate>,
+    config: HalfConfig,
+    pool: Option<DeflatePool>,
 }
 
 impl Decompressor {
     /// Creates a decompressor for one direction of a connection.
     pub(crate) fn new(config: HalfConfig) -> Self {
         Self {
-            inflate: match config.window_bits {
-                #[cfg(feature = "zlib")]
-                Some(window_bits) => Inflate::new_with_window_bits(window_bits),
-                #[cfg(not(feature = "zlib"))]
-                Some(_) => Inflate::default(),
-                None => Inflate::default(),
-            },
-            no_context_takeover: config.no_context_takeover,
+            inflate: None,
+            config,
+            pool: None,
         }
     }
 
@@ -548,12 +609,34 @@ impl Decompressor {
         stream_end: bool,
         max_output_size: usize,
     ) -> crate::Result<Bytes> {
-        let res = self.inflate.decompress(input, stream_end, max_output_size);
+        let inflate = self.inflate.get_or_insert_with(|| {
+            let pooled = self
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.take_inflate(self.config.window_bits));
+            if let Some(inflate) = pooled {
+                return inflate;
+            }
+            match self.config.window_bits {
+                #[cfg(feature = "zlib")]
+                Some(window_bits) => Inflate::new_with_window_bits(window_bits),
+                #[cfg(not(feature = "zlib"))]
+                Some(_) => Inflate::default(),
+                None => Inflate::default(),
+            }
+        });
+        let res = inflate.decompress(input, stream_end, max_output_size);
         if res.is_err() {
-            self.inflate.output = BytesMut::new();
+            inflate.output = BytesMut::new();
         }
-        if stream_end && self.no_context_takeover {
-            self.inflate.reset();
+        if stream_end && self.config.no_context_takeover {
+            inflate.reset();
+            // State that failed mid-message is not handed to another connection.
+            if let Some(pool) = self.pool.as_ref().filter(|_| res.is_ok()) {
+                if let Some(inflate) = self.inflate.take() {
+                    pool.put_inflate(self.config.window_bits, inflate);
+                }
+            }
         }
         res
     }
@@ -578,7 +661,7 @@ impl Default for Inflate {
     /// Creates a new `Inflate` instance with a default buffer size and decompressor.
     fn default() -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             decompress: flate2::Decompress::new(false),
             stream_ended: false,
         }
@@ -599,7 +682,7 @@ impl Inflate {
     #[cfg(feature = "zlib")]
     fn new_with_window_bits(window_bits: u8) -> Self {
         Self {
-            output: BytesMut::with_capacity(1024),
+            output: BytesMut::with_capacity(OUTPUT_CAPACITY),
             decompress: flate2::Decompress::new_with_window_bits(false, window_bits),
             stream_ended: false,
         }
@@ -642,7 +725,7 @@ impl Inflate {
 
             Ok(out)
         } else {
-            Ok(self.output.split().freeze())
+            Ok(take_output(&mut self.output))
         }
     }
 
@@ -720,7 +803,7 @@ impl Inflate {
 
             let written = (decompressor.total_out() - before_out) as usize;
             if written == 0 && flush == FlushDecompress::None {
-                break Ok(output.split().freeze());
+                break Ok(take_output(output));
             }
 
             // SAFETY: The decompressor initialized `written` bytes in the spare capacity.
@@ -2157,8 +2240,9 @@ mod tests {
                 decompressor.decompress(&compressed, true, limit),
                 Err(WebSocketError::FrameTooLarge)
             ));
-            assert!(decompressor.inflate.decompress.total_out() <= limit as u64);
-            assert_eq!(decompressor.inflate.output.capacity(), 0);
+            let inflate = decompressor.inflate.as_ref().expect("decompress built it");
+            assert!(inflate.decompress.total_out() <= limit as u64);
+            assert_eq!(inflate.output.capacity(), 0);
         }
     }
 

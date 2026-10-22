@@ -187,6 +187,7 @@ smol = { version = "2.0.2", optional = true }
 
 # Compression
 flate2 = "1"
+crossbeam-queue = "0.3"
 
 # ==============================================================================
 # Development dependencies
@@ -227,4 +228,8 @@ harness = false
 
 [[bench]]
 name = "allocations"
+harness = false
+
+[[bench]]
+name = "connection_memory"
 harness = false

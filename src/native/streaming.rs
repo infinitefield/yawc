@@ -58,9 +58,12 @@ use std::{
 
 use crate::{close::CloseCode, codec, Negotiation, OpCode, Result, Role};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, FramedParts};
+
+/// The buffer size tokio-util starts `Framed` with, used when none is configured.
+const DEFAULT_BUFFER_CAPACITY: usize = 8 * 1024;
 
 use crate::{
     codec::Codec,
@@ -163,6 +166,14 @@ pub struct Streaming<S> {
     // decompressor
     inflate: Option<Decompressor>,
     max_payload_read: usize,
+    // messages sent as one frame below this size are not compressed
+    compression_threshold: usize,
+    // size the read buffer returns to after a larger frame
+    read_buffer_capacity: usize,
+    // size the write buffer returns to after it grew past the backpressure boundary
+    write_buffer_capacity: usize,
+    // the write buffer grew past its usual size and is replaced once flushed
+    write_buffer_grown: bool,
 }
 
 impl<S> Streaming<S>
@@ -176,13 +187,17 @@ where
 
         let mut parts = FramedParts::new(stream, codec);
         parts.read_buf = read_buf.into();
-        if let Some(capacity) = negotiated.read_buffer_capacity {
-            parts
-                .read_buf
-                .reserve(capacity.saturating_sub(parts.read_buf.len()));
-        }
 
+        // `from_parts` marks leftover handshake bytes as readable, which
+        // `Framed::with_capacity` cannot, but it also raises both buffers to 8 KiB.
+        // Swap in buffers of the configured size afterwards.
         let mut framed = Framed::from_parts(parts);
+        if let Some(capacity) = negotiated.read_buffer_capacity {
+            set_capacity(framed.read_buffer_mut(), capacity);
+        }
+        if let Some(capacity) = negotiated.write_buffer_capacity {
+            set_capacity(framed.write_buffer_mut(), capacity);
+        }
         if let Some(boundary) = negotiated.max_backpressure_write_boundary {
             framed.set_backpressure_boundary(boundary);
         }
@@ -197,6 +212,14 @@ where
             deflate: negotiated.compressor(),
             inflate: negotiated.decompressor(),
             max_payload_read: negotiated.max_payload_read,
+            compression_threshold: negotiated.compression_threshold,
+            read_buffer_capacity: negotiated
+                .read_buffer_capacity
+                .unwrap_or(DEFAULT_BUFFER_CAPACITY),
+            write_buffer_capacity: negotiated
+                .write_buffer_capacity
+                .unwrap_or(DEFAULT_BUFFER_CAPACITY),
+            write_buffer_grown: false,
         }
     }
 
@@ -264,7 +287,13 @@ where
                     self.read_half.poll_frame(&mut self.stream, cx)
                 })
         };
-        match res.map(|res| res.and_then(|frame| self.on_frame(frame, max_read_buffer))) {
+        let res = res.map(|res| {
+            res.and_then(|frame| {
+                self.release_read_buffer(frame.payload.len());
+                self.on_frame(frame, max_read_buffer)
+            })
+        });
+        match res {
             Poll::Ready(Ok(frame)) => Poll::Ready(Ok(frame)),
             Poll::Ready(Err(WebSocketError::ConnectionClosed)) => {
                 ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
@@ -293,6 +322,27 @@ where
                 ready!(self.poll_flush_obligated(ContextKind::Read, cx))?;
                 Poll::Pending
             }
+        }
+    }
+
+    /// Gives back the memory a frame larger than the read buffer made it grow to.
+    ///
+    /// The frame's payload shares the buffer's allocation, so the buffer keeps all of
+    /// it until replaced. Bytes of the next frame already read are kept, unless there
+    /// are more than fit, in which case the next frame shrinks it instead.
+    fn release_read_buffer(&mut self, frame_len: usize) {
+        let capacity = self.read_buffer_capacity;
+        let buffer = self.stream.read_buffer_mut();
+        if frame_len > capacity && buffer.len() <= capacity {
+            set_capacity(buffer, capacity);
+        }
+    }
+
+    /// Gives back the memory the write buffer grew to, once it has been written out.
+    fn release_write_buffer(&mut self) {
+        if self.write_buffer_grown && self.stream.write_buffer().is_empty() {
+            set_capacity(self.stream.write_buffer_mut(), self.write_buffer_capacity);
+            self.write_buffer_grown = false;
         }
     }
 
@@ -448,7 +498,12 @@ where
             item.payload.len()
         );
 
-        let should_compress = !item.opcode.is_control();
+        // A whole message in one frame may skip compression. A fragmented message
+        // cannot, since RSV1 on its first frame covers every fragment.
+        let small_message = item.opcode != OpCode::Continuation
+            && item.is_fin()
+            && item.payload.len() < this.compression_threshold;
+        let should_compress = !item.opcode.is_control() && !small_message;
         if should_compress {
             if let Some(deflate) = this.deflate.as_mut() {
                 let output = deflate.compress(&item.payload, item.is_fin())?;
@@ -458,7 +513,17 @@ where
             }
         }
 
-        this.write_half.start_send(&mut this.stream, item)
+        this.write_half.start_send(&mut this.stream, item)?;
+
+        // Frames up to the backpressure boundary collect in the buffer between
+        // flushes, so only growth past both limits is given back.
+        let usual = this
+            .write_buffer_capacity
+            .max(this.stream.backpressure_boundary());
+        if this.stream.write_buffer().len() > usual {
+            this.write_buffer_grown = true;
+        }
+        Ok(())
     }
 
     fn poll_flush(
@@ -467,8 +532,11 @@ where
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
         this.wake_proxy.set_waker(ContextKind::Write, cx.waker());
-        this.wake_proxy
-            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx))
+        ready!(this
+            .wake_proxy
+            .with_context(|cx| this.write_half.poll_flush(&mut this.stream, cx)))?;
+        this.release_write_buffer();
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(
@@ -480,6 +548,15 @@ where
         this.wake_proxy
             .with_context(|cx| this.write_half.poll_close(&mut this.stream, cx))
     }
+}
+
+/// Replaces `buffer` with one of `capacity` bytes, keeping its contents.
+///
+/// The new buffer is never smaller than the bytes already in it.
+fn set_capacity(buffer: &mut BytesMut, capacity: usize) {
+    let mut resized = BytesMut::with_capacity(capacity.max(buffer.len()));
+    resized.extend_from_slice(buffer);
+    *buffer = resized;
 }
 
 #[cfg(test)]
@@ -551,6 +628,35 @@ mod capacity_tests {
             &negotiated,
         );
         assert!(stream.stream.read_buffer().capacity() >= 64 * 1024);
+        assert_eq!(
+            stream.next_frame().await.unwrap().payload().as_ref(),
+            b"abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn small_capacities_are_exact_and_keep_upgrade_bytes() {
+        let options = Options::default()
+            .with_read_buffer_capacity(512)
+            .with_write_buffer_capacity(256);
+        let negotiated = Negotiation::new(None, &options, Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let mut stream = Streaming::new(
+            Role::Client,
+            io,
+            Bytes::from_static(b"\x82\x03abc"),
+            &negotiated,
+        );
+        assert_eq!(stream.stream.read_buffer().capacity(), 512);
+        assert_eq!(stream.stream.write_buffer().capacity(), 256);
+        // The flush threshold stays at tokio-util's default, not the buffer size.
+        let default = Negotiation::new(None, &Options::default(), Role::Client).unwrap();
+        let (io, _peer) = duplex(1);
+        let default = Streaming::new(Role::Client, io, Bytes::new(), &default);
+        assert_eq!(
+            stream.stream.backpressure_boundary(),
+            default.stream.backpressure_boundary()
+        );
         assert_eq!(
             stream.next_frame().await.unwrap().payload().as_ref(),
             b"abc"

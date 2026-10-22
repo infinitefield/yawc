@@ -140,7 +140,7 @@ use std::{
     borrow::BorrowMut,
     collections::VecDeque,
     future::poll_fn,
-    io,
+    io, mem,
     net::{IpAddr, SocketAddr},
     pin::{pin, Pin},
     str::FromStr,
@@ -160,6 +160,7 @@ use tokio_util::codec::Framed;
 use url::{Host, Url};
 
 // Re-exports
+pub use crate::compression::DeflatePool;
 pub use crate::stream::MaybeTlsStream;
 #[cfg(feature = "http2")]
 pub use builder::HttpVersion;
@@ -228,9 +229,12 @@ pub(crate) struct Negotiation {
     pub(crate) max_payload_read: usize,
     pub(crate) max_read_buffer: usize,
     pub(crate) read_buffer_capacity: Option<usize>,
+    pub(crate) write_buffer_capacity: Option<usize>,
     pub(crate) utf8: bool,
     pub(crate) fragmentation: Option<options::Fragmentation>,
     pub(crate) max_backpressure_write_boundary: Option<usize>,
+    /// Messages sent as one frame below this size skip compression.
+    pub(crate) compression_threshold: usize,
 }
 
 impl Negotiation {
@@ -253,7 +257,15 @@ impl Negotiation {
             extensions.as_ref(),
             options.compression.as_ref().map(|deflate| deflate.level),
             role,
-        )?;
+        )?
+        .map(|config| {
+            config.with_pool(
+                options
+                    .compression
+                    .as_ref()
+                    .and_then(|deflate| deflate.pool.clone()),
+            )
+        });
 
         // The read buffer holds at least two payloads unless told otherwise.
         let max_payload_read = options.max_payload_read.unwrap_or(MAX_PAYLOAD_READ);
@@ -269,9 +281,14 @@ impl Negotiation {
             max_payload_read,
             max_read_buffer,
             read_buffer_capacity: options.read_buffer_capacity,
+            write_buffer_capacity: options.write_buffer_capacity,
             utf8: options.check_utf8,
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
+            compression_threshold: options
+                .compression
+                .as_ref()
+                .map_or(0, |deflate| deflate.compression_threshold),
         })
     }
 
@@ -476,7 +493,7 @@ struct FragmentLayer {
     outgoing_fragments: VecDeque<Frame>,
     /// Fragment accumulation for assembling incoming fragmented messages
     incoming_fragment: Option<FragmentationState>,
-    /// Reusable storage for fragmented messages, shared with the returned payload.
+    /// Storage for the fragmented message being assembled, handed to its payload.
     incoming_buffer: BytesMut,
     /// Maximum fragment size for outgoing messages
     fragment_size: Option<usize>,
@@ -605,7 +622,9 @@ impl FragmentLayer {
                     // Assemble complete message
                     frame.opcode = fragment.opcode;
                     frame.is_compressed = fragment.is_compressed;
-                    frame.payload = self.incoming_buffer.split().freeze();
+                    // Take the whole buffer: a split would leave it holding the
+                    // message's allocation for as long as the connection lives.
+                    frame.payload = mem::take(&mut self.incoming_buffer).freeze();
 
                     Ok(Some(frame))
                 } else {

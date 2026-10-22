@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::compression::WebSocketExtensions;
+use crate::compression::{DeflatePool, WebSocketExtensions};
 
 /// Type alias for the compression level used in WebSocket compression settings.
 ///
@@ -82,9 +82,21 @@ pub struct Options {
     /// Initial capacity of the socket read buffer, in bytes.
     ///
     /// Larger buffers can reduce reads for bursts of messages, at the cost of memory
-    /// per connection. The buffer can grow beyond this capacity for large frames.
-    /// This does not change message size limits. Tokio's minimum is 8 KiB.
+    /// per connection. Smaller buffers save memory on mostly idle connections. The
+    /// buffer grows as needed for large frames, so this does not change message size
+    /// limits, and returns to this size after a larger frame.
+    ///
+    /// Default: `None` (8 KiB)
     pub read_buffer_capacity: Option<usize>,
+
+    /// Initial capacity of the socket write buffer, in bytes.
+    ///
+    /// The buffer grows as needed for large frames, and returns to this size once a
+    /// flush has written them out. This does not change when writes are flushed; see
+    /// [`Options::max_backpressure_write_boundary`] for that.
+    ///
+    /// Default: `None` (8 KiB)
+    pub write_buffer_capacity: Option<usize>,
 
     /// Compression settings for the WebSocket connection.
     ///
@@ -365,13 +377,34 @@ impl Options {
         }
     }
 
-    /// Reserve at least `capacity` bytes initially for socket reads (minimum 8 KiB).
+    /// Sets the initial capacity of the socket read buffer, in bytes.
     ///
     /// Use a larger value for bursts of small messages when the extra memory per
-    /// connection is acceptable. Fragment assembly limits are configured separately.
+    /// connection is acceptable, or a smaller one for many idle connections. Fragment
+    /// assembly limits are configured separately.
     pub fn with_read_buffer_capacity(self, capacity: usize) -> Self {
         Self {
             read_buffer_capacity: Some(capacity),
+            ..self
+        }
+    }
+
+    /// Sets the initial capacity of the socket write buffer, in bytes.
+    ///
+    /// See [`Options::write_buffer_capacity`].
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// // Many idle connections: start both buffers at 1 KiB.
+    /// let options = Options::default()
+    ///     .with_read_buffer_capacity(1024)
+    ///     .with_write_buffer_capacity(1024);
+    /// ```
+    pub fn with_write_buffer_capacity(self, capacity: usize) -> Self {
+        Self {
+            write_buffer_capacity: Some(capacity),
             ..self
         }
     }
@@ -558,6 +591,41 @@ impl Options {
         }
     }
 
+    /// Sends messages smaller than `bytes` uncompressed.
+    ///
+    /// See [`DeflateOptions::compression_threshold`]. Enables compression with the
+    /// default settings if it was not already enabled.
+    ///
+    /// # Example
+    /// ```rust
+    /// use yawc::Options;
+    ///
+    /// let options = Options::default()
+    ///     .with_low_latency_compression()
+    ///     .with_compression_threshold(64);
+    /// ```
+    pub fn with_compression_threshold(self, bytes: usize) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.compression_threshold = bytes;
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
+    /// Shares deflate state through `pool` in no-context-takeover mode.
+    ///
+    /// See [`DeflateOptions::pool`]. Enables compression with the default settings if
+    /// it was not already enabled.
+    pub fn with_deflate_pool(self, pool: DeflatePool) -> Self {
+        let mut compression = self.compression.unwrap_or_default();
+        compression.pool = Some(pool);
+        Self {
+            compression: Some(compression),
+            ..self
+        }
+    }
+
     /// Disables context takeover for client-side compression.
     ///
     /// In the WebSocket permessage-deflate extension, "context takeover" refers to maintaining
@@ -656,6 +724,25 @@ pub struct DeflateOptions {
     /// When `true`, compression state is reset after each message, reducing
     /// memory usage at the cost of compression efficiency.
     pub client_no_context_takeover: bool,
+
+    /// Messages with a payload smaller than this many bytes are sent uncompressed.
+    ///
+    /// RFC 7692 lets each message be compressed or not. Payloads of a few dozen bytes
+    /// rarely shrink under deflate, so skipping them saves CPU, and a connection that
+    /// only sends small messages never allocates a compressor. Only messages sent as a
+    /// single frame are skipped; fragmented messages are always compressed.
+    ///
+    /// Default: `0` (compress every message)
+    pub compression_threshold: usize,
+
+    /// Where deflate state waits between messages in no-context-takeover mode.
+    ///
+    /// Without a pool, each connection keeps its own compressor and decompressor for
+    /// its whole life. With one, a direction that negotiated no context takeover
+    /// borrows state for one message at a time. See [`DeflatePool`].
+    ///
+    /// Default: `None`
+    pub pool: Option<DeflatePool>,
 }
 
 impl DeflateOptions {
@@ -675,6 +762,8 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -694,6 +783,8 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -714,6 +805,8 @@ impl DeflateOptions {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         }
     }
 
@@ -780,6 +873,8 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -805,6 +900,8 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -830,6 +927,8 @@ mod tests {
             client_max_window_bits: Some(15),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -857,6 +956,8 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -884,6 +985,8 @@ mod tests {
             client_max_window_bits: Some(13),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -911,6 +1014,8 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -936,6 +1041,8 @@ mod tests {
             client_max_window_bits: Some(14),
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         #[cfg(not(feature = "zlib"))]
@@ -943,6 +1050,8 @@ mod tests {
             level: CompressionLevel::default(),
             server_no_context_takeover: true,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         #[cfg(feature = "zlib")]
@@ -991,6 +1100,8 @@ mod tests {
             client_max_window_bits: Some(13),
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1016,6 +1127,8 @@ mod tests {
             client_max_window_bits: None,
             server_no_context_takeover: false,
             client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
         };
 
         let client_offer = WebSocketExtensions {
@@ -1053,6 +1166,8 @@ mod tests {
                 client_max_window_bits: Some(12), // Server prefers 12
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
+                compression_threshold: 0,
+                pool: None,
             };
 
             let merged = server.merge(&client_offer);
@@ -1074,6 +1189,8 @@ mod tests {
                 level: CompressionLevel::default(),
                 server_no_context_takeover: false,
                 client_no_context_takeover: false,
+                compression_threshold: 0,
+                pool: None,
             };
 
             let merged = server.merge(&client_offer);
