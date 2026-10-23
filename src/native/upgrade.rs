@@ -76,9 +76,9 @@ pub struct IncomingUpgrade {
     /// This handles the low-level protocol transition after handshake is complete.
     on_upgrade: hyper::upgrade::OnUpgrade,
 
-    /// Optional WebSocket extensions negotiated with the client, such as permessage-deflate compression.
-    /// These configure protocol-level behavior if enabled.
-    extensions: Option<WebSocketExtensions>,
+    /// The client's permessage-deflate offers, most preferred first.
+    /// [`IncomingUpgrade::upgrade`] answers one of them once it knows the server's options.
+    offers: Vec<WebSocketExtensions>,
 }
 
 #[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
@@ -142,7 +142,7 @@ impl IncomingUpgrade {
             None => Response::builder().status(hyper::StatusCode::OK),
         };
 
-        let extensions = WebSocketExtensions::agree(options.compression.as_ref(), self.extensions);
+        let extensions = WebSocketExtensions::agree(options.compression.as_ref(), &self.offers);
 
         let builder = match extensions.as_ref() {
             Some(offer) => builder.header(header::SEC_WEBSOCKET_EXTENSIONS, offer.to_string()),
@@ -232,7 +232,7 @@ where
             return Err(hyper::StatusCode::BAD_REQUEST);
         }
 
-        let extensions = WebSocketExtensions::from_headers(&parts.headers);
+        let offers = WebSocketExtensions::offers(&parts.headers);
 
         let on_upgrade = parts
             .extensions
@@ -241,7 +241,7 @@ where
 
         Ok(Self {
             on_upgrade,
-            extensions,
+            offers,
             key,
         })
     }

@@ -13,6 +13,8 @@ use nom::{
 
 use crate::{CompressionLevel, DeflateOptions, Role, WebSocketError};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod offer;
 mod pool;
 
 pub use pool::DeflatePool;
@@ -39,12 +41,13 @@ pub struct WebSocketExtensions {
 }
 
 impl WebSocketExtensions {
-    /// Reads the `Sec-WebSocket-Extensions` header out of a handshake message.
+    /// Reads the `Sec-WebSocket-Extensions` header out of a handshake response.
     ///
     /// A missing header and one that fails to parse are both treated as "nothing
     /// negotiated": the peer offered nothing this side can act on, and the connection
-    /// proceeds without extensions rather than failing. Every handshake path, client and
-    /// server, HTTP/1.1 and HTTP/2, reads the header this way.
+    /// proceeds without extensions rather than failing. Both client handshake paths,
+    /// HTTP/1.1 and HTTP/2, read the server's answer this way. A server reads the client's
+    /// offers with [`WebSocketExtensions::offers`] instead, which takes every offer.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_headers(headers: &hyper::HeaderMap) -> Option<Self> {
         use std::str::FromStr;
@@ -56,17 +59,32 @@ impl WebSocketExtensions {
             .and_then(std::result::Result::ok)
     }
 
-    /// Resolves what a server should answer with, given what the client offered.
+    /// Resolves what a server should answer with, given the client's offers, most
+    /// preferred first.
     ///
     /// Compression is only negotiated when both sides want it: a client that offered
     /// nothing gets nothing, and a server with compression disabled ignores whatever was
-    /// offered. Otherwise the two are merged into the terms both can honor.
+    /// offered. Otherwise the server answers the first offer it can honor, merged with its
+    /// own settings, and declines the rest.
+    ///
+    /// An offer may limit the window the server compresses with, and accepting it means
+    /// keeping to that limit (RFC 7692, Section 7.1.2.1). zlib's raw deflate has no 8-bit
+    /// window and the default backend always uses the full 32 KiB one, so an offer asking
+    /// for less than this side's compressor can do is declined.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn agree(server: Option<&DeflateOptions>, client: Option<Self>) -> Option<Self> {
-        match (server, client) {
-            (Some(server), Some(client)) => Some(server.merge(&client)),
-            _ => None,
-        }
+    pub(crate) fn agree(server: Option<&DeflateOptions>, offers: &[Self]) -> Option<Self> {
+        #[cfg(feature = "zlib")]
+        let smallest_window = *WINDOW_BITS.start();
+        #[cfg(not(feature = "zlib"))]
+        let smallest_window = *WINDOW_BITS.end();
+
+        let server = server?;
+        offers
+            .iter()
+            .find(|offer| {
+                !matches!(offer.server_max_window_bits, Some(Some(bits)) if bits < smallest_window)
+            })
+            .map(|offer| server.merge(offer))
     }
 }
 
@@ -99,7 +117,7 @@ impl std::fmt::Display for WebSocketExtensions {
         write!(f, "{PERMESSAGE_DEFLATE}")?;
 
         match self.server_max_window_bits {
-            Some(Some(bits)) if (9..16).contains(&bits) => {
+            Some(Some(bits)) if NEGOTIABLE_WINDOW_BITS.contains(&bits) => {
                 write!(f, "; server_max_window_bits={bits}")?;
             }
             Some(_) => {
@@ -109,7 +127,7 @@ impl std::fmt::Display for WebSocketExtensions {
         }
 
         match self.client_max_window_bits {
-            Some(Some(bits)) if (9..16).contains(&bits) => {
+            Some(Some(bits)) if NEGOTIABLE_WINDOW_BITS.contains(&bits) => {
                 write!(f, "; client_max_window_bits={bits}")?;
             }
             Some(_) => {
@@ -260,7 +278,10 @@ pub(crate) struct HalfConfig {
 
 /// The window sizes deflate accepts. Peers may negotiate values outside this range, and
 /// the RFC 7692 lower bound of 8 is not usable with every backend.
-const WINDOW_BITS: std::ops::RangeInclusive<u8> = 9..=15;
+pub(crate) const WINDOW_BITS: std::ops::RangeInclusive<u8> = 9..=15;
+
+/// The window sizes RFC 7692 lets an offer or a response name (Section 7.1.2).
+pub(crate) const NEGOTIABLE_WINDOW_BITS: std::ops::RangeInclusive<u8> = 8..=15;
 
 /// Resolved permessage-deflate configuration for a connection.
 ///

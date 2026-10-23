@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - With the `zlib` backend and context takeover, sending an empty message right
   after another message no longer hangs.
+- A server negotiates permessage-deflate with a client that offers it several
+  times, lists other extensions beside it, quotes a parameter value or splits
+  `Sec-WebSocket-Extensions` across header lines. It used to turn compression
+  off; it now answers the first offer it can honor.
+- A server declines a permessage-deflate offer that RFC 7692 has it decline: a
+  parameter the RFC does not define, a parameter given twice, a value the
+  parameter does not allow, or a server window smaller than its compressor can
+  use (8 bits with `zlib`, anything below 15 without it). Without `zlib` it used
+  to accept a smaller window and compress with the full 32 KiB one anyway.
+- A server no longer sends `client_max_window_bits` to a client that did not
+  offer it, which RFC 7692 forbids, so `with_client_max_window_bits` no longer
+  limits such a client. An 8-bit window is written as `=8` instead of without
+  its value.
 
 ## [0.5.0] - 2026-10-22
 
