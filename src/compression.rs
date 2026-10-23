@@ -513,10 +513,11 @@ impl Deflate {
 
             // zlib writes nothing for a sync flush right after another, since the
             // stream already ends on one. Write the empty stored block it would have,
-            // which the stream, byte-aligned by the last flush, can take as is.
+            // minus the suffix, which the stream, byte-aligned by the last flush, can
+            // take as is.
             if written == 0 && status == Status::BufError {
                 output.put_u8(0x0);
-                output.extend_from_slice(&[0x0, 0x0, 0xff, 0xff]);
+                break;
             }
 
             // FlushCompress::Sync writes the end of the stream, indicating the stream is finished
