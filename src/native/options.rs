@@ -473,6 +473,12 @@ impl Options {
     /// fragmented into multiple frames. Each fragment will have a payload size
     /// at or below this limit.
     ///
+    /// With compression, the limit applies to the payload before compression,
+    /// so a compressed frame on the wire can be slightly larger. To bound the
+    /// memory a large message holds while the transport is slow, send it as
+    /// manual fragments (`fin = false`, then `Continuation` frames) with this
+    /// option unset, and await each send.
+    ///
     /// # Parameters
     /// - `size`: Maximum fragment size in bytes
     ///

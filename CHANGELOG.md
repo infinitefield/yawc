@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- With the `zlib` backend and context takeover, sending an empty message right
+  after another message no longer hangs.
+
 ## [0.5.0] - 2026-10-22
 
 Cuts the memory an idle connection holds. A server that imposes no context
