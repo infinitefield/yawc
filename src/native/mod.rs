@@ -1123,9 +1123,8 @@ impl WebSocket<HttpStream> {
             return Err(WebSocketError::InvalidSecWebsocketVersion);
         }
 
-        let client_extensions = WebSocketExtensions::from_headers(request.headers());
-        let extensions =
-            WebSocketExtensions::agree(options.compression.as_ref(), client_extensions);
+        let offers = WebSocketExtensions::offers(request.headers());
+        let extensions = WebSocketExtensions::agree(options.compression.as_ref(), &offers);
 
         let builder = match extensions.as_ref() {
             Some(offer) => builder.header(header::SEC_WEBSOCKET_EXTENSIONS, offer.to_string()),

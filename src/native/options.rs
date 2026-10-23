@@ -3,6 +3,8 @@
 use std::time::Duration;
 
 use crate::compression::{DeflatePool, WebSocketExtensions};
+#[cfg(feature = "zlib")]
+use crate::compression::{NEGOTIABLE_WINDOW_BITS, WINDOW_BITS};
 
 /// Type alias for the compression level used in WebSocket compression settings.
 ///
@@ -816,8 +818,23 @@ impl DeflateOptions {
         }
     }
 
-    /// Called by the server when upgrading.
+    /// Called by the server when upgrading, with an offer [`WebSocketExtensions::agree`]
+    /// found this side can honor.
     pub(crate) fn merge(&self, offered: &WebSocketExtensions) -> WebSocketExtensions {
+        // The answer names only windows RFC 7692 allows, and never a server window smaller
+        // than the compressor can use.
+        #[cfg(feature = "zlib")]
+        let server_preference = self
+            .server_max_window_bits
+            .map(|bits| bits.clamp(*WINDOW_BITS.start(), *WINDOW_BITS.end()));
+        #[cfg(feature = "zlib")]
+        let client_preference = self.client_max_window_bits.map(|bits| {
+            bits.clamp(
+                *NEGOTIABLE_WINDOW_BITS.start(),
+                *NEGOTIABLE_WINDOW_BITS.end(),
+            )
+        });
+
         WebSocketExtensions {
             // Accept client's no_context_takeover settings
             client_no_context_takeover: offered.client_no_context_takeover
@@ -826,10 +843,7 @@ impl DeflateOptions {
                 || self.server_no_context_takeover,
             // For window bits, take the minimum of what client offers and what server supports
             #[cfg(feature = "zlib")]
-            client_max_window_bits: match (
-                offered.client_max_window_bits,
-                self.client_max_window_bits,
-            ) {
+            client_max_window_bits: match (offered.client_max_window_bits, client_preference) {
                 // Client offers specific value, server has preference: take minimum
                 (Some(Some(c)), Some(s)) => Some(Some(c.min(s))),
                 // Client offers specific value, server has no preference: use client's
@@ -838,14 +852,12 @@ impl DeflateOptions {
                 (Some(None), Some(s)) => Some(Some(s)),
                 // Client offers parameter without value, server has no preference: use the minimum value
                 (Some(None), None) => Some(Some(9)),
-                // Client doesn't offer, use server's preference (if any)
-                (None, s) => s.map(Some),
+                // A client that did not offer the parameter must not get it back
+                // (RFC 7692, Section 7.1.2.2), so the server's preference goes unsent.
+                (None, _) => None,
             },
             #[cfg(feature = "zlib")]
-            server_max_window_bits: match (
-                offered.server_max_window_bits,
-                self.server_max_window_bits,
-            ) {
+            server_max_window_bits: match (offered.server_max_window_bits, server_preference) {
                 // Client offers specific value, server has preference: take minimum
                 (Some(Some(c)), Some(s)) => Some(Some(c.min(s))),
                 // Client offers specific value, server has no preference: use client's
@@ -859,8 +871,11 @@ impl DeflateOptions {
             },
             #[cfg(not(feature = "zlib"))]
             client_max_window_bits: None,
+            // Accepting an offer that limits the server's window means repeating the limit
+            // (RFC 7692, Section 7.1.2.1). This backend only takes offers that allow the
+            // full window.
             #[cfg(not(feature = "zlib"))]
-            server_max_window_bits: None,
+            server_max_window_bits: offered.server_max_window_bits,
         }
     }
 }
@@ -1004,9 +1019,81 @@ mod tests {
 
         let merged = server.merge(&client_offer);
 
-        // When client doesn't specify, use server's preference
+        // The server may limit its own window unasked, but a client that did not offer
+        // client_max_window_bits must not get it back (RFC 7692, Section 7.1.2.2).
         assert_eq!(merged.server_max_window_bits, Some(Some(14)));
-        assert_eq!(merged.client_max_window_bits, Some(Some(13)));
+        assert_eq!(merged.client_max_window_bits, None);
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_names_only_windows_both_sides_can_keep_to() {
+        let server = DeflateOptions {
+            level: CompressionLevel::default(),
+            // zlib's raw deflate has no 8-bit window, so the answer may not promise one.
+            server_max_window_bits: Some(8),
+            // Past what RFC 7692 lets an answer name.
+            client_max_window_bits: Some(20),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+            compression_threshold: 0,
+            pool: None,
+        };
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(Some(12)),
+            client_max_window_bits: Some(None),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        let merged = server.merge(&client_offer);
+
+        assert_eq!(merged.server_max_window_bits, Some(Some(9)));
+        assert_eq!(merged.client_max_window_bits, Some(Some(15)));
+        assert_eq!(
+            merged.to_string(),
+            "permessage-deflate; server_max_window_bits=9; client_max_window_bits=15"
+        );
+    }
+
+    #[cfg(feature = "zlib")]
+    #[test]
+    fn test_merge_writes_an_8_bit_client_window() {
+        let server = DeflateOptions::default();
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: None,
+            client_max_window_bits: Some(Some(8)),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        // RFC 7692 gives the value from 8 to 15, and an answer cannot leave it out.
+        assert_eq!(
+            server.merge(&client_offer).to_string(),
+            "permessage-deflate; client_max_window_bits=8"
+        );
+    }
+
+    #[cfg(not(feature = "zlib"))]
+    #[test]
+    fn test_merge_repeats_the_full_server_window_it_accepted() {
+        let server = DeflateOptions::default();
+
+        let client_offer = WebSocketExtensions {
+            server_max_window_bits: Some(Some(15)),
+            client_max_window_bits: Some(Some(10)),
+            server_no_context_takeover: false,
+            client_no_context_takeover: false,
+        };
+
+        // Accepting the limit means naming it (RFC 7692, Section 7.1.2.1). The client's
+        // window is only a hint, and this backend leaves it out.
+        assert_eq!(
+            server.merge(&client_offer).to_string(),
+            "permessage-deflate; server_max_window_bits=15"
+        );
     }
 
     #[cfg(feature = "zlib")]
