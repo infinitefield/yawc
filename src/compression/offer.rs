@@ -154,7 +154,8 @@ impl<'a> Input<'a> {
     }
 
     /// Consumes a parameter value: a `token`, or a `quoted-string` with its escapes
-    /// removed (RFC 7230, Section 3.2.6).
+    /// removed (RFC 7230, Section 3.2.6), which must then be a `token` too (RFC 6455,
+    /// Section 9.1).
     fn value(&mut self) -> Option<Cow<'a, str>> {
         if !self.eat(b'"') {
             return self.token().map(Cow::Borrowed);
@@ -167,7 +168,8 @@ impl<'a> Input<'a> {
             match c {
                 '"' => {
                     self.0 = &rest[index + 1..];
-                    return Some(Cow::Owned(value));
+                    let is_token = !value.is_empty() && value.bytes().all(is_tchar);
+                    return is_token.then_some(Cow::Owned(value));
                 }
                 '\\' => value.push(chars.next()?.1),
                 c => value.push(c),
@@ -288,7 +290,7 @@ mod tests {
             "permessage-deflate; server_max_window_bits=10; server_max_window_bits=12",
             // Values the parameters do not allow.
             "permessage-deflate; server_no_context_takeover=1",
-            "permessage-deflate; client_no_context_takeover=\"\"",
+            "permessage-deflate; client_no_context_takeover=\"1\"",
             "permessage-deflate; server_max_window_bits",
             "permessage-deflate; server_max_window_bits=7",
             "permessage-deflate; server_max_window_bits=16",
@@ -316,6 +318,10 @@ mod tests {
             &["permessage-deflate client_no_context_takeover"],
             &["permessage-deflate;"],
             &["permessage-deflate", "; server_no_context_takeover"],
+            // A quoted value that is not a token once unescaped, even in another
+            // extension (RFC 6455, Section 9.1).
+            &[r#"permessage-deflate, x-test; parameter="a b""#],
+            &["permessage-deflate, x-test; parameter=\"\""],
         ] {
             assert!(offers(lines).is_empty(), "{lines:?}");
         }
