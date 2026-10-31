@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offer it, which RFC 7692 forbids, so `with_client_max_window_bits` no longer
   limits such a client. An 8-bit window is written as `=8` instead of without
   its value.
+- A client completes the handshake when the server's `Connection` header lists
+  other options beside `Upgrade`, such as `keep-alive, Upgrade`, or is split
+  across header lines, as RFC 6455 allows. It used to fail with
+  `InvalidConnectionHeader`.
 
 ## [0.5.0] - 2026-10-22
 
