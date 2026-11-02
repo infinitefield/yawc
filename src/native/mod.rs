@@ -1443,12 +1443,7 @@ fn verify_reqwest(
         return Err(WebSocketError::InvalidUpgradeHeader);
     }
 
-    if !headers
-        .get(reqwest::header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.eq_ignore_ascii_case("Upgrade"))
-        .unwrap_or(false)
-    {
+    if !connection_lists_upgrade(headers) {
         return Err(WebSocketError::InvalidConnectionHeader);
     }
 
@@ -1496,12 +1491,7 @@ fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<
         return Err(WebSocketError::InvalidUpgradeHeader);
     }
 
-    if !headers
-        .get(header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.eq_ignore_ascii_case("Upgrade"))
-        .unwrap_or(false)
-    {
+    if !connection_lists_upgrade(headers) {
         return Err(WebSocketError::InvalidConnectionHeader);
     }
 
@@ -1515,6 +1505,21 @@ fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<
     let extensions = WebSocketExtensions::from_headers(headers);
 
     Negotiation::new(extensions, &options, Role::Client)
+}
+
+/// Whether the `Connection` header lists the `upgrade` option.
+///
+/// RFC 6455 4.1 has the client fail the connection otherwise. The header is a
+/// comma-separated list that can name other options as well and can be split across
+/// header lines (RFC 7230, Sections 3.2.2 and 6.1), so `keep-alive, Upgrade` is accepted.
+fn connection_lists_upgrade(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|option| option.trim_matches([' ', '\t']))
+        .any(|option| option.eq_ignore_ascii_case("upgrade"))
 }
 
 /// Checks the server's `Sec-WebSocket-Accept` against the key we sent.
@@ -1791,6 +1796,44 @@ mod tests {
             // and the same accept must not validate a different key
             assert!(super::verify_accept(Some(accept.as_bytes()), RFC_KEY).is_err());
         }
+    }
+
+    /// Checks a response whose `Connection` header lines are `lines`.
+    fn lists_upgrade(lines: &[&'static str]) -> bool {
+        let mut headers = hyper::HeaderMap::new();
+        for &line in lines {
+            headers.append(
+                hyper::header::CONNECTION,
+                hyper::header::HeaderValue::from_static(line),
+            );
+        }
+        super::connection_lists_upgrade(&headers)
+    }
+
+    #[test]
+    fn connection_may_list_upgrade_among_other_options() {
+        assert!(lists_upgrade(&["Upgrade"]));
+        // tokens compare case-insensitively
+        assert!(lists_upgrade(&["upgrade"]));
+        // other options before or after it, with or without spaces
+        assert!(lists_upgrade(&["keep-alive, Upgrade"]));
+        assert!(lists_upgrade(&["Upgrade,Keep-Alive"]));
+        // tabs, and empty elements, which a recipient skips (RFC 7230, Section 7)
+        assert!(lists_upgrade(&[",\tUpgrade ,"]));
+        // the list split across header lines
+        assert!(lists_upgrade(&["keep-alive", "Upgrade"]));
+    }
+
+    #[test]
+    fn connection_without_upgrade_is_rejected() {
+        // header omitted entirely
+        assert!(!lists_upgrade(&[]));
+        // empty value
+        assert!(!lists_upgrade(&[""]));
+        assert!(!lists_upgrade(&["keep-alive"]));
+        assert!(!lists_upgrade(&["keep-alive", "close"]));
+        // a different option that starts with the word
+        assert!(!lists_upgrade(&["upgraded"]));
     }
 
     use super::*;
@@ -2768,6 +2811,50 @@ mod tests {
             matches!(result, Err(WebSocketError::CompressionNotSupported)),
             "expected the handshake to fail, got a different outcome"
         );
+    }
+
+    /// RFC 6455, Section 4.1 asks only that the response's `Connection` header contain the
+    /// `Upgrade` token, so a server or proxy may list other options beside it.
+    #[tokio::test]
+    async fn test_connection_header_listing_other_options_completes_handshake() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (client_io, mut peer) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                match peer.read(&mut byte).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => request.push(byte[0]),
+                }
+            }
+
+            let request = String::from_utf8_lossy(&request);
+            let key = request
+                .lines()
+                .find_map(|line| line.strip_prefix("sec-websocket-key: "))
+                .expect("client sent a key");
+            let accept = super::upgrade::sec_websocket_protocol(key.as_bytes());
+
+            let handshake = format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 upgrade: websocket\r\n\
+                 connection: keep-alive, Upgrade\r\n\
+                 sec-websocket-accept: {accept}\r\n\
+                 \r\n"
+            );
+            let _ = peer.write_all(handshake.as_bytes()).await;
+            std::future::pending::<()>().await;
+        });
+
+        WebSocket::handshake(
+            "ws://localhost/".parse().expect("url"),
+            client_io,
+            Options::default(),
+        )
+        .await
+        .expect("handshake");
     }
 
     /// `localhost` usually also resolves to `::1`, which an IPv4 local address must skip.
