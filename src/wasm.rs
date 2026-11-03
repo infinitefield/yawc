@@ -1,7 +1,5 @@
-use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver},
-    stream::StreamExt,
-};
+use futures_channel::mpsc::{unbounded, UnboundedReceiver};
+use futures_util::{Sink, Stream, StreamExt};
 use std::{
     pin::Pin,
     str::FromStr,
@@ -171,7 +169,6 @@ impl WebSocket {
     ///
     /// A Result containing the received frame or an error
     pub async fn next_frame(&mut self) -> Result<Frame> {
-        use futures::StreamExt;
         match self.next().await {
             Some(res) => res,
             None => Err(WebSocketError::ConnectionClosed),
@@ -193,7 +190,7 @@ impl Drop for WebSocket {
     }
 }
 
-impl futures::Sink<Frame> for WebSocket {
+impl Sink<Frame> for WebSocket {
     type Error = WebSocketError;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -237,7 +234,7 @@ impl futures::Sink<Frame> for WebSocket {
     }
 }
 
-impl futures::Stream for WebSocket {
+impl Stream for WebSocket {
     type Item = Result<Frame>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

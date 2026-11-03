@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::{Args, ValueEnum};
-use futures::SinkExt;
+use futures_util::SinkExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     time::{timeout, Instant},

@@ -134,7 +134,7 @@ use std::{
     task::{ready, Context, Poll},
 };
 
-use futures::SinkExt;
+use futures_util::{Sink, SinkExt, Stream};
 
 use crate::{
     close::CloseCode,
@@ -236,9 +236,9 @@ impl ReadHalf {
     /// returns `Poll::Ready(Err(WebSocketError::ConnectionClosed))`.
     pub fn poll_frame<S>(&mut self, stream: &mut S, cx: &mut Context<'_>) -> Poll<Result<Frame>>
     where
-        S: futures::Stream<Item = Result<Frame>> + Unpin,
+        S: Stream<Item = Result<Frame>> + Unpin,
     {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         if self.is_closed {
             return Poll::Ready(Err(WebSocketError::ConnectionClosed));
@@ -317,7 +317,7 @@ impl ReadHalf {
     /// ```
     pub async fn next_frame<S>(&mut self, stream: &mut S) -> Result<Frame>
     where
-        S: futures::Stream<Item = Result<Frame>> + Unpin,
+        S: Stream<Item = Result<Frame>> + Unpin,
     {
         poll_fn(|cx| self.poll_frame(stream, cx)).await
     }
@@ -377,7 +377,7 @@ impl WriteHalf {
     /// - `Poll::Ready(Err(WebSocketError::ConnectionClosed))` if the connection is closed.
     pub fn poll_ready<S>(&mut self, stream: &mut S, cx: &mut Context<'_>) -> Poll<Result<()>>
     where
-        S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
+        S: Sink<Frame, Error = WebSocketError> + Unpin,
     {
         if matches!(self.close_state, Some(CloseState::Done)) {
             return Poll::Ready(Err(WebSocketError::ConnectionClosed));
@@ -413,7 +413,7 @@ impl WriteHalf {
     /// - Close frames transition the connection to closing state
     pub fn start_send<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
     where
-        S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
+        S: Sink<Frame, Error = WebSocketError> + Unpin,
     {
         if frame.opcode == OpCode::Close {
             self.close_state = Some(CloseState::Flushing);
@@ -436,7 +436,7 @@ impl WriteHalf {
         );
 
         // Send directly to the underlying stream (fragmentation happens in WebSocket layer now)
-        use futures::SinkExt;
+        use futures_util::SinkExt;
         stream.start_send_unpin(frame)?;
 
         Ok(())
@@ -455,10 +455,10 @@ impl WriteHalf {
     /// - `Poll::Pending` if there are still frames waiting to be flushed.
     pub fn poll_flush<S>(&mut self, stream: &mut S, cx: &mut Context<'_>) -> Poll<Result<()>>
     where
-        S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
+        S: Sink<Frame, Error = WebSocketError> + Unpin,
     {
         // Just flush the underlying stream (no queue to drain anymore)
-        use futures::SinkExt;
+        use futures_util::SinkExt;
         stream.poll_flush_unpin(cx)
     }
 
@@ -481,7 +481,7 @@ impl WriteHalf {
     /// - `Poll::Pending` if the closure is still in progress.
     pub fn poll_close<S>(&mut self, stream: &mut S, cx: &mut Context<'_>) -> Poll<Result<()>>
     where
-        S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
+        S: Sink<Frame, Error = WebSocketError> + Unpin,
     {
         loop {
             match self.close_state.take() {
@@ -542,7 +542,7 @@ impl WriteHalf {
     /// ```
     pub async fn send_frame<S>(&mut self, stream: &mut S, frame: Frame) -> Result<()>
     where
-        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+        S: Sink<Frame, Error = crate::WebSocketError> + Unpin,
     {
         // Wait until ready
         poll_fn(|cx| self.poll_ready(stream, cx)).await?;
@@ -575,7 +575,7 @@ impl WriteHalf {
     /// ```
     pub async fn close<S>(&mut self, stream: &mut S) -> Result<()>
     where
-        S: futures::Sink<Frame, Error = crate::WebSocketError> + Unpin,
+        S: Sink<Frame, Error = crate::WebSocketError> + Unpin,
     {
         poll_fn(|cx| self.poll_close(stream, cx)).await
     }

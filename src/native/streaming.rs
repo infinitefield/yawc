@@ -59,6 +59,7 @@ use std::{
 use crate::{close::CloseCode, codec, Negotiation, OpCode, Result, Role};
 
 use bytes::{Bytes, BytesMut};
+use futures_util::{Sink, Stream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, FramedParts};
 
@@ -448,7 +449,7 @@ where
     }
 }
 
-impl<S> futures::Stream for Streaming<S>
+impl<S> Stream for Streaming<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -463,7 +464,7 @@ where
     }
 }
 
-impl<S> futures::Sink<Frame> for Streaming<S>
+impl<S> Sink<Frame> for Streaming<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {

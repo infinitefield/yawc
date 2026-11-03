@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{future::BoxFuture, FutureExt};
+use futures_util::{future::BoxFuture, FutureExt};
 #[cfg(feature = "tls")]
 use tokio_rustls::TlsConnector;
 use url::Url;

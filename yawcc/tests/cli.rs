@@ -1,7 +1,7 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures::SinkExt;
+use futures_util::SinkExt;
 use sha1::{Digest, Sha1};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},

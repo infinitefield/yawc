@@ -131,7 +131,7 @@ use tokio_rustls::TlsConnector;
 use {
     bytes::{Bytes, BytesMut},
     http_body_util::Empty,
-    hyper::{body::Incoming, header, upgrade::Upgraded, Request, Response, StatusCode},
+    hyper::{header, upgrade::Upgraded, HeaderMap, Request, Response, StatusCode},
     hyper_util::rt::TokioIo,
     tokio::net::{lookup_host, TcpSocket, TcpStream, ToSocketAddrs},
 };
@@ -145,7 +145,7 @@ use std::{
     pin::{pin, Pin},
     str::FromStr,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{ready, Context, Poll, Waker},
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -153,7 +153,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use builder::WsBuilderOpts;
 use codec::Codec;
 use compression::{CompressionConfig, Compressor, Decompressor, WebSocketExtensions};
-use futures::{task::AtomicWaker, SinkExt};
+use futures_util::{
+    task::{waker_ref, ArcWake, AtomicWaker},
+    Sink, SinkExt, Stream,
+};
 #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
 use tokio_util::codec::Framed;
@@ -343,7 +346,7 @@ struct WakeProxy {
     write_waker: AtomicWaker,
 }
 
-impl futures::task::ArcWake for WakeProxy {
+impl ArcWake for WakeProxy {
     fn wake_by_ref(this: &Arc<Self>) {
         match (this.read_waker.take(), this.write_waker.take()) {
             (Some(read), Some(write)) => {
@@ -361,7 +364,7 @@ impl futures::task::ArcWake for WakeProxy {
 
 impl WakeProxy {
     #[inline]
-    fn set_waker(&self, kind: ContextKind, waker: &futures::task::Waker) {
+    fn set_waker(&self, kind: ContextKind, waker: &Waker) {
         match kind {
             ContextKind::Read => {
                 self.read_waker.register(waker);
@@ -394,7 +397,7 @@ impl WakeProxy {
     where
         F: FnOnce(&mut Context<'_>) -> R,
     {
-        let waker = futures::task::waker_ref(self);
+        let waker = waker_ref(self);
         let mut cx = Context::from_waker(&waker);
         f(&mut cx)
     }
@@ -1078,7 +1081,7 @@ impl WebSocket<HttpStream> {
         };
 
         let response = req.send().await?;
-        let negotiated = verify_reqwest(&response, &key, options)?;
+        let negotiated = verify_upgrade(response.status(), response.headers(), &key, &options)?;
 
         let upgraded = response.upgrade().await?;
 
@@ -1345,7 +1348,7 @@ where
     }
 }
 
-impl<S> futures::Stream for WebSocket<S>
+impl<S> Stream for WebSocket<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1360,7 +1363,7 @@ where
     }
 }
 
-impl<S> futures::Sink<Frame> for WebSocket<S>
+impl<S> Sink<Frame> for WebSocket<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1420,51 +1423,7 @@ where
 
 // ================ Helper functions ====================
 
-#[cfg(feature = "reqwest")]
-fn verify_reqwest(
-    response: &reqwest::Response,
-    key: &str,
-    options: Options,
-) -> Result<Negotiation> {
-    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(WebSocketError::InvalidStatusCode(
-            response.status().as_u16(),
-        ));
-    }
-
-    let headers = response.headers();
-
-    if !headers
-        .get(reqwest::header::UPGRADE)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false)
-    {
-        return Err(WebSocketError::InvalidUpgradeHeader);
-    }
-
-    if !headers
-        .get(reqwest::header::CONNECTION)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.eq_ignore_ascii_case("Upgrade"))
-        .unwrap_or(false)
-    {
-        return Err(WebSocketError::InvalidConnectionHeader);
-    }
-
-    verify_accept(
-        headers
-            .get(header::SEC_WEBSOCKET_ACCEPT)
-            .map(|value| value.as_bytes()),
-        key,
-    )?;
-
-    let extensions = WebSocketExtensions::from_headers(headers);
-
-    Negotiation::new(extensions, &options, Role::Client)
-}
-
-fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<Negotiation> {
+fn verify<B>(response: &Response<B>, key: &str, options: Options) -> Result<Negotiation> {
     // Detect HTTP redirects before checking for 101.
     if response.status().is_redirection() {
         let location = response
@@ -1479,13 +1438,18 @@ fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<
         });
     }
 
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return Err(WebSocketError::InvalidStatusCode(
-            response.status().as_u16(),
-        ));
-    }
+    verify_upgrade(response.status(), response.headers(), key, &options)
+}
 
-    let headers = response.headers();
+fn verify_upgrade(
+    status: StatusCode,
+    headers: &HeaderMap,
+    key: &str,
+    options: &Options,
+) -> Result<Negotiation> {
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        return Err(WebSocketError::InvalidStatusCode(status.as_u16()));
+    }
 
     if !headers
         .get(header::UPGRADE)
@@ -1514,7 +1478,7 @@ fn verify(response: &Response<Incoming>, key: &str, options: Options) -> Result<
 
     let extensions = WebSocketExtensions::from_headers(headers);
 
-    Negotiation::new(extensions, &options, Role::Client)
+    Negotiation::new(extensions, options, Role::Client)
 }
 
 /// Checks the server's `Sec-WebSocket-Accept` against the key we sent.
@@ -1794,7 +1758,7 @@ mod tests {
     }
 
     use super::*;
-    use futures::SinkExt;
+    use futures_util::SinkExt;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -2131,7 +2095,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_trait_implementation() {
-        use futures::StreamExt;
+        use futures_util::StreamExt;
 
         let (mut client, mut server) = create_websocket_pair(1024);
 
@@ -2157,7 +2121,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_trait_implementation() {
-        use futures::SinkExt;
+        use futures_util::SinkExt;
 
         let (mut client, mut server) = create_websocket_pair(1024);
 
@@ -2816,7 +2780,7 @@ mod tests {
 #[cfg(test)]
 mod wake_tests {
     use super::{ContextKind, WakeProxy};
-    use futures::task::ArcWake;
+    use futures_util::task::ArcWake;
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2922,3 +2886,6 @@ mod wake_tests {
         assert_eq!(new.0.load(Ordering::Relaxed), 1);
     }
 }
+
+#[cfg(test)]
+mod handshake_tests;

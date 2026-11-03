@@ -37,7 +37,7 @@ tokio = { version = "1.43.1", features = [
     "sync",
 ] }
 url = "2.5.3"
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
+futures-util = { version = "0.3.31", default-features = false, features = ["std", "sink"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "aws-lc-rs",
     "logging",
@@ -52,7 +52,7 @@ http-body-util = "0.1.2"
 chrono = "0.4.41"
 base64 = "0.22"
 sha1 = "0.10"
-rand = "0.9"
+rand = "0.8"
 rustls-pemfile = "2"
 webpki-roots = "1"
 percent-encoding = "2"

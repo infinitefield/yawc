@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{ensure, Context};
 use clap::Args;
-use futures::SinkExt;
+use futures_util::SinkExt;
 use http_body_util::Empty;
 use hyper::{
     body::{Bytes, Incoming},

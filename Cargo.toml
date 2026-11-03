@@ -36,6 +36,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["tls", "rustls-ring"]
 zlib = ["flate2/any_zlib", "flate2/zlib-rs"]
 simd = ["simdutf8"]
+serde = []
 reqwest = ["dep:reqwest"]
 axum = ["axum-core", "http"]
 tls = ["dep:tokio-rustls"]
@@ -115,7 +116,7 @@ test = false
 [dependencies]
 url = "2"
 bytes = "1.11"
-futures = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 thiserror = "2"
 rand = "0.8"
 
@@ -133,7 +134,7 @@ web-sys = { version = "0.3", default-features = false, features = [
 ] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
+futures-channel = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 # Tokio without net features for WASM
 tokio = { version = "1", default-features = false }
@@ -163,7 +164,6 @@ http = { version = "1", optional = true }
 # Async runtime and utilities
 tokio = { version = "1", default-features = false, features = [
     "rt",
-    "macros",
     "net",
     "time",
     "io-util",
@@ -177,12 +177,11 @@ sha1 = "0.10"
 # Utilities
 nom = "8"
 percent-encoding = "2"
-pin-project = "1"
+pin-project-lite = "0.2"
 log = "0.4"
 
 # Optional dependencies
 simdutf8 = { version = "0.1", optional = true }
-serde = { version = "1", optional = true }
 smol = { version = "2.0.2", optional = true }
 
 # Compression
@@ -194,6 +193,7 @@ crossbeam-queue = "0.3"
 # ==============================================================================
 [dev-dependencies]
 anyhow = "1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 serde_json = "1"
 wasm-bindgen-test = "0.3"
 
@@ -203,7 +203,6 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 anyhow = "1"
 axum = "0.8"
-console-subscriber = "0.5.0"
 hyper = { version = "1.11", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 log = "0.4"
