@@ -43,6 +43,25 @@ fn both_clients_accept_case_insensitive_upgrade_headers() {
 }
 
 #[test]
+fn both_clients_accept_connection_token_lists() {
+    for lines in [
+        &["keep-alive, Upgrade"][..],
+        &["keep-alive", "\tUpGrAdE "][..],
+    ] {
+        let mut response = upgrade();
+        response.headers_mut().remove(header::CONNECTION);
+        for value in lines {
+            response
+                .headers_mut()
+                .append(header::CONNECTION, value.parse().unwrap());
+        }
+        for result in verify_clients(response, Options::default()) {
+            assert!(result.is_ok());
+        }
+    }
+}
+
+#[test]
 fn both_clients_reject_missing_and_invalid_headers() {
     for (name, expected) in [
         (header::UPGRADE, WebSocketError::InvalidUpgradeHeader),
