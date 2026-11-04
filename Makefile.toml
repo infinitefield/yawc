@@ -116,8 +116,9 @@ run_task = "test-runner"
 description = "Run the wasm tests in headless chrome and node"
 script_runner = "@shell"
 script = '''
-env WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome --lib
-wasm-pack test --node --lib
+cargo check --lib --target wasm32-unknown-unknown --no-default-features
+env WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --headless --chrome --lib --no-default-features --features wasm
+wasm-pack test --node --lib --no-default-features --features wasm
 '''
 
 # ------------------------------------------------------------------------------

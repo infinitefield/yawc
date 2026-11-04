@@ -451,10 +451,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1481,16 +1479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-sys"
-version = "0.3.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c435338968042f4f59a557f690a253676d47ce13ceb55d70100e7facf6620a30"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "webpki-roots"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1678,13 +1666,10 @@ dependencies = [
  "bytes",
  "crossbeam-queue",
  "flate2",
- "futures-channel",
  "futures-util",
- "getrandom 0.2.17",
  "http-body-util",
  "hyper",
  "hyper-util",
- "js-sys",
  "log",
  "nom",
  "percent-encoding",
@@ -1696,8 +1681,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "url",
- "wasm-bindgen",
- "web-sys",
  "webpki-roots",
 ]
 

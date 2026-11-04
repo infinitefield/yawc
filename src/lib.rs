@@ -6,6 +6,7 @@
 //! # Features
 //! - `reqwest`: WebSocket via reqwest HTTP client
 //! - `axum`: WebSocket extractor for axum
+//! - `wasm`: Browser WebSocket support on WebAssembly targets
 //! - `http2`: WebSockets over HTTP/2 via extended CONNECT (RFC 8441)
 //! - `tls` (default): TLS client support with a caller-supplied connector
 //! - `rustls-ring` (default), `rustls-aws-lc-rs`: TLS with bundled roots and a fallback crypto provider
@@ -130,7 +131,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[doc(hidden)]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 
 #[doc(hidden)]
@@ -150,7 +151,7 @@ pub mod mask;
 mod stream;
 
 use thiserror::Error;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use wasm::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -300,7 +301,7 @@ pub enum WebSocketError {
     #[error(transparent)]
     HTTPError(#[from] hyper::Error),
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     #[error("js value: {0:?}")]
     Js(wasm_bindgen::JsValue),
 

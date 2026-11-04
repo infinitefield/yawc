@@ -84,6 +84,7 @@ Optional Cargo features:
 | `axum` | Axum server integration |
 | `reqwest` | reqwest HTTP client integration |
 | `http2` | WebSocket extended CONNECT over HTTP/2 |
+| `wasm` | Browser WebSocket support on WebAssembly targets |
 | `simd` | SIMD UTF-8 validation |
 | `zlib` | Compression window-bit controls |
 | `tls` | TLS client support with a caller-supplied connector |
@@ -94,6 +95,15 @@ to omit the TLS dependencies. If you disable defaults and use `with_connector`, 
 Native `WebSocket::connect` calls to `wss://` URLs fail before dialing when TLS is
 disabled or no connector or fallback provider is configured. Browser WebSockets and
 caller-supplied TLS streams do not require yawc's `tls` feature.
+
+Browser WebSocket support requires the `wasm` feature:
+
+```toml
+yawc = { version = "0.5", default-features = false, features = ["wasm"] }
+```
+
+Without `wasm`, WebAssembly builds expose the frame and close-code types without
+JavaScript dependencies. Random-mask helpers also require `wasm` on WebAssembly.
 
 ## Examples and guides
 

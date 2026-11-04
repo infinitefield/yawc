@@ -657,6 +657,7 @@ impl Frame {
     /// let mut frame = Frame::text("Hello");
     /// frame.set_random_mask();
     /// ```
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm"))]
     #[inline(always)]
     pub fn set_random_mask(&mut self) {
         self.mask = Some(rand::random::<u32>().to_ne_bytes());
@@ -672,6 +673,7 @@ impl Frame {
     ///
     /// let frame = Frame::text("Hello").with_random_mask();
     /// ```
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm"))]
     #[inline(always)]
     pub fn with_random_mask(mut self) -> Self {
         self.mask = Some(rand::random::<u32>().to_ne_bytes());
@@ -753,6 +755,7 @@ impl Frame {
     }
 
     /// Generates and sets a random mask if none is already set.
+    #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     pub(super) fn set_random_mask_if_not_set(&mut self) {
         if self.mask.is_none() {

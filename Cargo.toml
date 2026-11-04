@@ -43,6 +43,15 @@ tls = ["dep:tokio-rustls"]
 rustls-ring = ["tls", "tokio-rustls/ring", "dep:webpki-roots"]
 rustls-aws-lc-rs = ["tls", "tokio-rustls/aws-lc-rs", "dep:webpki-roots"]
 smol = ["dep:smol"]
+wasm = [
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:futures-channel",
+    "dep:futures-util",
+    "dep:getrandom",
+    "dep:rand",
+]
 # WebSockets over HTTP/2 (RFC 8441)
 http2 = ["hyper/http2", "dep:h2"]
 
@@ -116,15 +125,13 @@ test = false
 [dependencies]
 url = "2"
 bytes = "1.11"
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 thiserror = "2"
-rand = "0.8"
 
 # ==============================================================================
 # WebAssembly target-specific dependencies
 # ==============================================================================
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { version = "0.3", default-features = false, features = [
+web-sys = { version = "0.3", optional = true, default-features = false, features = [
     "console",
     "WebSocket",
     "BinaryType",
@@ -132,18 +139,20 @@ web-sys = { version = "0.3", default-features = false, features = [
     "Event",
     "MessageEvent",
 ] }
-js-sys = "0.3"
-wasm-bindgen = "0.2"
-futures-channel = "0.3"
-getrandom = { version = "0.2", features = ["js"] }
-# Tokio without net features for WASM
-tokio = { version = "1", default-features = false }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+futures-channel = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
+getrandom = { version = "0.2", optional = true, features = ["js"] }
+rand = { version = "0.8", optional = true }
 
 
 # ==============================================================================
 # Native target-specific dependencies
 # ==============================================================================
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+rand = "0.8"
 # HTTP clients
 hyper = { version = "1.11", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
