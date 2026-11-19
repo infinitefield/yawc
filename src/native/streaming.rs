@@ -408,8 +408,12 @@ where
     }
 
     /// Fails the connection after `err`: queues a Close frame with the matching code and
-    /// stops reading.
+    /// stops reading. No Close is queued if this side has already sent one.
     pub(super) fn fail(&mut self, err: &WebSocketError) {
+        if self.write_half.close_sent() {
+            self.read_half.is_closed = true;
+            return;
+        }
         let code = match err {
             WebSocketError::FrameTooLarge => CloseCode::Size,
             WebSocketError::InvalidUTF8 => CloseCode::Invalid,
