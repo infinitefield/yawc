@@ -1226,9 +1226,13 @@ where
             let frame = ready!(self
                 .streaming
                 .poll_next_frame_with_limit(cx, self.fragment_layer.remaining_read_capacity()))?;
-            match self.on_frame(frame)? {
-                Some(ok) => break Poll::Ready(Ok(ok)),
-                None => continue,
+            match self.on_frame(frame) {
+                Ok(Some(ok)) => break Poll::Ready(Ok(ok)),
+                Ok(None) => continue,
+                Err(err) => {
+                    self.streaming.fail(&err);
+                    break Poll::Ready(Err(err));
+                }
             }
         }
     }
@@ -2139,6 +2143,43 @@ mod tests {
         assert_eq!(frame.opcode(), OpCode::Text);
         assert!(frame.is_utf8());
         assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), valid_utf8);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message_sends_close() {
+        for (input, code) in [
+            // A continuation frame with no message to continue.
+            (&b"\x80\x81\x00\x00\x00\x00a"[..], CloseCode::Protocol),
+            // A text message that is not UTF-8.
+            (&b"\x81\x81\x00\x00\x00\x00\xff"[..], CloseCode::Invalid),
+        ] {
+            let options = Options::default().with_utf8();
+            let negotiation = |role| Negotiation::new(None, &options, role).expect("negotiation");
+            let (client_stream, server_stream) = MockStream::pair(1024);
+            let mut server = WebSocket::new(
+                Role::Server,
+                server_stream,
+                Bytes::copy_from_slice(input),
+                negotiation(Role::Server),
+            );
+            let mut client = WebSocket::new(
+                Role::Client,
+                client_stream,
+                Bytes::new(),
+                negotiation(Role::Client),
+            );
+
+            assert!(server.next_frame().await.is_err(), "{input:?}");
+            let (closed, close) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(server.next_frame(), client.next_frame())
+            })
+            .await
+            .expect("the server must send a Close frame");
+            assert!(matches!(closed, Err(WebSocketError::ConnectionClosed)));
+            let close = close.expect("Failed to receive close frame");
+            assert_eq!(close.opcode(), OpCode::Close);
+            assert_eq!(close.close_code(), Some(code), "{input:?}");
+        }
     }
 
     #[tokio::test]

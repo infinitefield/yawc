@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other options beside `Upgrade`, such as `keep-alive, Upgrade`, or is split
   across header lines, as RFC 6455 allows. It used to fail with
   `InvalidConnectionHeader`.
+- A connection sends a Close frame before failing on a message that breaks the
+  protocol across frames: a continuation frame with no message to continue, a
+  new message before the previous one ends, an expired fragment timeout, or text
+  that is not UTF-8 with `with_utf8`. It used to return the error and send
+  nothing, unlike errors in a single frame, which already close with a code.
 
 ## [0.5.0] - 2026-10-22
 
