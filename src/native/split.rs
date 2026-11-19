@@ -363,6 +363,15 @@ impl WriteHalf {
         }
     }
 
+    /// Whether a `Close` frame has gone out on this half. A `Close` still waiting in
+    /// `CloseState::Sending` does not count: its `close()` may be dropped before it is sent.
+    pub(super) fn close_sent(&self) -> bool {
+        matches!(
+            self.close_state,
+            Some(CloseState::Flushing | CloseState::Closing | CloseState::Done)
+        )
+    }
+
     /// Polls the readiness of the `WriteHalf` to send a new frame.
     ///
     /// If the WebSocket connection is already closed, this will return an error. Otherwise, it
