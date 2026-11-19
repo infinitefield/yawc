@@ -435,6 +435,11 @@ where
                 ready!(self.write_half.poll_ready(&mut self.stream, cx))?;
 
                 let next = self.obligated_sends.pop_front().expect("obligated send");
+                // RFC 6455, Section 5.5.1: only an endpoint that has not sent a Close frame
+                // answers one.
+                if next.opcode == OpCode::Close && self.write_half.is_closing() {
+                    continue;
+                }
                 self.write_half.start_send(&mut self.stream, next)?;
                 self.flush_sends = true;
             }
@@ -681,5 +686,42 @@ mod capacity_tests {
             stream.next_frame().await,
             Err(WebSocketError::FrameTooLarge)
         ));
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use crate::Options;
+    use futures_util::SinkExt;
+    use tokio::io::{duplex, AsyncReadExt};
+
+    #[tokio::test]
+    async fn close_reply_is_not_answered() {
+        let negotiated = Negotiation::new(None, &Options::default(), Role::Server).unwrap();
+        let (io, mut peer) = duplex(64);
+        // The client's reply to our Close: code 1000, masked with a zero key.
+        let mut stream = Streaming::new(
+            Role::Server,
+            io,
+            Bytes::from_static(b"\x88\x82\x00\x00\x00\x00\x03\xe8"),
+            &negotiated,
+        );
+
+        stream
+            .send(Frame::close(CloseCode::Normal, []))
+            .await
+            .unwrap();
+        let reply = stream.next_frame().await.unwrap();
+        assert_eq!(reply.opcode(), OpCode::Close);
+        assert!(matches!(
+            stream.next_frame().await,
+            Err(WebSocketError::ConnectionClosed)
+        ));
+        drop(stream);
+
+        let mut sent = Vec::new();
+        peer.read_to_end(&mut sent).await.unwrap();
+        assert_eq!(sent, b"\x88\x02\x03\xe8");
     }
 }

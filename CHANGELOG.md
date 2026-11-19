@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other options beside `Upgrade`, such as `keep-alive, Upgrade`, or is split
   across header lines, as RFC 6455 allows. It used to fail with
   `InvalidConnectionHeader`.
+- An endpoint that has sent a Close frame no longer sends a second one when the
+  peer's Close arrives. RFC 6455, Section 5.5.1 has only an endpoint that did
+  not send a Close frame answer one.
 
 ## [0.5.0] - 2026-10-22
 
