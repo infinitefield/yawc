@@ -437,7 +437,7 @@ where
                 let next = self.obligated_sends.pop_front().expect("obligated send");
                 // RFC 6455, Section 5.5.1: only an endpoint that has not sent a Close frame
                 // answers one.
-                if next.opcode == OpCode::Close && self.write_half.is_closing() {
+                if next.opcode == OpCode::Close && self.write_half.close_sent() {
                     continue;
                 }
                 self.write_half.start_send(&mut self.stream, next)?;
@@ -693,7 +693,7 @@ mod capacity_tests {
 mod close_tests {
     use super::*;
     use crate::Options;
-    use futures_util::SinkExt;
+    use futures_util::{FutureExt, SinkExt};
     use tokio::io::{duplex, AsyncReadExt};
 
     #[tokio::test]
@@ -723,5 +723,44 @@ mod close_tests {
         let mut sent = Vec::new();
         peer.read_to_end(&mut sent).await.unwrap();
         assert_eq!(sent, b"\x88\x02\x03\xe8");
+    }
+
+    #[tokio::test]
+    async fn close_is_answered_after_a_pending_close_is_dropped() {
+        let negotiated = Negotiation::new(None, &Options::default(), Role::Server).unwrap();
+        let (io, mut peer) = duplex(64);
+        // The client's Close: code 1000, masked with a zero key.
+        let mut stream = Streaming::new(
+            Role::Server,
+            io,
+            Bytes::from_static(b"\x88\x82\x00\x00\x00\x00\x03\xe8"),
+            &negotiated,
+        );
+
+        // Fill the write buffer past the backpressure boundary, so `close()` waits
+        // before writing its Close frame, then give up on it.
+        stream
+            .feed(Frame::binary(vec![0; 64 * 1024]))
+            .await
+            .unwrap();
+        assert!(stream.close().now_or_never().is_none());
+
+        let mut sent = Vec::new();
+        let ((), read) = tokio::join!(
+            async move {
+                let close = stream.next_frame().await.unwrap();
+                assert_eq!(close.opcode(), OpCode::Close);
+                assert!(matches!(
+                    stream.next_frame().await,
+                    Err(WebSocketError::ConnectionClosed)
+                ));
+            },
+            peer.read_to_end(&mut sent)
+        );
+        read.unwrap();
+
+        // The binary frame (10-byte header), then the reply to the client's Close.
+        assert_eq!(sent.len(), 10 + 64 * 1024 + 4);
+        assert_eq!(&sent[10 + 64 * 1024..], b"\x88\x02\x03\xe8");
     }
 }

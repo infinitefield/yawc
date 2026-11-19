@@ -363,9 +363,13 @@ impl WriteHalf {
         }
     }
 
-    /// Whether a `Close` frame has been sent, or is being sent, on this half.
-    pub(super) fn is_closing(&self) -> bool {
-        self.close_state.is_some()
+    /// Whether a `Close` frame has gone out on this half. A `Close` still waiting in
+    /// `CloseState::Sending` does not count: its `close()` may be dropped before it is sent.
+    pub(super) fn close_sent(&self) -> bool {
+        matches!(
+            self.close_state,
+            Some(CloseState::Flushing | CloseState::Closing | CloseState::Done)
+        )
     }
 
     /// Polls the readiness of the `WriteHalf` to send a new frame.
