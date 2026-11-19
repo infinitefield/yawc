@@ -428,7 +428,7 @@ where
         self.emit_close(Frame::close(code, err.to_string()));
     }
 
-    fn poll_flush_obligated(
+    pub(super) fn poll_flush_obligated(
         &mut self,
         kind: ContextKind,
         cx: &mut Context<'_>,

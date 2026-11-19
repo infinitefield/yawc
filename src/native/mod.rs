@@ -757,6 +757,8 @@ pub struct WebSocket<S> {
     check_utf8: bool,
     /// Handles fragmentation and defragmentation of frames
     fragment_layer: FragmentLayer,
+    /// A read error returned once the Close frame it queued has been written
+    read_error: Option<WebSocketError>,
 }
 
 impl WebSocket<MaybeTlsStream<TcpStream>> {
@@ -1223,6 +1225,17 @@ where
     /// Polls for the next frame in the WebSocket stream.
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
         loop {
+            if let Some(err) = self.read_error.take() {
+                if self
+                    .streaming
+                    .poll_flush_obligated(ContextKind::Read, cx)
+                    .is_pending()
+                {
+                    self.read_error = Some(err);
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Err(err));
+            }
             let frame = ready!(self
                 .streaming
                 .poll_next_frame_with_limit(cx, self.fragment_layer.remaining_read_capacity()))?;
@@ -1231,7 +1244,7 @@ where
                 Ok(None) => continue,
                 Err(err) => {
                     self.streaming.fail(&err);
-                    break Poll::Ready(Err(err));
+                    self.read_error = Some(err);
                 }
             }
         }
@@ -1328,6 +1341,7 @@ where
                 opts.max_read_buffer,
                 opts.fragmentation.as_ref().and_then(|f| f.timeout),
             ),
+            read_error: None,
         }
     }
 
@@ -2170,13 +2184,11 @@ mod tests {
             );
 
             assert!(server.next_frame().await.is_err(), "{input:?}");
-            let (closed, close) = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(server.next_frame(), client.next_frame())
-            })
-            .await
-            .expect("the server must send a Close frame");
-            assert!(matches!(closed, Err(WebSocketError::ConnectionClosed)));
-            let close = close.expect("Failed to receive close frame");
+            drop(server);
+            let close = client
+                .next_frame()
+                .await
+                .expect("Failed to receive close frame");
             assert_eq!(close.opcode(), OpCode::Close);
             assert_eq!(close.close_code(), Some(code), "{input:?}");
         }
