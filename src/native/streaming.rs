@@ -301,22 +301,7 @@ where
                 Poll::Ready(Err(WebSocketError::ConnectionClosed))
             }
             Poll::Ready(Err(err)) => {
-                let code = match err {
-                    WebSocketError::FrameTooLarge => CloseCode::Size,
-                    WebSocketError::InvalidUTF8 => CloseCode::Invalid,
-                    WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
-                    WebSocketError::ReservedBitsNotZero
-                    | WebSocketError::ControlFrameFragmented
-                    | WebSocketError::PingFrameTooLarge
-                    | WebSocketError::InvalidFragment
-                    | WebSocketError::InvalidCloseFrame
-                    | WebSocketError::InvalidCloseCode
-                    | WebSocketError::FragmentTimeout
-                    | WebSocketError::InvalidContinuationFrame
-                    | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
-                    _ => CloseCode::Error,
-                };
-                self.emit_close(Frame::close(code, err.to_string()));
+                self.fail(&err);
                 Poll::Ready(Err(err))
             }
             Poll::Pending => {
@@ -422,7 +407,32 @@ where
         self.read_half.is_closed = true;
     }
 
-    fn poll_flush_obligated(
+    /// Fails the connection after `err`: queues a Close frame with the matching code and
+    /// stops reading. No Close is queued if this side has already sent one.
+    pub(super) fn fail(&mut self, err: &WebSocketError) {
+        if self.write_half.close_sent() {
+            self.read_half.is_closed = true;
+            return;
+        }
+        let code = match err {
+            WebSocketError::FrameTooLarge => CloseCode::Size,
+            WebSocketError::InvalidUTF8 => CloseCode::Invalid,
+            WebSocketError::InvalidOpCode(_) => CloseCode::Unsupported,
+            WebSocketError::ReservedBitsNotZero
+            | WebSocketError::ControlFrameFragmented
+            | WebSocketError::PingFrameTooLarge
+            | WebSocketError::InvalidFragment
+            | WebSocketError::InvalidCloseFrame
+            | WebSocketError::InvalidCloseCode
+            | WebSocketError::FragmentTimeout
+            | WebSocketError::InvalidContinuationFrame
+            | WebSocketError::CompressionNotSupported => CloseCode::Protocol,
+            _ => CloseCode::Error,
+        };
+        self.emit_close(Frame::close(code, err.to_string()));
+    }
+
+    pub(super) fn poll_flush_obligated(
         &mut self,
         kind: ContextKind,
         cx: &mut Context<'_>,

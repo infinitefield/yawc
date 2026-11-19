@@ -757,6 +757,8 @@ pub struct WebSocket<S> {
     check_utf8: bool,
     /// Handles fragmentation and defragmentation of frames
     fragment_layer: FragmentLayer,
+    /// A read error returned once the Close frame it queued has been written
+    read_error: Option<WebSocketError>,
 }
 
 impl WebSocket<MaybeTlsStream<TcpStream>> {
@@ -1223,12 +1225,27 @@ where
     /// Polls for the next frame in the WebSocket stream.
     pub fn poll_next_frame(&mut self, cx: &mut Context<'_>) -> Poll<Result<Frame>> {
         loop {
+            if let Some(err) = self.read_error.take() {
+                if self
+                    .streaming
+                    .poll_flush_obligated(ContextKind::Read, cx)
+                    .is_pending()
+                {
+                    self.read_error = Some(err);
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Err(err));
+            }
             let frame = ready!(self
                 .streaming
                 .poll_next_frame_with_limit(cx, self.fragment_layer.remaining_read_capacity()))?;
-            match self.on_frame(frame)? {
-                Some(ok) => break Poll::Ready(Ok(ok)),
-                None => continue,
+            match self.on_frame(frame) {
+                Ok(Some(ok)) => break Poll::Ready(Ok(ok)),
+                Ok(None) => continue,
+                Err(err) => {
+                    self.streaming.fail(&err);
+                    self.read_error = Some(err);
+                }
             }
         }
     }
@@ -1324,6 +1341,7 @@ where
                 opts.max_read_buffer,
                 opts.fragmentation.as_ref().and_then(|f| f.timeout),
             ),
+            read_error: None,
         }
     }
 
@@ -2139,6 +2157,111 @@ mod tests {
         assert_eq!(frame.opcode(), OpCode::Text);
         assert!(frame.is_utf8());
         assert_eq!(std::str::from_utf8(frame.payload()).unwrap(), valid_utf8);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message_sends_close() {
+        for (input, code) in [
+            // A continuation frame with no message to continue.
+            (&b"\x80\x81\x00\x00\x00\x00a"[..], CloseCode::Protocol),
+            // A text message that is not UTF-8.
+            (&b"\x81\x81\x00\x00\x00\x00\xff"[..], CloseCode::Invalid),
+        ] {
+            let options = Options::default().with_utf8();
+            let negotiation = |role| Negotiation::new(None, &options, role).expect("negotiation");
+            let (client_stream, server_stream) = MockStream::pair(1024);
+            let mut server = WebSocket::new(
+                Role::Server,
+                server_stream,
+                Bytes::copy_from_slice(input),
+                negotiation(Role::Server),
+            );
+            let mut client = WebSocket::new(
+                Role::Client,
+                client_stream,
+                Bytes::new(),
+                negotiation(Role::Client),
+            );
+
+            assert!(server.next_frame().await.is_err(), "{input:?}");
+            drop(server);
+            let close = client
+                .next_frame()
+                .await
+                .expect("Failed to receive close frame");
+            assert_eq!(close.opcode(), OpCode::Close);
+            assert_eq!(close.close_code(), Some(code), "{input:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message_after_close_sends_no_second_close() {
+        use tokio::io::AsyncReadExt;
+
+        let options = Options::default();
+        let (mut client_stream, server_stream) = MockStream::pair(1024);
+        // A continuation frame with no message to continue.
+        let mut server = WebSocket::new(
+            Role::Server,
+            server_stream,
+            Bytes::from_static(b"\x80\x81\x00\x00\x00\x00a"),
+            Negotiation::new(None, &options, Role::Server).expect("negotiation"),
+        );
+
+        server
+            .send(Frame::close(CloseCode::Normal, []))
+            .await
+            .expect("Failed to send close frame");
+        assert!(server.next_frame().await.is_err());
+        drop(server);
+
+        let mut sent = Vec::new();
+        client_stream.read_to_end(&mut sent).await.unwrap();
+        assert_eq!(sent, b"\x88\x02\x03\xe8");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message_after_dropped_close_sends_close() {
+        use futures_util::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let options = Options::default();
+        let (mut client_stream, server_stream) = MockStream::pair(64);
+        // A continuation frame with no message to continue.
+        let mut server = WebSocket::new(
+            Role::Server,
+            server_stream,
+            Bytes::from_static(b"\x80\x81\x00\x00\x00\x00a"),
+            Negotiation::new(None, &options, Role::Server).expect("negotiation"),
+        );
+
+        // Fill the write buffer past the backpressure boundary, so `close()` waits
+        // before writing its Close frame, then give up on it.
+        server
+            .feed(Frame::binary(vec![0; 64 * 1024]))
+            .await
+            .expect("Failed to feed binary frame");
+        assert!(server.close().now_or_never().is_none());
+
+        let mut sent = Vec::new();
+        let ((), read) = tokio::join!(
+            async move {
+                assert!(server.next_frame().await.is_err());
+            },
+            client_stream.read_to_end(&mut sent)
+        );
+        read.unwrap();
+
+        // The binary frame (10-byte header), then a single Close frame with 1002.
+        let frame_len = 10 + 64 * 1024;
+        assert!(
+            sent.len() > frame_len,
+            "no Close frame: {} bytes",
+            sent.len()
+        );
+        let close = &sent[frame_len..];
+        assert_eq!(close[..2], [0x88, close.len() as u8 - 2]);
+        assert_eq!(close[2..4], [0x03, 0xea]);
     }
 
     #[tokio::test]
